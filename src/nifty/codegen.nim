@@ -30,6 +30,9 @@ proc cQuote(s: string): string =
     else: result.add ch
   result.add "\""
 
+proc mangleNum(n: int64): string =
+  if n < 0: "m" & $(-n) else: $n
+
 proc mangle(t: Typ): string =
   case t.kind
   of tyInt: "i"
@@ -37,6 +40,7 @@ proc mangle(t: Typ): string =
   of tyArray: "a" & $t.len & "_" & mangle(t.elem)
   of tySeq: "q" & $t.len & "_" & mangle(t.elem)
   of tyStr: "s" & $t.len
+  of tySet: "t" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi)
   of tyObject: "o" & t.name
   else: "x"
 
@@ -44,7 +48,7 @@ proc cBase(t: Typ): string =
   case t.kind
   of tyBool: "bool"
   of tyObject: "S_" & t.name
-  of tySeq, tyStr: "NS_" & mangle(t)
+  of tySeq, tyStr, tySet: "NS_" & mangle(t)
   else: "int64_t"
 
 proc cDecl(name: string, t: Typ): string =
@@ -109,7 +113,7 @@ proc genExpr(g: var Gen, e: Expr): string =
         parts.add g.genExpr(a)
     "f_" & e.sval & "(" & parts.join(", ") & ")"
   of ekField:
-    if e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr}:
+    if e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr, tySet}:
       g.genExpr(e.kids[0]) & ".m_len"
     else:
       g.genExpr(e.kids[0]) & ".m_" & e.sval
@@ -151,7 +155,7 @@ proc genStmt(g: var Gen, s: Stmt) =
   of skVar, skLet:
     let init =
       if s.init != nil: g.genExpr(s.init)
-      elif s.typ.kind in {tyArray, tyObject, tySeq, tyStr}: "{0}"
+      elif s.typ.kind in {tyArray, tyObject, tySeq, tyStr, tySet}: "{0}"
       elif s.typ.kind == tyBool: "false"
       else: "0"
     g.put cDecl("v_" & s.name, s.typ) & " = " & init & ";"
@@ -273,10 +277,21 @@ proc genStmt(g: var Gen, s: Stmt) =
     g.put "{"
     inc g.ind
     g.put cBase(s.value.typ) & " *" & it & " = &" & g.genExpr(s.value) & ";"
-    g.put "const int64_t " & nn & " = " & it & "->m_len;"
-    g.put "for (int64_t " & ix & " = 0; " & ix & " < " & nn & "; ++" & ix & ") {"
-    inc g.ind
-    g.put cBase(s.typ) & " v_" & s.name & " = " & it & "->m_data[" & ix & "];"
+    if s.value.typ.kind == tySet:
+      let lo = $s.value.typ.elem.rlo & "LL"
+      let hi = $s.value.typ.elem.rhi & "LL"
+      g.put "for (int64_t " & ix & " = " & lo & "; " & ix & " <= " & hi &
+        "; ++" & ix & ") {"
+      inc g.ind
+      g.put "if (!" & cBase(s.value.typ) & "_contains(" & it & ", " & ix &
+        ")) continue;"
+      g.put cBase(s.typ) & " v_" & s.name & " = " & ix & ";"
+    else:
+      g.put "const int64_t " & nn & " = " & it & "->m_len;"
+      g.put "for (int64_t " & ix & " = 0; " & ix & " < " & nn & "; ++" & ix &
+        ") {"
+      inc g.ind
+      g.put cBase(s.typ) & " v_" & s.name & " = " & it & "->m_data[" & ix & "];"
     for st in s.body:
       g.genStmt(st)
     dec g.ind
@@ -352,6 +367,34 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       " *s, const uint8_t *d, int64_t k) { " &
       "memcpy(&s->m_data[s->m_len], d, (size_t)k); s->m_len += k; }"
     g.put "static void " & n & "_clear(" & n & " *s) { s->m_len = 0; }"
+  of tySet:
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    let n = "NS_" & key
+    let lo = $t.elem.rlo & "LL"
+    let hi = $t.elem.rhi & "LL"
+    let words = (t.setSize + 63) div 64
+    g.put ""
+    g.put "typedef struct {"
+    g.put "  int64_t m_len;"
+    g.put "  uint64_t m_bits[" & $words & "];"
+    g.put "} " & n & ";"
+    g.put "static void " & n & "_incl(" & n & " *s, int64_t v) { " &
+      "uint64_t *w = &s->m_bits[(v - " & lo & ") >> 6]; " &
+      "uint64_t m = 1ULL << ((v - " & lo & ") & 63); " &
+      "if (!(*w & m)) { *w |= m; s->m_len += 1; } }"
+    g.put "static void " & n & "_excl(" & n & " *s, int64_t v) { " &
+      "uint64_t *w = &s->m_bits[(v - " & lo & ") >> 6]; " &
+      "uint64_t m = 1ULL << ((v - " & lo & ") & 63); " &
+      "if (*w & m) { *w &= ~m; s->m_len -= 1; } }"
+    g.put "static bool " & n & "_contains(" & n & " *s, int64_t v) { " &
+      "if (v < " & lo & " || v > " & hi & ") return false; " &
+      "return (s->m_bits[(v - " & lo & ") >> 6] >> ((v - " & lo &
+      ") & 63)) & 1; }"
+    g.put "static void " & n & "_clear(" & n &
+      " *s) { memset(s, 0, sizeof(*s)); }"
   else:
     discard
 

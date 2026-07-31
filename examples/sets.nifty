@@ -1,0 +1,31 @@
+# set[T] over a range type needs no capacity: the range IS the capacity.
+# set[0 .. 63] is a single 64-bit word. Every operation is total - any
+# value of the element type is in-domain and there is always room - so
+# sets have no proof obligations at all. contains() of an out-of-range
+# value is simply false.
+
+var seen: set[0 .. 63]
+
+thread main() =
+  seen.incl(3)
+  seen.incl(10)
+  seen.incl(10)
+  echo seen.len
+  echo seen.contains(3)
+  echo seen.contains(4)
+  seen.excl(3)
+  echo seen.len
+  for x in seen:
+    echo x
+
+  # Sieve of Eratosthenes, proofs and all: i*k is clamped into range
+  # by the guard, and iteration order over a set is ascending.
+  var composite: set[2 .. 50]
+  for i in 2 .. 7:
+    for k in 2 .. 25:
+      let m = i * k
+      if m <= 50:
+        composite.incl(m)
+  for n in 2 .. 50:
+    if not composite.contains(n):
+      echo n

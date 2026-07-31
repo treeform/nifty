@@ -48,6 +48,9 @@ proc typeSize(t: Typ): int64 =
   of tyStr:
     # int64 length + one byte per capacity, padded to 8.
     (sadd(8, t.len) + 7) div 8 * 8
+  of tySet:
+    # int64 cardinality + one bit per possible value, in 64-bit words.
+    sadd(8, (t.setSize + 63) div 64 * 8)
   of tyObject:
     var off = 0'i64
     for f in t.fields:

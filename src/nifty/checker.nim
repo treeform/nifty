@@ -219,9 +219,13 @@ proc declFactByName(c: Ctx, name: string): Fact =
         let t = c.scopes[i][root].typ
         if t.kind in {tySeq, tyStr}:
           return Fact(lo: 0, hi: t.len)
+        if t.kind == tySet:
+          return Fact(lo: 0, hi: t.setSize)
         return fullFact()
     if root in c.globals and c.globals[root].kind in {tySeq, tyStr}:
       return Fact(lo: 0, hi: c.globals[root].len)
+    if root in c.globals and c.globals[root].kind == tySet:
+      return Fact(lo: 0, hi: c.globals[root].setSize)
     return fullFact()
   for i in countdown(c.scopes.len - 1, 0):
     if name in c.scopes[i]:
@@ -266,6 +270,8 @@ proc tryConstEval(c: Ctx, e: Expr): tuple[known: bool, val: int64] =
   else:
     (false, 0'i64)
 
+const mutMethods = ["add", "push", "pop", "clear", "incl", "excl"]
+
 proc factEligibleIdent(c: Ctx, e: Expr): bool =
   ## Can flow facts attach to this identifier here? Locals and non-var
   ## parameters always qualify. A global qualifies when it is thread-owned
@@ -300,7 +306,7 @@ proc factName(c: Ctx, e: Expr): string =
 proc lenPathName(c: Ctx, e: Expr): string =
   ## "s.len" when e reads the length of a factable seq/string variable.
   if e.kind == ekField and e.sval == "len" and e.kids[0].kind == ekIdent and
-      e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr} and
+      e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr, tySet} and
       c.factEligibleIdent(e.kids[0]):
     e.kids[0].sval & ".len"
   else:
@@ -407,7 +413,7 @@ proc joinFacts(c: Ctx, tabs: seq[Table[string, Fact]]): Table[string, Fact] =
 proc collectAssignedExpr(c: Ctx, e: Expr, s: var HashSet[string]) =
   if e.isNil:
     return
-  if e.kind == ekMethod and e.sval in ["add", "push", "pop", "clear"]:
+  if e.kind == ekMethod and e.sval in mutMethods:
     let root = e.kids[0].rootIdent
     if root.kind == ekIdent:
       s.incl root.sval
@@ -951,10 +957,10 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     e.setFact typFact(e.typ)
   of ekField:
     let base = c.expectVal(e.kids[0])
-    if base.kind in {tySeq, tyStr}:
+    if base.kind in {tySeq, tyStr, tySet}:
       if e.sval != "len":
         err(e.line, $base & " has no property '" & e.sval & "' (only .len)")
-      e.typ = intType(0, base.len)
+      e.typ = intType(0, (if base.kind == tySet: base.setSize else: base.len))
       let key = c.lenPathName(e)
       if key != "":
         e.setFact c.curFact(key)
@@ -973,7 +979,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
   of ekMethod:
     let bt = c.expectVal(e.kids[0])
     let nArgs = e.kids.len - 1
-    if e.sval in ["add", "push", "pop", "clear"]:
+    if e.sval in mutMethods:
       if e.kids[0].kind != ekIdent:
         err(e.line, "mutate a seq/string through a plain variable name")
       if not e.kids[0].mut:
@@ -985,7 +991,10 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     var key = ""
     if e.kids[0].kind == ekIdent and c.factEligibleIdent(e.kids[0]):
       key = e.kids[0].sval & ".len"
-    var lf = Fact(lo: 0, hi: (if bt.kind in {tySeq, tyStr}: bt.len else: 0))
+    var lf = Fact(lo: 0, hi: (
+      if bt.kind in {tySeq, tyStr}: bt.len
+      elif bt.kind == tySet: bt.setSize
+      else: 0))
     if key != "":
       lf = c.curFact(key)
     case bt.kind
@@ -1071,8 +1080,42 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         e.typ = nil
       else:
         err(e.line, $bt & " has no method '" & e.sval & "'")
+    of tySet:
+      case e.sval
+      of "incl", "excl":
+        if nArgs != 1:
+          err(e.line, e.sval & " takes one argument")
+        if c.expectVal(e.kids[1]).kind != tyInt:
+          err(e.kids[1].line, e.sval & " needs an int value")
+        if not exprFact(e.kids[1]).fits(bt.elem):
+          err(e.kids[1].line, "cannot prove value (" &
+            rangeStr(exprFact(e.kids[1])) & ") is inside " & $bt &
+            "; guard or clamp first")
+        if key != "":
+          if e.sval == "incl":
+            c.facts[key] = Fact(lo: lf.lo, hi: min(lf.hi + 1, bt.setSize))
+          else:
+            c.facts[key] = Fact(lo: max(lf.lo - 1, 0'i64), hi: lf.hi)
+        e.typ = nil
+      of "contains":
+        if nArgs != 1:
+          err(e.line, "contains takes one argument")
+        if e.kids[0].kind notin {ekIdent, ekField, ekIndex}:
+          err(e.line, "put the set in a variable first")
+        if c.expectVal(e.kids[1]).kind != tyInt:
+          err(e.kids[1].line, "contains needs an int value")
+        # Total: out-of-range values are simply not in the set.
+        e.typ = Typ(kind: tyBool)
+      of "clear":
+        if nArgs != 0:
+          err(e.line, "clear takes no arguments")
+        if key != "":
+          c.facts[key] = Fact(lo: 0, hi: 0)
+        e.typ = nil
+      else:
+        err(e.line, $bt & " has no method '" & e.sval & "'")
     else:
-      err(e.line, "'." & e.sval & "()' needs a seq or string, got " & $bt)
+      err(e.line, "'." & e.sval & "()' needs a seq, string, or set, got " & $bt)
   of ekCall:
     let name = e.sval
     if name notin c.allRoutines:
@@ -1322,8 +1365,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     c.facts = dropped
   of skForEach:
     let t = c.expectVal(s.value)
-    if t.kind notin {tySeq, tyStr}:
-      err(s.line, "for-in needs a seq or string to iterate, got " & $t)
+    if t.kind notin {tySeq, tyStr, tySet}:
+      err(s.line, "for-in needs a seq, string, or set to iterate, got " & $t)
     let root = s.value.rootIdent
     if root.kind != ekIdent:
       err(s.line, "iterate a seq/string through a variable path")
@@ -1333,8 +1376,11 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     c.collectAssigned(s.body, assigned)
     if root.sval in assigned:
       err(s.line, "cannot modify '" & root.sval & "' while iterating it")
-    s.tripBound = t.len
-    let elemT = if t.kind == tySeq: t.elem else: intType(0, 255)
+    s.tripBound = if t.kind == tySet: t.setSize else: t.len
+    let elemT =
+      if t.kind == tySeq: t.elem
+      elif t.kind == tySet: t.elem
+      else: intType(0, 255)
     s.typ = elemT # recorded for codegen
     # Accumulators widen here too: the element variable is the loop
     # variable, bounded by the element type.
@@ -1507,7 +1553,7 @@ proc check*(m: Module) =
       return
     if e.kind == ekIdent and isPlainGlobal(e.sval):
       note(e.sval, held)
-    if e.kind == ekMethod and e.sval in ["add", "push", "pop", "clear"]:
+    if e.kind == ekMethod and e.sval in mutMethods:
       let root = e.kids[0].rootIdent
       if root.kind == ekIdent and isPlainGlobal(root.sval):
         note(root.sval, held)

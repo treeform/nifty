@@ -1,0 +1,7 @@
+var flags: set[0 .. 63]
+
+proc mark(v: int) =
+  flags.incl(v)
+
+thread main() =
+  mark(5)

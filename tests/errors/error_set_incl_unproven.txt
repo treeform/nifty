@@ -1,0 +1,1 @@
+is inside set[0 .. 63]

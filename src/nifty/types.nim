@@ -2,14 +2,14 @@
 
 type
   TypKind* = enum
-    tyInt, tyBool, tyString, tyLock, tyArray, tyObject, tySeq, tyStr
+    tyInt, tyBool, tyString, tyLock, tyArray, tyObject, tySeq, tyStr, tySet
   Field* = object
     name*: string
     typ*: Typ
   Typ* = ref object
     kind*: TypKind
     len*: int64          # tyArray/tySeq/tyStr: capacity
-    elem*: Typ           # tyArray/tySeq
+    elem*: Typ           # tyArray/tySeq; tySet: the range element type
     name*: string        # tyObject
     fields*: seq[Field]  # tyObject
     rlo*, rhi*: int64    # tyInt: declared range; full range = plain int
@@ -99,6 +99,10 @@ proc intType*(lo = low(int64), hi = high(int64)): Typ =
 proc isFullRange*(t: Typ): bool =
   t.rlo == low(int64) and t.rhi == high(int64)
 
+proc setSize*(t: Typ): int64 =
+  ## Number of possible values of a set's element range.
+  t.elem.rhi - t.elem.rlo + 1
+
 proc typEq*(a, b: Typ): bool =
   if a.isNil or b.isNil:
     return a.isNil and b.isNil
@@ -108,6 +112,8 @@ proc typEq*(a, b: Typ): bool =
     return a.len == b.len and typEq(a.elem, b.elem)
   if a.kind == tyStr:
     return a.len == b.len
+  if a.kind == tySet:
+    return a.elem.rlo == b.elem.rlo and a.elem.rhi == b.elem.rhi
   if a.kind == tyObject:
     return a.name == b.name
   true
@@ -124,4 +130,5 @@ proc `$`*(t: Typ): string =
   of tyArray: "array[" & $t.len & ", " & $t.elem & "]"
   of tySeq: "seq[" & $t.len & ", " & $t.elem & "]"
   of tyStr: "string[" & $t.len & "]"
+  of tySet: "set[" & $t.elem & "]"
   of tyObject: t.name

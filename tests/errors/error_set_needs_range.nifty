@@ -1,0 +1,4 @@
+var s: set[int]
+
+thread main() =
+  echo 1

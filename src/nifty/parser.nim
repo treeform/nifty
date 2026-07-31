@@ -52,7 +52,7 @@ proc evalConst(p: Parser, e: Expr): int64
 proc parseType(p: var Parser): Typ =
   let t = p.peek
   if t.kind == tkIdent and
-      (t.text in ["int", "bool", "Lock", "array", "seq", "string"] or
+      (t.text in ["int", "bool", "Lock", "array", "seq", "string", "set"] or
        t.text in p.types):
     discard p.next
     case t.text
@@ -82,6 +82,16 @@ proc parseType(p: var Parser): Typ =
         err(lt.line, "a seq element cannot be a plain array; wrap it in an object")
       p.expectOp("]")
       Typ(kind: (if t.text == "seq": tySeq else: tyArray), len: n, elem: e)
+    of "set":
+      p.expectOp("[")
+      let e = p.parseType()
+      if e.kind != tyInt or e.isFullRange:
+        err(t.line, "set needs a range element type, e.g. set[0 .. 63]")
+      if e.rlo < -1_000_000_000 or e.rhi > 1_000_000_000 or
+          e.rhi - e.rlo + 1 > 16_777_216:
+        err(t.line, "set range is too large (max 16777216 values)")
+      p.expectOp("]")
+      Typ(kind: tySet, elem: e)
     of "string":
       p.expectOp("[")
       let lt = p.next

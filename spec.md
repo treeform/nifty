@@ -120,6 +120,15 @@ v0 types:
   with literal syntax: `var s: string[40] = "hello"` (the literal must
   fit, checked at compile time), `s.add(", ")`, `s.add(other)` (append,
   with a capacity proof), `echo s`, `s[i]`, `for b in s:`.
+- `set[T]` — a set over a *range type*, which needs no capacity
+  parameter: the range is the capacity. `set[0 .. 63]` is one 64-bit
+  word; `set[0 .. 255]` is 32 bytes (plus a cardinality field). Every
+  operation is total — any value of the element type is in-domain and
+  there is always room — so sets carry no proof obligations at all:
+  `s.incl(x)` / `s.excl(x)` (the value must prove it fits the range,
+  like any store), `s.contains(x)` (accepts any int; out-of-range is
+  simply false), `s.len` (cardinality), `s.clear()`, and `for x in s:`
+  (ascending order, `x` typed as the element range).
 - `Lock` — a mutex. Only allowed as a global; only usable via `with`.
 - `object` — a static struct, exactly like C:
 
@@ -382,10 +391,9 @@ protocol), locks, the three static proofs (division, indexing, overflow)
 via interval analysis with zero runtime checks in the generated C, `echo`,
 `discard`, C output, generated `main` with thread spawn/join.
 
-Not yet implemented: `index` types, wildcard generics, `map`/`set`/`queue`
+Not yet implemented: `index` types, wildcard generics, `map`/`queue`
 builtins (same recipe as seq: fixed storage + range-typed state + op
-contracts; `set[T]` over a range type needs no capacity at all — the range
-is the capacity), tail-call recursion, the per-thread error flag,
+contracts), tail-call recursion, the per-thread error flag,
 deterministic floats and fixed-point (`fixed[lo .. hi, step]` — a scaled
 ranged int, so the existing proofs apply directly), int width from ranges
 (seq elements are still 8 bytes each; string data is already 1 byte).
