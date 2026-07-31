@@ -92,6 +92,12 @@ proc genExpr(g: var Gen, e: Expr): string =
   of ekField:
     g.genExpr(e.kids[0]) & ".m_" & e.sval
 
+proc genCond(g: var Gen, e: Expr): string =
+  ## A condition wrapped in exactly one set of parentheses.
+  let s = g.genExpr(e)
+  if e.kind in {ekBin, ekNot, ekNeg}: s
+  else: "(" & s & ")"
+
 proc genStmt(g: var Gen, s: Stmt)
 
 proc genBlock(g: var Gen, body: seq[Stmt]) =
@@ -113,14 +119,14 @@ proc genStmt(g: var Gen, s: Stmt) =
     g.put g.genExpr(s.lhs) & " = " & g.genExpr(s.rhs) & ";"
   of skIf:
     for i, br in s.elifs:
-      g.put (if i == 0: "if (" else: "} else if (") & g.genExpr(br.cond) & ") {"
+      g.put (if i == 0: "if " else: "} else if ") & g.genCond(br.cond) & " {"
       g.genBlock(br.body)
     if s.elseBody.len > 0:
       g.put "} else {"
       g.genBlock(s.elseBody)
     g.put "}"
   of skWhile:
-    g.put "while (" & g.genExpr(s.cond) & ") {"
+    g.put "while " & g.genCond(s.cond) & " {"
     g.genBlock(s.body)
     g.put "}"
   of skFor:

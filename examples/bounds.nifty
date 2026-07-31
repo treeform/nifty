@@ -1,0 +1,40 @@
+# Array indexing is proven in bounds at compile time. There is no
+# runtime bounds check: a[i] compiles to bare C indexing.
+#
+# These do not compile:
+#   scores[10] = 1     error: index 10 is always out of bounds for an
+#                             array of length 10
+#   proc put(i: int) =
+#     scores[i] = 1    error: cannot prove index is inside 0 ..< 10
+#                             (index is int); test it first
+
+const Size = 10
+
+var scores: array[Size, 0 .. 100]
+
+# A ranged global is provable everywhere - even across threads - because
+# every write anywhere must prove it stays inside 0 ..< Size.
+var cursor: 0 ..< Size
+
+# for loops prove for free: i is 0 .. Size-1 by construction.
+proc fillAll() =
+  for i in 0 ..< Size:
+    scores[i] = i * 10
+
+# A computed index needs a test the prover can see.
+proc poke(i: int, value: 0 .. 100) =
+  if i >= 0 and i < Size:
+    scores[i] = value
+
+proc advance() =
+  cursor = (cursor + 1) % Size
+
+thread main() =
+  fillAll()
+  echo scores[0], " ", scores[9]
+  poke(3, 33)
+  poke(99, 77)
+  echo scores[3]
+  for i in 0 ..< 4:
+    advance()
+  echo scores[cursor]
