@@ -23,8 +23,9 @@ static bound on memory, stack depth, and worst-case iterations per thread.
   mutual recursion when every call in the cycle is a provable tail call,
   compiled to loops.)
 - **No exceptions.** Errors that the language itself detects (index out of
-  bounds, division by zero) trap with a message in v0. Planned: a per-thread
-  error flag / lightweight `Result` values. There is no unwinding, ever.
+  bounds) trap with a message in v0. Planned: a per-thread error flag /
+  lightweight `Result` values. There is no unwinding, ever. Division by
+  zero cannot happen at all — see Static proofs.
 - **No pointers.** `var` parameters cover mutable arguments. Long-lived
   references are array indices. (Planned: `index arr` types — indices bound
   to a specific global array, born in-range and never dangling, so
@@ -163,6 +164,49 @@ Planned types:
 - `discard expr` — explicitly drop a value. Silently ignoring a returned
   value is an error.
 
+## Static proofs
+
+Nifty's long-term direction is to prove safety properties at compile time
+instead of checking them at run time. The first proof is implemented:
+
+### Division is proven safe
+
+Every `/` and `%` must have a divisor the compiler can prove nonzero:
+
+1. a nonzero constant expression: `x / 4`, `i % QueueSize`, or
+2. a local variable (or non-var parameter) with a dominating test:
+
+   ```nim
+   if b != 0:
+     echo x / b
+   ```
+
+Nonzero facts flow through the program:
+
+- `if b != 0:`, `b > 0`, `b < 0`, `b >= 1`, `b == 5`, ... prove `b` in the
+  then-branch; `and` conditions prove both sides.
+- The else branch of `if b == 0:` proves `b`.
+- Guard style works: `if b == 0: return` proves `b` for everything after.
+- `while b != 0:` proves `b` inside the loop body (re-tested every entry).
+- `var b = 4` (any nonzero constant initializer or assignment) proves `b`.
+- Assigning anything unprovable, passing `b` as a `var` argument, using it
+  as a `with` target, or entering a loop whose body modifies `b` clears
+  the fact.
+
+Globals never carry the fact — another thread could zero a global between
+the test and the division. Snapshot into a local first:
+
+```nim
+let d = g
+if d != 0:
+  echo x / d
+```
+
+The payoff: because every division is proven, the generated C contains no
+runtime division checks — `/` and `%` compile to bare C operators and can
+never trap. This is the model for the planned range and index proofs: the
+check moves from run time to compile time, then disappears from the binary.
+
 ## Compilation model
 
 Nifty compiles one module to one portable C file (C99 + pthreads):
@@ -177,7 +221,7 @@ Nifty compiles one module to one portable C file (C99 + pthreads):
 | `with` on a `Lock`     | `pthread_mutex_t` lock–unlock pair         |
 | `with` on other types  | `start(x)` / `end(x)` calls around the block |
 | `a[i]`                 | index via bounds-check helper              |
-| `/`, `%`               | zero-check helpers                         |
+| `/`, `%`               | bare C `/` and `%` (proven safe, no checks) |
 | `var` param (scalar)   | pointer parameter                          |
 | array param            | decayed pointer (read-only unless `var`)   |
 
@@ -217,8 +261,8 @@ Implemented: everything above not marked *planned* — `const`/`var` globals,
 `object` types with declare-before-use,
 `func`/`proc`/`thread` with the full rights table, no-recursion via
 declare-before-use, `if`/`while`/`for`/`loop`/`with` (Lock and start/end
-protocol), locks,
-bounds-checked arrays, zero-checked `/` `%`, `echo`, `discard`, C output,
+protocol), locks, bounds-checked arrays, the division proof (compile-time
+nonzero divisors, no runtime division checks), `echo`, `discard`, C output,
 generated `main` with thread spawn/join.
 
 Not yet implemented: range types, `index` types, fixed strings, wildcard

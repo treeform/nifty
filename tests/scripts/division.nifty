@@ -1,0 +1,36 @@
+# Division is proven safe at compile time: every divisor is either a
+# nonzero constant or a local with a dominating nonzero test.
+
+const K = 4
+
+var g: int
+
+func safeDiv(a, b: int): int =
+  if b == 0:
+    return 0
+  return a / b
+
+thread main() =
+  echo 100 / K
+  var b = 4
+  echo 100 / b
+  b = 0
+  if b != 0:
+    echo 1 / b
+  else:
+    echo -1
+  echo safeDiv(100, 0)
+  echo safeDiv(100, 5)
+  g = 7
+  let snap = g
+  if snap != 0:
+    echo 700 / snap
+  var d = 8
+  while d != 0:
+    echo 64 / d
+    d = d / 2
+  var m = 3
+  if m == 0:
+    echo -3
+  else:
+    echo 30 / m

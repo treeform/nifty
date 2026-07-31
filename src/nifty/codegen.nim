@@ -76,8 +76,7 @@ proc genExpr(g: var Gen, e: Expr): string =
     let a = g.genExpr(e.kids[0])
     let b = g.genExpr(e.kids[1])
     case e.sval
-    of "/": "ni_div(" & a & ", " & b & ", " & g.where(e.line) & ")"
-    of "%": "ni_mod(" & a & ", " & b & ", " & g.where(e.line) & ")"
+    # / and % are proven safe by the checker; no runtime check needed.
     of "and": "(" & a & " && " & b & ")"
     of "or": "(" & a & " || " & b & ")"
     else: "(" & a & " " & e.sval & " " & b & ")"
@@ -207,21 +206,6 @@ static int64_t ni_idx(int64_t i, int64_t len, const char *where) {
   return i;
 }
 
-static int64_t ni_div(int64_t a, int64_t b, const char *where) {
-  if (b == 0) {
-    fprintf(stderr, "nifty: division by zero at %s\n", where);
-    exit(1);
-  }
-  return a / b;
-}
-
-static int64_t ni_mod(int64_t a, int64_t b, const char *where) {
-  if (b == 0) {
-    fprintf(stderr, "nifty: modulo by zero at %s\n", where);
-    exit(1);
-  }
-  return a % b;
-}
 """
 
 proc generate*(m: Module, src: string): string =
