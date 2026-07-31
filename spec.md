@@ -289,6 +289,23 @@ forward prototypes — definitions appear in call order.
 The host compiles; the target only executes. There is no runtime beyond
 libc + pthreads and a few line-tagged trap helpers.
 
+## The report
+
+`nifty report file.nifty` prints the program's static resource footprint —
+numbers most toolchains can only measure or guess, derived here from
+properties the checker proves:
+
+- **globals** — the whole heap, byte-exact per global (C layout, with
+  struct padding), plus the lock count.
+- **stack** — worst case per thread: no recursion means the call graph is
+  a DAG, so the deepest chain of frames is exact; frame bytes are a
+  language-level estimate (locals + params + 16 bytes overhead). The
+  chain itself is printed (`consumer -> tryPop`).
+- **ops** — worst-case abstract operation count per thread: every loop
+  has a proven trip bound, so each thread's outer `loop` pass (or its
+  whole body) has a finite worst case. Multiply by a target's
+  cycles-per-op to approximate WCET; feed it to the watchdog.
+
 ## Grammar (v0, informal)
 
 ```
@@ -325,8 +342,7 @@ via interval analysis with zero runtime checks in the generated C, `echo`,
 `discard`, C output, generated `main` with thread spawn/join.
 
 Not yet implemented: `index` types, fixed strings, wildcard generics,
-tail-call recursion, the WCET/stack/RAM report (`nifty report` — all three
-are now exact static numbers), the per-thread error flag, loop-induction
+tail-call recursion, the per-thread error flag, loop-induction
 bounds for accumulators (today an accumulator needs a guard like
 `if sum <= 900:` because facts drop at loop entry; induction would prove
 `sum + i` over a counted loop directly).

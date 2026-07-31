@@ -1,0 +1,11 @@
+nifty report: particles.nifty
+
+globals:
+  particles: 120 bytes (array[3, Particle])
+  total: 120 bytes
+
+stack, worst case per thread (estimate: locals + params + 16 bytes/frame):
+  main: 80 bytes (main -> step)
+
+worst-case abstract ops per thread:
+  main: 804 ops total

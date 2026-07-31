@@ -452,14 +452,16 @@ proc condZeroExit(c: Ctx, cond: Expr, v: string): bool =
   of "<=": f.k <= -1
   else: false
 
-proc whileIsBounded(c: Ctx, s: Stmt): bool =
-  ## A while loop is bounded if some finite-ranged local makes strict
-  ## progress on every iteration: every assignment to it is v = v + k or
-  ## v = v - k (same direction, const k >= 1), at least one of them at the
-  ## top level of the body — or v = v / k (|k| >= 2) with a condition
-  ## that exits at zero (halving stalls at 0).
+proc whileBound(c: Ctx, s: Stmt): int64 =
+  ## The proven worst-case iteration count of a while loop, or 0 if none.
+  ## A loop is bounded if some finite-ranged local makes strict progress
+  ## on every iteration: every assignment to it is v = v + k or v = v - k
+  ## (same direction, const k >= 1), at least one of them at the top
+  ## level of the body — or v = v / k (|k| >= 2) with a condition that
+  ## exits at zero (halving stalls at 0).
   type Cand = object
     dir: int # +1 inc, -1 dec, 2 halving, 0 none
+    minStep: int64
     top: bool
     bad: bool
   var cands: Table[string, Cand]
@@ -469,17 +471,24 @@ proc whileIsBounded(c: Ctx, s: Stmt): bool =
       let v = st.lhs.sval
       var cd = cands.getOrDefault(v, Cand())
       var thisDir = 0
+      var step = 1'i64
       let r = st.rhs
       if r.kind == ekBin and r.kids[0].kind == ekIdent and r.kids[0].sval == v:
         let kc = c.tryConstEval(r.kids[1])
         if kc.known:
-          if r.sval == "+" and kc.val >= 1: thisDir = 1
-          elif r.sval == "-" and kc.val >= 1: thisDir = -1
-          elif r.sval == "/" and (kc.val >= 2 or kc.val <= -2): thisDir = 2
+          if r.sval == "+" and kc.val >= 1:
+            thisDir = 1
+            step = kc.val
+          elif r.sval == "-" and kc.val >= 1:
+            thisDir = -1
+            step = kc.val
+          elif r.sval == "/" and (kc.val >= 2 or kc.val <= -2):
+            thisDir = 2
       if thisDir == 0 or (cd.dir != 0 and cd.dir != thisDir):
         cd.bad = true
       else:
         cd.dir = thisDir
+        cd.minStep = if cd.minStep == 0: step else: min(cd.minStep, step)
         if top:
           cd.top = true
       cands[v] = cd
@@ -508,6 +517,7 @@ proc whileIsBounded(c: Ctx, s: Stmt): bool =
   for st in s.body:
     classify(st, true)
 
+  result = 0
   for v, cd in cands:
     if cd.bad or not cd.top or cd.dir == 0:
       continue
@@ -519,14 +529,16 @@ proc whileIsBounded(c: Ctx, s: Stmt): bool =
         break
     if t == nil or t.kind != tyInt:
       continue
+    var bound = 0'i64
     case cd.dir
-    of 1:
-      if t.rhi < IntHigh: return true
-    of -1:
-      if t.rlo > IntLow: return true
+    of 1, -1:
+      if t.rhi < IntHigh and t.rlo > IntLow:
+        bound = satSub(t.rhi, t.rlo).v div cd.minStep + 1
     else:
-      if c.condZeroExit(s.cond, v): return true
-  false
+      if c.condZeroExit(s.cond, v):
+        bound = 64 # |v| at least halves every pass; int64 is 64 bits
+    if bound > 0 and (result == 0 or bound < result):
+      result = bound
 
 # --- range compatibility --------------------------------------------------
 
@@ -868,10 +880,14 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     # The termination proof: strict induction progress, or an explicit
     # max N (which bounds the loop by construction - it also stops after
     # N iterations).
-    if s.maxTrips == 0 and not c.whileIsBounded(s):
+    var bound = c.whileBound(s)
+    if s.maxTrips > 0:
+      bound = if bound > 0: min(bound, s.maxTrips) else: s.maxTrips
+    if bound == 0:
       err(s.line, "cannot prove this while loop terminates: no finite-" &
         "ranged variable makes strict progress every iteration; add " &
         "'max N' to bound it (the loop then also stops after N iterations)")
+    s.tripBound = bound
     c.facts = dropped
     # After the loop the condition is false - but only if the loop cannot
     # leave any other way (break, or the max cap).
@@ -891,6 +907,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           "int64.max; use ..< or a ranged bound")
     else:
       iHi = satSub(iHi, 1).v
+    s.tripBound = max(0'i64, satAdd(satSub(iHi, lof.lo).v, 1).v)
     c.dropAssigned(s.body)
     let dropped = c.facts
     c.scopes.add initTable[string, Sym]()

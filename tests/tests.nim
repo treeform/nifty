@@ -7,6 +7,7 @@
 ## - syntax/   : programs the lexer/parser must reject; same .txt rule
 ## - runtime/  : programs that compile but must trap when run; the .txt
 ##               text must appear in the output and the exit code be nonzero
+## - reports/  : programs whose `nifty report` output must equal the .txt
 
 import
   std/[algorithm, os, osproc, strutils],
@@ -94,6 +95,36 @@ proc runTestsInDir(dir, label: string, mode: TestMode, workDir: string) =
           echo "    Actual: " & firstLine(actual) & " (exit " & $code & ")"
           testsFailed += 1
 
+proc runReportTests(dir, label: string) =
+  if not dirExists(dir):
+    return
+  var paths: seq[string]
+  for kind, path in walkDir(dir):
+    if kind == pcFile and path.endsWith(".nifty"):
+      paths.add path
+  paths.sort()
+  for path in paths:
+    let testName = path.extractFilename().changeFileExt("")
+    let expectedPath = path.changeFileExt(".txt")
+    if not fileExists(expectedPath):
+      echo "  SKIP: " & label & "/" & testName & " (no .txt file)"
+      continue
+    let expected = readFile(expectedPath).replace("\r\n", "\n").strip()
+    try:
+      let actual = reportFor(readFile(path), path.extractFilename).strip()
+      if actual == expected:
+        echo "  PASS: " & label & "/" & testName
+        testsPassed += 1
+      else:
+        echo "  FAIL: " & label & "/" & testName
+        echo "    Expected: " & firstLine(expected) & "..."
+        echo "    Actual:   " & firstLine(actual) & "..."
+        testsFailed += 1
+    except NiftyError as e:
+      echo "  FAIL: " & label & "/" & testName
+      echo "    Compile error: " & e.msg
+      testsFailed += 1
+
 proc runGoldMasterTests*(): tuple[passed: int, failed: int] =
   testsPassed = 0
   testsFailed = 0
@@ -107,6 +138,7 @@ proc runGoldMasterTests*(): tuple[passed: int, failed: int] =
   runTestsInDir(baseDir / "errors", "errors", tmCompileError, workDir)
   runTestsInDir(baseDir / "syntax", "syntax", tmCompileError, workDir)
   runTestsInDir(baseDir / "runtime", "runtime", tmRuntimeTrap, workDir)
+  runReportTests(baseDir / "reports", "reports")
 
   (testsPassed, testsFailed)
 

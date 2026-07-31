@@ -1,0 +1,41 @@
+# Object types: static structs, declare-before-use, value semantics.
+# Field ranges are invariants: every store must prove it fits, so every
+# read is known-bounded - even across threads.
+
+const MaxParticles = 3
+
+object Vec2 =
+  x: -1000 .. 1000
+  y: -1000 .. 1000
+
+object Particle =
+  pos: Vec2
+  vel: Vec2
+  alive: bool
+
+var particles: array[MaxParticles, Particle]
+
+func speed(v: Vec2): int =
+  return v.x * v.x + v.y * v.y
+
+proc step(p: var Particle) =
+  let nx = p.pos.x + p.vel.x
+  if nx >= -1000 and nx <= 1000:
+    p.pos.x = nx
+  let ny = p.pos.y + p.vel.y
+  if ny >= -1000 and ny <= 1000:
+    p.pos.y = ny
+
+proc spawnAll() =
+  for i in 0 ..< MaxParticles:
+    particles[i].alive = true
+    particles[i].vel.x = i + 1
+    particles[i].vel.y = i * 2
+
+thread main() =
+  spawnAll()
+  for t in 0 ..< 4:
+    for i in 0 ..< MaxParticles:
+      step(particles[i])
+  for i in 0 ..< MaxParticles:
+    echo "p", i, " at ", particles[i].pos.x, ",", particles[i].pos.y, " speed ", speed(particles[i].vel)

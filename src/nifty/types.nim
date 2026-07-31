@@ -49,6 +49,7 @@ type
     lhs*, rhs*: Expr   # assign
     cond*: Expr        # while
     maxTrips*: int64   # while: explicit `max N` bound (0 = none)
+    tripBound*: int64  # while/for: proven worst-case iterations (checker)
     lo*, hi*: Expr     # for
     inclusive*: bool   # for: .. vs ..<
     value*: Expr       # return/discard/call

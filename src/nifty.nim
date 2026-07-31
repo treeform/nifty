@@ -4,7 +4,7 @@
 ##
 ## Pipeline: lexer -> parser -> checker -> codegen.
 
-import nifty/[common, lexer, parser, checker, codegen]
+import nifty/[common, lexer, parser, checker, codegen, report]
 
 export common
 
@@ -13,6 +13,13 @@ proc compileToC*(src: string, moduleName: string): string =
   let m = parse(tokenize(src))
   check(m)
   generate(m, moduleName)
+
+proc reportFor*(src: string, moduleName: string): string =
+  ## Check the program and produce the static resource report:
+  ## exact RAM, worst-case stack, worst-case ops per thread pass.
+  let m = parse(tokenize(src))
+  check(m)
+  buildReport(m, moduleName)
 
 when isMainModule:
   import std/os
@@ -23,6 +30,7 @@ nifty - compile a .nifty file to C and build it with cc
 usage:
   nifty [run] file.nifty [options]   build and, if there are no errors, run (default)
   nifty build file.nifty [options]   build only
+  nifty report file.nifty            static resource report (RAM, stack, ops)
 
 options:
   -o binary   output binary path (default: source path without extension)
@@ -38,7 +46,7 @@ options:
   while i < params.len:
     let a = params[i]
     case a
-    of "run", "build":
+    of "run", "build", "report":
       if sawCmd or srcPath.len > 0: quit(usage, 1)
       cmd = a
       sawCmd = true
@@ -58,6 +66,12 @@ options:
   if srcPath == "":
     quit(usage, 1)
   let modName = srcPath.extractFilename
+  if cmd == "report":
+    try:
+      stdout.write reportFor(readFile(srcPath), modName)
+    except NiftyError as e:
+      quit("nifty: " & srcPath & ": " & e.msg, 1)
+    quit(0)
   var cCode = ""
   try:
     cCode = compileToC(readFile(srcPath), modName)

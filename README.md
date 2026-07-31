@@ -35,6 +35,7 @@ nim c -d:release -o:nifty src/nifty.nim
 ./nifty examples/hello.nifty         # run is the default command
 ./nifty build examples/hello.nifty   # build only
 ./nifty run examples/hello.nifty     # explicit run
+./nifty report examples/queue.nifty  # static RAM / stack / ops report
 ```
 
 ## Tests
