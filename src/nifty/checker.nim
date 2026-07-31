@@ -12,7 +12,7 @@
 ## another thread (or an alias) could change them between test and use —
 ## so their declared range is all the checker will believe.
 
-import std/[tables, sets]
+import std/[strutils, tables, sets]
 import common, types
 
 type
@@ -35,7 +35,10 @@ type
     scopes: seq[Table[string, Sym]]
     withDepth: int
     loopWiths: seq[int]        # withDepth at entry of each enclosing loop
-    facts: Table[string, Fact] # locals with refined ranges at this point
+    facts: Table[string, Fact] # names with refined ranges at this point
+    heldLocks: seq[string]     # Lock names currently held (lexical with-stack)
+    sharedProt: Table[string, HashSet[string]] # shared global -> its lock(s)
+    routineWrites: Table[string, HashSet[string]] # routine -> globals it may write
 
 const
   IntLow = low(int64)
@@ -200,6 +203,8 @@ proc declFactByName(c: Ctx, name: string): Fact =
   for i in countdown(c.scopes.len - 1, 0):
     if name in c.scopes[i]:
       return typFact(c.scopes[i][name].typ)
+  if name in c.globals:
+    return typFact(c.globals[name])
   fullFact()
 
 proc curFact(c: Ctx, name: string): Fact =
@@ -238,13 +243,27 @@ proc tryConstEval(c: Ctx, e: Expr): tuple[known: bool, val: int64] =
   else:
     (false, 0'i64)
 
-proc factName(e: Expr): string =
-  ## The name a flow fact can attach to: a local int, or a non-var int
-  ## parameter. Globals and var params are excluded on purpose: another
-  ## thread (or an alias) could change them between a test and a use.
-  if e.kind == ekIdent and e.typ != nil and e.typ.kind == tyInt and
-      (e.symKind == syLocal or (e.symKind == syParam and not e.isVarParam)):
+proc factName(c: Ctx, e: Expr): string =
+  ## The name a flow fact can attach to. Locals and non-var parameters
+  ## always qualify. A global qualifies when it is thread-owned (accessed
+  ## by at most one thread) or when the lock that protects it is currently
+  ## held — in both cases no other thread can change it between a test
+  ## and a use. Var params never qualify (they may alias anything).
+  if e.kind != ekIdent or e.typ == nil or e.typ.kind != tyInt:
+    return ""
+  case e.symKind
+  of syLocal:
     e.sval
+  of syParam:
+    if e.isVarParam: "" else: e.sval
+  of syGlobal:
+    if e.sval notin c.sharedProt:
+      e.sval # thread-owned (or never written): sequential here
+    else:
+      for l in c.heldLocks:
+        if l in c.sharedProt[e.sval]:
+          return e.sval
+      ""
   else:
     ""
 
@@ -273,9 +292,9 @@ proc cmpFact(c: Ctx, e: Expr): tuple[name: string, op: string, k: int64] =
     return
   let lc = c.tryConstEval(e.kids[0])
   let rc = c.tryConstEval(e.kids[1])
-  if factName(e.kids[0]) != "" and rc.known:
+  if c.factName(e.kids[0]) != "" and rc.known:
     result = (e.kids[0].sval, e.sval, rc.val)
-  elif factName(e.kids[1]) != "" and lc.known:
+  elif c.factName(e.kids[1]) != "" and lc.known:
     result = (e.kids[1].sval, flipCmp(e.sval), lc.val)
 
 proc applyCmpFact(c: var Ctx, name, op: string, k: int64) =
@@ -344,6 +363,9 @@ proc collectAssignedExpr(c: Ctx, e: Expr, s: var HashSet[string]) =
         let root = arg.rootIdent
         if root.kind == ekIdent:
           s.incl root.sval
+    if e.sval in c.routineWrites:
+      for g in c.routineWrites[e.sval]:
+        s.incl g
   for k in e.kids:
     c.collectAssignedExpr(k, s)
 
@@ -451,10 +473,11 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       if e.symKind == syConst:
         let v = c.consts[e.sval]
         e.setFact Fact(lo: v, hi: v, notZero: v != 0)
-      elif factName(e) != "":
+      elif c.factName(e) != "":
         e.setFact c.curFact(e.sval)
       else:
-        # Globals and var params: only the declared range invariant holds.
+        # Unowned globals outside their lock and var params: only the
+        # declared range invariant holds.
         e.setFact typFact(e.typ)
   of ekNeg:
     if c.expectVal(e.kids[0]).kind != tyInt:
@@ -518,12 +541,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           if not (bf.notZero or bf.lo > 0 or bf.hi < 0):
             if bf.lo == 0 and bf.hi == 0:
               err(e.line, word & " by zero")
-            elif d.kind == ekIdent and d.symKind == syGlobal:
-              err(e.line, "cannot divide by global '" & d.sval &
-                "': another thread could zero it between a test and this " &
-                "division; snapshot it first: let d = " & d.sval &
-                "  then  if d != 0:")
-            elif d.kind == ekIdent and factName(d) != "":
+            elif d.kind == ekIdent and c.factName(d) != "":
               err(e.line, "cannot prove '" & d.sval &
                 "' is not zero here; guard the division with 'if " & d.sval &
                 " != 0:'")
@@ -621,6 +639,10 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         elif not typRangeFits(at, pt.typ):
           err(arg.line, "argument " & $(i + 1) & " of '" & name &
             "': element ranges of " & $at & " do not fit " & $pt.typ)
+    # The callee may write globals; facts about them are now stale.
+    if name in c.routineWrites:
+      for g in c.routineWrites[name]:
+        c.facts.del g
     e.typ = r.ret
     if r.ret != nil and r.ret.kind == tyInt:
       e.setFact typFact(r.ret)
@@ -689,7 +711,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       if not rf.fits(lt):
         err(s.line, "cannot prove value (" & rangeStr(rf) & ") fits " & $lt &
           "; guard or clamp first")
-    if s.lhs.kind == ekIdent and factName(s.lhs) != "":
+    if s.lhs.kind == ekIdent and c.factName(s.lhs) != "":
       c.facts[s.lhs.sval] = exprFact(s.rhs)
   of skIf:
     let base = c.facts
@@ -792,9 +814,22 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
             not r.ret.isNil:
           err(s.line, "with on a " & $t & " needs '" & pn & "' to be: " & want)
       s.typ = t
+    let isLock = s.typ != nil and s.typ.kind == tyLock
+    if isLock:
+      c.heldLocks.add s.name
     inc c.withDepth
     c.checkBody(s.body)
     dec c.withDepth
+    if isLock:
+      discard c.heldLocks.pop
+      # Facts proven under the lock die with it: another thread may take
+      # the lock and write before we ever hold it again.
+      var stale: seq[string]
+      for k in c.facts.keys:
+        if k in c.sharedProt and s.name in c.sharedProt[k]:
+          stale.add k
+      for k in stale:
+        c.facts.del k
   of skReturn:
     if c.withDepth > 0:
       err(s.line, "cannot return inside a with block (its end would never run)")
@@ -868,11 +903,130 @@ proc check*(m: Module) =
       anyThread = true
   if not anyThread:
     err(1, "a nifty program needs at least one thread (thread name() = ...)")
+
+  # --- thread ownership and lock protection of globals ---------------------
+  # For every routine, compute (a) which globals it may touch and which
+  # locks are held at EVERY such access (including transitively through
+  # calls), and (b) which globals it may write. Then: a global accessed by
+  # one thread is thread-owned. A global accessed by 2+ threads with at
+  # least one writer is shared: all threads must agree on one common lock,
+  # for reads too (a read outside the lock could see a torn or mid-update
+  # value, and two reads could disagree). This is all computable because
+  # threads are declared, the call graph is a DAG, and names cannot shadow.
+  var access: Table[string, Table[string, HashSet[string]]]
+  var writes: Table[string, HashSet[string]]
+  var acc: Table[string, HashSet[string]]
+  var wr: HashSet[string]
+
+  proc isPlainGlobal(name: string): bool =
+    name in c.globals and c.globals[name].kind != tyLock
+
+  proc note(g: string, held: HashSet[string]) =
+    if g in acc:
+      acc[g] = acc[g] * held
+    else:
+      acc[g] = held
+
+  proc mergeCallee(callee: string, held: HashSet[string]) =
+    if callee in access:
+      for g, ls in access[callee]:
+        note(g, held + ls)
+      for g in writes[callee]:
+        wr.incl g
+
+  proc scanE(e: Expr, held: HashSet[string]) =
+    if e.isNil:
+      return
+    if e.kind == ekIdent and isPlainGlobal(e.sval):
+      note(e.sval, held)
+    if e.kind == ekCall and e.sval in c.routineTab:
+      mergeCallee(e.sval, held)
+      let r2 = c.routineTab[e.sval]
+      for i, arg in e.kids:
+        if i < r2.params.len and r2.params[i].isVar:
+          let root = arg.rootIdent
+          if root.kind == ekIdent and isPlainGlobal(root.sval):
+            note(root.sval, held)
+            wr.incl root.sval
+    for k in e.kids:
+      scanE(k, held)
+
+  proc scanS(s: Stmt, held: HashSet[string]) =
+    for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
+      scanE(e, held)
+    for a in s.args:
+      scanE(a, held)
+    var bodyHeld = held
+    case s.kind
+    of skAssign:
+      let root = s.lhs.rootIdent
+      if root.kind == ekIdent and isPlainGlobal(root.sval):
+        note(root.sval, held)
+        wr.incl root.sval
+    of skWith:
+      if s.name in c.globals and c.globals[s.name].kind == tyLock:
+        bodyHeld = held + [s.name].toHashSet
+      else:
+        if isPlainGlobal(s.name):
+          note(s.name, held)
+          wr.incl s.name
+        mergeCallee("start", held)
+        mergeCallee("end", held)
+    else:
+      discard
+    for st in s.body:
+      scanS(st, bodyHeld)
+    for br in s.elifs:
+      scanE(br.cond, held)
+      for st in br.body:
+        scanS(st, held)
+    for st in s.elseBody:
+      scanS(st, held)
+
+  for r in m.routines:
+    acc = initTable[string, HashSet[string]]()
+    wr = initHashSet[string]()
+    for st in r.body:
+      scanS(st, initHashSet[string]())
+    access[r.name] = acc
+    writes[r.name] = wr
+  c.routineWrites = writes
+
+  var accThreads: Table[string, seq[string]]
+  var lockProt: Table[string, HashSet[string]]
+  var writeThreads: Table[string, HashSet[string]]
+  for r in m.routines:
+    if r.kind != rkThread:
+      continue
+    for g, ls in access[r.name]:
+      if g notin accThreads:
+        accThreads[g] = @[]
+        lockProt[g] = ls
+      else:
+        lockProt[g] = lockProt[g] * ls
+      accThreads[g].add r.name
+    for g in writes[r.name]:
+      if g notin writeThreads:
+        writeThreads[g] = initHashSet[string]()
+      writeThreads[g].incl r.name
+  for gd in m.globals:
+    if gd.typ.kind == tyLock:
+      continue
+    let g = gd.name
+    if g in accThreads and accThreads[g].len >= 2 and g in writeThreads:
+      if lockProt[g].len == 0:
+        err(gd.line, "shared global '" & g & "' is accessed by threads " &
+          accThreads[g].join(", ") & " but not consistently protected; " &
+          "every access (reads too) must be inside a with block holding " &
+          "one common lock")
+      c.sharedProt[g] = lockProt[g]
+
   for r in m.routines:
     c.cur = r
     c.withDepth = 0
     c.loopWiths = @[]
     c.facts = initTable[string, Fact]()
+    c.heldLocks = @[]
     case r.kind
     of rkThread:
       if r.params.len > 0:

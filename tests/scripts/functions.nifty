@@ -12,9 +12,8 @@ proc bump(x: var 0 .. 100) =
     x = t + 1
 
 proc addTotal(x: 0 .. 100) =
-  let t = total
-  if t <= 900:
-    total = t + x
+  if total <= 900:
+    total = total + x
 
 thread main() =
   echo square(4)

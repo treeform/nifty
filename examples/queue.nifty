@@ -1,7 +1,8 @@
 # Two threads sharing a bounded ring buffer under a lock.
-# The fixed capacity IS the backpressure, and the declared ranges on
-# head, tail, and count are invariants every write must prove - which
-# is what makes queue[head] and queue[tail] check-free at runtime.
+# The fixed capacity IS the backpressure. The checker knows queue, head,
+# tail, and count are shared by both threads, so every access must be
+# inside "with queueLock:" - and inside the lock, tests on them are
+# trusted (no other thread can slip in while we hold it).
 
 const QueueSize = 4
 const Items = 100
@@ -15,22 +16,20 @@ var queueLock: Lock
 proc tryPush(v: 0 .. 99): bool =
   var ok = false
   with queueLock:
-    let n = count
-    if n < QueueSize:
+    if count < QueueSize:
       queue[tail] = v
       tail = (tail + 1) % QueueSize
-      count = n + 1
+      count = count + 1
       ok = true
   return ok
 
 proc tryPop(): -1 .. 99 =
   var v: -1 .. 99 = -1
   with queueLock:
-    let n = count
-    if n > 0:
+    if count > 0:
       v = queue[head]
       head = (head + 1) % QueueSize
-      count = n - 1
+      count = count - 1
   return v
 
 thread producer() =

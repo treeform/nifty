@@ -7,9 +7,8 @@
 #   var u: int
 #   ...  echo 10 / u   error: cannot prove 'u' is not zero here;
 #                             guard the division with 'if u != 0:'
-#   echo 10 / g        error: cannot divide by global 'g': another thread
-#                             could zero it between a test and this
-#                             division; snapshot it first
+#   (a global shared by two or more threads must be accessed inside
+#    its lock block; unlocked access does not compile at all)
 
 const K = 4
 
@@ -44,12 +43,12 @@ thread main() =
   echo safeDiv(100, 0)
   echo safeDiv(100, 5)
 
-  # Globals can change under you (another thread!), so flow tests never
-  # attach to them. Snapshot to a local, then test the snapshot.
+  # g is only accessed by this one thread, so the checker owns it here
+  # and proves it like a local. (A global shared between threads must be
+  # accessed under a lock - reads too - and proves inside the lock block.)
   g = 7
-  let snap = g
-  if snap != 0:
-    echo 700 / snap
+  if g != 0:
+    echo 700 / g
 
   # A while condition re-proves its facts on every entry.
   var d = 8

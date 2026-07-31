@@ -1,4 +1,7 @@
 var zero: int
 
+thread writer() =
+  zero = 1
+
 thread main() =
   echo 10 / zero

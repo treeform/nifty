@@ -1,0 +1,11 @@
+var counter: 0 .. 100
+var l: Lock
+
+thread a() =
+  with l:
+    if counter < 100:
+      counter = counter + 1
+
+thread b() =
+  if counter > 0:
+    echo counter

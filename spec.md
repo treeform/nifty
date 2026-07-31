@@ -152,8 +152,12 @@ Planned types:
 - `loop:` — infinite loop, allowed **only at the top level of a `thread`
   body**. This is the event/server loop; everything inside it must
   (eventually) be bounded. `break` is allowed.
-- `with x:` — a scoped resource block. `with x:` desugars to
-  `start(x)`, the block body, then `end(x)`:
+- `with x:` — a scoped resource block. For a `Lock`, it is also the only
+  way to touch shared globals: a global accessed by two or more threads
+  must have every access (reads included) inside `with` blocks that all
+  hold one common lock — the checker infers which lock protects which
+  global from the access sites and rejects inconsistent locking.
+  `with x:` desugars to `start(x)`, the block body, then `end(x)`:
   - if `x` is a `Lock`, `start`/`end` are builtin: acquire and release the
     mutex;
   - for any other type `T`, the program must define `proc start(v: var T)`
@@ -198,12 +202,33 @@ cannot express "anything but zero").
 - arithmetic: ranges combine through `+ - * / %` exactly.
 
 **What invalidates a flow fact:** assigning something wider, passing the
-variable as a `var` argument, using it as a `with` target, or entering a
-loop whose body modifies it (the loop condition re-proves what it can on
-every entry). Globals and var params never carry flow facts at all —
-another thread (or an alias) could change them between test and use.
-Snapshot into a local first: `let t = total` then test `t`. Declared
-ranges are how shared globals stay provable.
+variable as a `var` argument, using it as a `with` target, calling a
+routine that may write it, or entering a loop whose body modifies it (the
+loop condition re-proves what it can on every entry). Var params never
+carry flow facts — they may alias anything.
+
+**Globals and threads.** The checker computes, from the static call graph,
+which threads touch each global:
+
+- **Thread-owned** (accessed by at most one thread): proven exactly like a
+  local — tests refine it, stores update it. Most globals in a
+  single-threaded program just work.
+- **Shared** (accessed by two or more threads, written by at least one):
+  every access — *reads too*, since an unlocked read can see a torn or
+  mid-update value and two reads can disagree — must be inside a `with`
+  block holding one common lock. This is checked, not trusted. Inside
+  that lock block the global proves like a local again (no other thread
+  can slip in while the lock is held); the facts die when the lock is
+  released. Outside the lock the global cannot be touched at all.
+
+This makes the queue idiom both natural and proven:
+
+```nim
+with queueLock:
+  if count < QueueSize:
+    queue[tail] = v
+    count = count + 1   # proven: count is ours while we hold the lock
+```
 
 ### The three proofs
 

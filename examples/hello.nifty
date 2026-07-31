@@ -10,9 +10,10 @@ func double(x: 0 .. 100): 0 .. 200 =
   return x * 2
 
 proc addTotal(x: 0 .. 200) =
-  let t = total
-  if t <= 800:
-    total = t + x
+  # total is only touched by the main thread, so the checker treats it
+  # like a local: the test below proves the store fits 0 .. 1000.
+  if total <= 800:
+    total = total + x
 
 thread main() =
   for i in 0 ..< MaxItems:
