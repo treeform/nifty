@@ -27,3 +27,12 @@ thread main() =
 
   # The widened fact survives the loop: sum + total still proves.
   echo sum + total
+
+  # While loops widen too, using the proven trip bound: i gives at most
+  # 6 passes, each adding at most 5.
+  var i: 0 .. 5 = 0
+  var wsum = 0
+  while i < 5:
+    wsum = wsum + i
+    i = i + 1
+  echo wsum

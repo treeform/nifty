@@ -213,12 +213,14 @@ routine that may write it, or entering a loop whose body modifies it (the
 loop condition re-proves what it can on every entry). Var params never
 carry flow facts — they may alias anything.
 
-One loop exception — **accumulator induction**: in a counted `for` loop, a
-local assigned *only* as `v = v + e` / `v = v - e` (with `e` independent
-of `v` and the sites outside nested loops) keeps a widened fact instead of
+One loop exception — **accumulator induction**: in any loop with a proven
+trip bound (`for`, and `while` via its termination bound), a local
+assigned *only* as `v = v + e` / `v = v - e` (with `e` independent of `v`
+and the sites outside nested loops) keeps a widened fact instead of
 losing everything: its entry value plus `tripCount ×` the per-iteration
-delta, where `e`'s bound comes from declared ranges, consts, and the loop
-variable only. So this proves with zero annotations:
+delta, clamped to its declared range, where `e`'s bound comes from
+declared ranges, consts, and the loop variable only. So this proves with
+zero annotations:
 
 ```nim
 var sum = 0
@@ -228,7 +230,8 @@ echo sum
 ```
 
 The widened fact survives the loop, so downstream arithmetic proves too.
-`while`-loop accumulators still need a guard.
+Accumulators inside `loop` (infinite by design) still need a guard —
+there is no trip count to widen by.
 
 **Globals and threads.** The checker computes, from the static call graph,
 which threads touch each global:
@@ -359,6 +362,6 @@ via interval analysis with zero runtime checks in the generated C, `echo`,
 `discard`, C output, generated `main` with thread spawn/join.
 
 Not yet implemented: `index` types, fixed strings, wildcard generics,
-tail-call recursion, the per-thread error flag, accumulator induction for
-`while` loops (counted `for` loops have it; a `while` accumulator still
-needs a guard like `if sum <= 900:`).
+tail-call recursion, the per-thread error flag, deterministic floats and
+fixed-point (`fixed[lo .. hi, step]` — a scaled ranged int, so the
+existing proofs apply directly).

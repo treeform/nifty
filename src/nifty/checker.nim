@@ -531,20 +531,20 @@ proc declFact(c: Ctx, e: Expr, loopVar: string, loopFact: Fact):
     discard
 
 proc accumWiden(c: Ctx, s: Stmt, assigned: HashSet[string],
-    loopFact: Fact): Table[string, Fact] =
+    loopFact: Fact, entry: Table[string, Fact]): Table[string, Fact] =
   ## Induction for accumulators in a counted for loop: a local assigned
   ## ONLY as v = v + e / v = v - e (e independent of v, not inside a
   ## nested loop) keeps a widened fact instead of losing everything:
   ## its entry value plus tripCount * the per-iteration delta.
   let trips = s.tripBound
   for v in assigned:
-    var isLocalInt = false
+    var declTyp: Typ = nil
     for i in countdown(c.scopes.len - 1, 0):
       if v in c.scopes[i]:
-        isLocalInt = c.scopes[i][v].kind == syLocal and
-          c.scopes[i][v].typ.kind == tyInt
+        if c.scopes[i][v].kind == syLocal:
+          declTyp = c.scopes[i][v].typ
         break
-    if not isLocalInt:
+    if declTyp == nil or declTyp.kind != tyInt:
       continue
     var sites: seq[tuple[sign: int, e: Expr]]
     var ok = true
@@ -603,11 +603,13 @@ proc accumWiden(c: Ctx, s: Stmt, assigned: HashSet[string],
       dHi = satAdd(dHi, max(0'i64, hi)).v
     if not good:
       continue
-    # Saturation only widens the interval, which stays sound.
-    let v0 = c.curFact(v)
+    # Saturation only widens the interval, which stays sound; the declared
+    # range is an invariant, so the intersection is sound and tighter.
+    let v0 = entry.getOrDefault(v, c.declFactByName(v))
+    let dt = typFact(declTyp)
     result[v] = Fact(
-      lo: satAdd(v0.lo, satMul(trips, dLo).v).v,
-      hi: satAdd(v0.hi, satMul(trips, dHi).v).v)
+      lo: max(satAdd(v0.lo, satMul(trips, dLo).v).v, dt.lo),
+      hi: min(satAdd(v0.hi, satMul(trips, dHi).v).v, dt.hi))
 
 # --- termination proof ----------------------------------------------------
 
@@ -1039,20 +1041,20 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     else:
       c.facts = c.joinFacts(branchFacts)
   of skWhile:
-    let base = c.facts
-    # Facts about anything the body can change do not survive an iteration;
-    # facts from the condition are re-established on every entry.
-    c.dropAssigned(s.body)
-    let dropped = c.facts
+    # Facts about anything the body can change do not survive an iteration
+    # (except widened accumulators); facts from the condition are
+    # re-established on every entry.
+    let entry = c.facts
+    var assigned: HashSet[string]
+    c.collectAssigned(s.body, assigned)
+    for n in assigned:
+      c.facts.del n
     if c.expectVal(s.cond).kind != tyBool:
       err(s.cond.line, "condition must be a bool")
-    c.addCondFacts(s.cond)
-    c.loopWiths.add c.withDepth
-    c.checkBody(s.body)
-    discard c.loopWiths.pop
     # The termination proof: strict induction progress, or an explicit
     # max N (which bounds the loop by construction - it also stops after
-    # N iterations).
+    # N iterations). Runs after the condition is checked (the halving
+    # rule inspects it); its trip bound feeds accumulator widening.
     var bound = c.whileBound(s)
     if s.maxTrips > 0:
       bound = if bound > 0: min(bound, s.maxTrips) else: s.maxTrips
@@ -1061,6 +1063,14 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         "ranged variable makes strict progress every iteration; add " &
         "'max N' to bound it (the loop then also stops after N iterations)")
     s.tripBound = bound
+    let widened = c.accumWiden(s, assigned, fullFact(), entry)
+    for n, f in widened:
+      c.facts[n] = f
+    let dropped = c.facts
+    c.addCondFacts(s.cond)
+    c.loopWiths.add c.withDepth
+    c.checkBody(s.body)
+    discard c.loopWiths.pop
     c.facts = dropped
     # After the loop the condition is false - but only if the loop cannot
     # leave any other way (break, or the max cap).
@@ -1085,7 +1095,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     var assigned: HashSet[string]
     c.collectAssigned(s.body, assigned)
     # Simple accumulators keep a widened fact instead of losing everything.
-    let widened = c.accumWiden(s, assigned, loopFact)
+    let widened = c.accumWiden(s, assigned, loopFact, c.facts)
     for n in assigned:
       c.facts.del n
     for n, f in widened:
