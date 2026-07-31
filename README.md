@@ -39,6 +39,15 @@ nim c -d:release -o:nifty src/nifty.nim
 
 ## Tests
 
+Gold master style: each `tests/*/name.nifty` is paired with a `name.txt`
+holding the expected result.
+
+- `tests/scripts/` — programs that run; stdout must match the `.txt`
+- `tests/errors/` — programs the checker must reject; the `.txt` text must
+  appear in the compile error
+- `tests/syntax/` — programs the lexer/parser must reject
+- `tests/runtime/` — programs that compile but must trap when run
+
 ```
-nim r test/tests.nim
+nim r tests/tests.nim
 ```

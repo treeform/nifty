@@ -1,0 +1,10 @@
+const N = 4
+
+var a: array[N, int]
+
+func bigIndex(x: int): int =
+  return x + 10
+
+thread main() =
+  a[bigIndex(0)] = 1
+  echo a[0]

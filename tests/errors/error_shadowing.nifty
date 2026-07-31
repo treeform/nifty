@@ -1,0 +1,5 @@
+var g: int
+
+thread main() =
+  var g = 1
+  echo g

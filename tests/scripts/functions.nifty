@@ -1,0 +1,24 @@
+var total: int
+
+func square(x: int): int =
+  return x * x
+
+func add(a, b: int): int =
+  return a + b
+
+proc bump(x: var int) =
+  x = x + 1
+
+proc addTotal(x: int) =
+  total = total + x
+
+thread main() =
+  echo square(4)
+  echo add(2, 3)
+  var n = 10
+  bump(n)
+  bump(n)
+  echo n
+  addTotal(7)
+  addTotal(5)
+  echo total

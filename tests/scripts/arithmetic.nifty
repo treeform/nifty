@@ -1,0 +1,14 @@
+thread main() =
+  echo 2 + 3 * 4
+  echo (2 + 3) * 4
+  echo 7 / 2
+  echo 7 % 3
+  echo -5 + 2
+  echo 10 - 4 - 3
+  echo 2 < 3
+  echo 3 <= 2
+  echo 5 == 5
+  echo 5 != 5
+  echo true and false
+  echo true or false
+  echo not false

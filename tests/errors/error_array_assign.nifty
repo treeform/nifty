@@ -1,0 +1,5 @@
+var a: array[4, int]
+var b: array[4, int]
+
+thread main() =
+  a = b

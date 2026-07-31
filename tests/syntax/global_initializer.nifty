@@ -1,0 +1,4 @@
+var x: int = 5
+
+thread main() =
+  echo x

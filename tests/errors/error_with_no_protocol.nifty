@@ -1,0 +1,5 @@
+var n: int
+
+thread main() =
+  with n:
+    echo n

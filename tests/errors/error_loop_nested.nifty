@@ -1,0 +1,4 @@
+thread main() =
+  if true:
+    loop:
+      break

@@ -1,0 +1,19 @@
+thread main() =
+  var sum = 0
+  for i in 0 ..< 5:
+    sum = sum + i
+  echo sum
+  var sum2 = 0
+  for j in 1 .. 5:
+    sum2 = sum2 + j
+  echo sum2
+  var n = 0
+  while n < 10:
+    n = n + 2
+  echo n
+  var k = 0
+  loop:
+    k = k + 1
+    if k >= 3:
+      break
+  echo k

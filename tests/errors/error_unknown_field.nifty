@@ -1,0 +1,8 @@
+type Vec2 = object
+  x: int
+  y: int
+
+var a: Vec2
+
+thread main() =
+  echo a.z

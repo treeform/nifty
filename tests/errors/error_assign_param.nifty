@@ -1,0 +1,5 @@
+proc p(x: int) =
+  x = 2
+
+thread main() =
+  p(1)

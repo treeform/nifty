@@ -1,0 +1,4 @@
+var zero: int
+
+thread main() =
+  echo 10 / zero

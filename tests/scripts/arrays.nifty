@@ -1,0 +1,22 @@
+const N = 5
+
+var data: array[N, int]
+var grid: array[2, array[3, int]]
+
+proc fill() =
+  for i in 0 ..< N:
+    data[i] = i * i
+
+func sum(arr: array[N, int]): int =
+  var s = 0
+  for i in 0 ..< N:
+    s = s + arr[i]
+  return s
+
+thread main() =
+  fill()
+  echo data[4]
+  echo sum(data)
+  grid[1][2] = 42
+  echo grid[1][2]
+  echo grid[0][0]

@@ -1,0 +1,8 @@
+proc a() =
+  b()
+
+proc b() =
+  echo 1
+
+thread main() =
+  a()

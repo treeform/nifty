@@ -1,0 +1,9 @@
+proc p() =
+  echo 1
+
+func f(x: int): int =
+  p()
+  return x
+
+thread main() =
+  echo f(1)

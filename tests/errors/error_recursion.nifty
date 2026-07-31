@@ -1,0 +1,5 @@
+func f(x: int): int =
+  return f(x)
+
+thread main() =
+  echo f(1)

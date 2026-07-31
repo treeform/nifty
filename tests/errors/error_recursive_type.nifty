@@ -1,0 +1,5 @@
+type Node = object
+  next: Node
+
+thread main() =
+  echo 1

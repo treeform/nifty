@@ -1,0 +1,14 @@
+var depth: int
+
+proc start(x: var int) =
+  x = x + 1
+
+proc end(x: var int) =
+  x = x - 1
+
+thread main() =
+  with depth:
+    echo depth
+    with depth:
+      echo depth
+  echo depth

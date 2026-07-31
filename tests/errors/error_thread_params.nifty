@@ -1,0 +1,2 @@
+thread t(x: int) =
+  echo x

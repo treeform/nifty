@@ -1,0 +1,3 @@
+thread main() =
+  for i in 0 to 5:
+    echo i

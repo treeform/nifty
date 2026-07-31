@@ -1,0 +1,27 @@
+type Vec2 = object
+  x: int
+  y: int
+
+type Rect = object
+  pos: Vec2
+  size: Vec2
+
+var screen: Rect
+
+func area(r: Rect): int =
+  return r.size.x * r.size.y
+
+proc grow(r: var Rect, amount: int) =
+  r.size.x = r.size.x + amount
+  r.size.y = r.size.y + amount
+
+thread main() =
+  screen.size.x = 10
+  screen.size.y = 5
+  echo area(screen)
+  grow(screen, 2)
+  echo area(screen)
+  var copy = screen
+  copy.size.x = 100
+  echo screen.size.x
+  echo copy.size.x

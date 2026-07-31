@@ -1,0 +1,5 @@
+func f(x: var int): int =
+  return x
+
+thread main() =
+  echo f(1)
