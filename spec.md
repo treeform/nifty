@@ -100,8 +100,9 @@ v0 types:
   (globals, fields, un-initialized locals) need 0 inside their range.
 - `bool` — `true` / `false`.
 - `array[N, T]` — fixed length `N` (an integer literal or `const`), element
-  type `T`. Arrays are indexed `a[i]` with a bounds check (traps in v0).
-  Whole-array assignment/copy is not allowed; copy elements in a loop.
+  type `T`. Indexing `a[i]` is proven in bounds at compile time (see
+  Static proofs). Whole-array assignment/copy is not allowed; copy
+  elements in a loop.
 - `seq[N, T]` — a bounded dynamic array: storage for `N` elements plus a
   runtime length `0 .. N`. Zero-init means empty; only the live part
   `0 ..< len` is ever readable or writable, so dead slots are free (a
@@ -151,13 +152,13 @@ v0 types:
   is `a.b`, nests freely with indexing (`particles[i].pos.x`). Objects are
   zero-initialized. There are no constructors and no literals in v0:
   declare, then assign fields.
-- String literals exist only as `echo` arguments in v0.
+- String literals appear as `echo` arguments and anywhere a `string[N]`
+  is expected (they must fit, checked at compile time).
 
 Planned types:
 
 - **Typed indices** `index arr` — sugar for `0 ..< len(arr)` plus
   provenance, so an index cannot be used on the wrong array.
-- **Fixed strings** `string[N]` — Turbo Pascal style, stored inline.
 - **Wildcard generics over builtins only** — `proc sort(arr: var array)` or
   `array[N, T]` with `N`, `T` binding implicitly at the call site, checked
   per instantiation, monomorphized. Only builtin type constructors are
