@@ -368,8 +368,8 @@ proc parseModule(p: var Parser): Module =
         err(t.line, "globals are zero-initialized; initializers are not allowed")
       result.globals.add GlobalDef(name: name, typ: typ, line: t.line)
       p.expectNewline()
-    of "type":
-      # type Name = object, fields on indented lines. A type can only refer
+    of "object":
+      # object Name = with fields on indented lines. A type can only refer
       # to types declared above it, so recursive types (and thus unknown
       # sizes) are impossible by construction.
       discard p.next
@@ -378,7 +378,6 @@ proc parseModule(p: var Parser): Module =
           name in ["int", "bool", "Lock", "array"]:
         err(t.line, "duplicate or reserved type name: '" & name & "'")
       p.expectOp("=")
-      p.expectKeyword("object")
       p.expectNewline()
       if p.peek.kind != tkIndent:
         err(t.line, "object needs at least one field on an indented line")
@@ -438,7 +437,7 @@ proc parseModule(p: var Parser): Module =
       result.routines.add r
     else:
       err(t.line, "unknown declaration: '" & t.text &
-        "' (expected const, var, type, func, proc, or thread)")
+        "' (expected const, var, object, func, proc, or thread)")
 
 proc parse*(toks: seq[Token]): Module =
   ## Parse a token stream into a Module AST.

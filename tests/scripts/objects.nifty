@@ -1,8 +1,8 @@
-type Vec2 = object
+object Vec2 =
   x: int
   y: int
 
-type Rect = object
+object Rect =
   pos: Vec2
   size: Vec2
 

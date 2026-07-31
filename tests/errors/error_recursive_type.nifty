@@ -1,4 +1,4 @@
-type Node = object
+object Node =
   next: Node
 
 thread main() =

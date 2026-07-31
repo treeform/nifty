@@ -1,0 +1,39 @@
+# Arrays of objects, arrays inside objects, and both nested together.
+
+const N = 3
+
+object Row =
+  cells: array[N, int]
+  label: int
+
+object Grid =
+  rows: array[2, Row]
+
+var g: Grid
+
+proc fill() =
+  for r in 0 ..< 2:
+    g.rows[r].label = r * 10
+    for c in 0 ..< N:
+      g.rows[r].cells[c] = r * 100 + c
+
+func rowSum(row: Row): int =
+  var s = 0
+  for i in 0 ..< N:
+    s = s + row.cells[i]
+  return s
+
+proc bumpFirst(row: var Row) =
+  row.cells[0] = row.cells[0] + 1
+
+thread main() =
+  fill()
+  echo g.rows[0].label, " ", g.rows[1].label
+  echo rowSum(g.rows[0])
+  echo rowSum(g.rows[1])
+  bumpFirst(g.rows[0])
+  echo g.rows[0].cells[0]
+  var copy = g.rows[1]
+  copy.cells[0] = 9999
+  echo g.rows[1].cells[0]
+  echo copy.cells[0]

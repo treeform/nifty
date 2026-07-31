@@ -4,11 +4,11 @@
 
 const MaxParticles = 3
 
-type Vec2 = object
+object Vec2 =
   x: int
   y: int
 
-type Particle = object
+object Particle =
   pos: Vec2
   vel: Vec2
   alive: bool

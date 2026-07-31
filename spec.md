@@ -96,9 +96,13 @@ v0 types:
 - `object` — a static struct, exactly like C:
 
   ```nim
-  type Vec2 = object
+  object Vec2 =
     x: int
     y: int
+
+  object Rect =
+    pos: Vec2
+    size: Vec2
   ```
 
   Nothing grows, everything is defined: fields are `int`, `bool`, arrays,
@@ -169,7 +173,7 @@ Nifty compiles one module to one portable C file (C99 + pthreads):
 | `const`                | `static const int64_t`                     |
 | `func` / `proc`        | `static` function                          |
 | `thread foo`           | `static void *t_foo(void*)` + `pthread_create`/`join` in generated `main` |
-| `type ... = object`    | `typedef struct`                           |
+| `object Name =`        | `typedef struct`                           |
 | `with` on a `Lock`     | `pthread_mutex_t` lock–unlock pair         |
 | `with` on other types  | `start(x)` / `end(x)` calls around the block |
 | `a[i]`                 | index via bounds-check helper              |
@@ -186,10 +190,10 @@ libc + pthreads and a few line-tagged trap helpers.
 ## Grammar (v0, informal)
 
 ```
-module      = { constDecl | globalDecl | typeDecl | routineDecl }
+module      = { constDecl | globalDecl | objectDecl | routineDecl }
 constDecl   = "const" ident "=" constExpr NL
 globalDecl  = "var" ident ":" type NL
-typeDecl    = "type" ident "=" "object" NL INDENT { fieldDecl } DEDENT
+objectDecl  = "object" ident "=" NL INDENT { fieldDecl } DEDENT
 fieldDecl   = ident { "," ident } ":" type NL
 routineDecl = ("func" | "proc" | "thread") ident "(" [params] ")" [":" type] "=" body
 params      = param { "," param }
