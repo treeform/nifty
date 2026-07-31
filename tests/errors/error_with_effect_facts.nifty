@@ -1,0 +1,13 @@
+var g: 0 .. 10
+var n: int
+
+proc start(x: var int) =
+  g = 0
+
+proc end(x: var int) =
+  g = 0
+
+thread main() =
+  g = 5
+  with n:
+    echo 10 / g

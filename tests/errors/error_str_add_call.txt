@@ -1,0 +1,1 @@
+put the appended string in a variable

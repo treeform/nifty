@@ -1,0 +1,6 @@
+thread main() =
+  var s: seq[2, int]
+  s.add(7)
+  var b = true
+  if b or s.pop() == 0:
+    echo 1

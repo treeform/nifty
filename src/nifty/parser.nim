@@ -46,6 +46,12 @@ proc expectNewline(p: var Parser) =
   if p.peek.kind == tkNewline:
     discard p.next
 
+proc parseIntLit(t: Token): int64 =
+  try:
+    parseBiggestInt(t.text)
+  except ValueError:
+    err(t.line, "integer literal is too large for int64")
+
 proc parseExpr(p: var Parser): Expr
 proc evalConst(p: Parser, e: Expr): int64
 
@@ -67,7 +73,7 @@ proc parseType(p: var Parser): Typ =
       let lt = p.next
       var n: int64
       if lt.kind == tkInt:
-        n = parseBiggestInt(lt.text)
+        n = parseIntLit(lt)
       elif lt.kind == tkIdent and lt.text in p.consts:
         n = p.consts[lt.text]
       else:
@@ -97,7 +103,7 @@ proc parseType(p: var Parser): Typ =
       let lt = p.next
       var n: int64
       if lt.kind == tkInt:
-        n = parseBiggestInt(lt.text)
+        n = parseIntLit(lt)
       elif lt.kind == tkIdent and lt.text in p.consts:
         n = p.consts[lt.text]
       else:
@@ -131,7 +137,7 @@ proc parseAtom(p: var Parser): Expr =
   case t.kind
   of tkInt:
     discard p.next
-    result = Expr(kind: ekInt, line: t.line, ival: parseBiggestInt(t.text))
+    result = Expr(kind: ekInt, line: t.line, ival: parseIntLit(t))
   of tkStr:
     discard p.next
     result = Expr(kind: ekStr, line: t.line, sval: t.text)
@@ -386,14 +392,32 @@ proc evalConst(p: Parser, e: Expr): int64 =
     else:
       err(e.line, "unknown const: '" & e.sval & "'")
   of ekNeg:
-    -p.evalConst(e.kids[0])
+    let v = p.evalConst(e.kids[0])
+    if v == low(int64):
+      err(e.line, "constant expression overflows int64")
+    -v
   of ekBin:
     let a = p.evalConst(e.kids[0])
     let b = p.evalConst(e.kids[1])
     case e.sval
-    of "+": a + b
-    of "-": a - b
-    of "*": a * b
+    of "+":
+      if (b > 0 and a > high(int64) - b) or (b < 0 and a < low(int64) - b):
+        err(e.line, "constant expression overflows int64")
+      a + b
+    of "-":
+      if (b < 0 and a > high(int64) + b) or (b > 0 and a < low(int64) + b):
+        err(e.line, "constant expression overflows int64")
+      a - b
+    of "*":
+      if a != 0 and b != 0:
+        if (a > 0) == (b > 0):
+          if max(abs(a), abs(b)) > high(int64) div min(abs(a), abs(b)):
+            err(e.line, "constant expression overflows int64")
+        else:
+          if a == low(int64) or b == low(int64) or
+              abs(a) > high(int64) div abs(b):
+            err(e.line, "constant expression overflows int64")
+      a * b
     of "/":
       if b == 0: err(e.line, "division by zero in const")
       a div b

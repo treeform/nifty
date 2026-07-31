@@ -1,0 +1,13 @@
+# The first condition of an if runs exactly once: its mutation persists
+# into every branch and the code after - the checker tracks it.
+
+thread main() =
+  var s: seq[2, int]
+  s.add(7)
+  if s.pop() == 7:
+    echo s.len
+  else:
+    echo s.len
+  if s.len < 2:
+    s.add(1)
+  echo s.len

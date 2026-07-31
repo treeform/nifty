@@ -1,0 +1,10 @@
+var g: 0 .. 10
+
+proc sneaky(x: var 0 .. 10) =
+  if g == 5:
+    x = 0
+    echo 10 / g
+
+thread main() =
+  g = 5
+  sneaky(g)

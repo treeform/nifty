@@ -116,7 +116,12 @@ v0 types:
   - `s[i]` — requires proof `i < s.len` (pin or test the length first).
   - `for x in s:` — iteration is safe by construction, bounded by `N`
     (termination free); modifying `s` inside is a compile error.
-  Two mutations in one statement are rejected (unspecified order).
+  Two mutations in one statement are rejected (unspecified order), and
+  a mutating method may only appear where it runs exactly once: not in
+  `while` conditions (re-run every iteration), not in `elif` conditions
+  or `and`/`or` right sides (may be skipped). The first condition of an
+  `if` is fine — `if q.push(x):` — and its effect is tracked into every
+  branch and the code after.
 - `string[N]` — a `seq` of bytes (`0 .. 255`, stored as one byte each)
   with literal syntax: `var s: string[40] = "hello"` (the literal must
   fit, checked at compile time), `s.add(", ")`, `s.add(other)` (append,
@@ -240,9 +245,14 @@ cannot express "anything but zero").
 
 **What invalidates a flow fact:** assigning something wider, passing the
 variable as a `var` argument, using it as a `with` target, calling a
-routine that may write it, or entering a loop whose body modifies it (the
-loop condition re-proves what it can on every entry). Var params never
-carry flow facts — they may alias anything.
+routine that may write it (including a `with` block's `start`/`end`), or
+entering a loop whose body modifies it (the loop condition re-proves what
+it can on every entry). Var params never carry flow facts — they may
+alias anything. Aliasing itself is restricted: a global cannot be passed
+as a `var` argument to a routine that also touches that global directly,
+and a `var` param cannot be forwarded to a routine touching a
+type-compatible global — writes through the alias would make the
+callee's facts lie.
 
 One loop exception — **accumulator induction**: in any loop with a proven
 trip bound (`for`, and `while` via its termination bound), a local

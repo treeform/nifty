@@ -1,0 +1,7 @@
+thread main() =
+  var s: seq[2, int]
+  s.add(1)
+  if s.pop() == 1:
+    echo 1
+  else:
+    discard s.pop()

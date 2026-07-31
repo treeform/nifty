@@ -37,6 +37,8 @@ type
     loopWiths: seq[int]        # withDepth at entry of each enclosing loop
     facts: Table[string, Fact] # names with refined ranges at this point
     mutInStmt: int             # mutating methods seen in the current stmt
+    mutBan: int                # >0 where mutating methods may not appear
+    routineAccess: Table[string, HashSet[string]] # routine -> globals it touches
     heldLocks: seq[string]     # Lock names currently held (lexical with-stack)
     sharedProt: Table[string, HashSet[string]] # shared global -> its lock(s)
     routineWrites: Table[string, HashSet[string]] # routine -> globals it may write
@@ -864,8 +866,10 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       # already held (and) or failed (or) — check it under those facts.
       let saved = c.facts
       c.addCondFacts(e.kids[0], negated = e.sval == "or")
+      inc c.mutBan # the right side may be skipped at runtime
       if c.expectVal(e.kids[1]).kind != tyBool:
         err(e.line, "'" & e.sval & "' needs bool operands")
+      dec c.mutBan
       c.facts = saved
       e.typ = Typ(kind: tyBool)
     else:
@@ -980,6 +984,10 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     let bt = c.expectVal(e.kids[0])
     let nArgs = e.kids.len - 1
     if e.sval in mutMethods:
+      if c.mutBan > 0:
+        err(e.line, "a mutating method cannot appear here: this position " &
+          "may not run exactly once (loop conditions re-run; elif and " &
+          "and/or right sides may be skipped); do it in its own statement")
       if e.kids[0].kind != ekIdent:
         err(e.line, "mutate a seq/string through a plain variable name")
       if not e.kids[0].mut:
@@ -1056,6 +1064,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           addLo = a.sval.len
           addHi = a.sval.len
         else:
+          if a.kind notin {ekIdent, ekField, ekIndex}:
+            err(a.line, "put the appended string in a variable first")
           let at = c.expectVal(a)
           if at.kind != tyStr:
             err(a.line, "can only add a string literal or a string, got " & $at)
@@ -1153,6 +1163,19 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if not typRangeEq(at, pt.typ):
           err(arg.line, "argument for var parameter '" & pt.name &
             "' must have exactly the range " & $pt.typ & " (got " & $at & ")")
+        if name in c.routineAccess:
+          if root.symKind == syGlobal and root.sval in c.routineAccess[name]:
+            err(arg.line, "cannot pass global '" & root.sval &
+              "' as a var argument to '" & name & "': it also accesses '" &
+              root.sval & "' directly, and writes through the parameter " &
+              "would make its facts lie (aliasing)")
+          if root.symKind == syParam and root.isVarParam:
+            for gname in c.routineAccess[name]:
+              if gname in c.globals and typEq(c.globals[gname], root.typ):
+                err(arg.line, "cannot forward var parameter '" & root.sval &
+                  "' to '" & name & "': it accesses global '" & gname &
+                  "' of the same type, which '" & root.sval &
+                  "' might alias")
         c.delFacts root.sval
       else:
         if pt.typ.kind == tyInt:
@@ -1256,13 +1279,20 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       if c.factName(s.lhs) != "":
         c.facts[s.lhs.sval] = exprFact(s.rhs)
   of skIf:
-    let base = c.facts
-    var negAcc = base
+    var negAcc = c.facts
     var branchFacts: seq[Table[string, Fact]]
-    for br in s.elifs:
+    for i, br in s.elifs:
       c.facts = negAcc
+      if i > 0:
+        inc c.mutBan # elif conditions may be skipped at runtime
       if c.expectVal(br.cond).kind != tyBool:
         err(br.cond.line, "condition must be a bool")
+      if i > 0:
+        dec c.mutBan
+      else:
+        # The first condition always runs exactly once: its side effects
+        # (a pop, a push) persist for every branch and the code after.
+        negAcc = c.facts
       c.addCondFacts(br.cond)
       c.checkBody(br.body)
       if not alwaysExits(br.body):
@@ -1278,7 +1308,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     else:
       branchFacts.add negAcc # the fall-through path
     if branchFacts.len == 0:
-      c.facts = base # everything after is unreachable
+      c.facts = negAcc # everything after is unreachable
     elif branchFacts.len == 1:
       c.facts = branchFacts[0]
     else:
@@ -1292,8 +1322,10 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     c.collectAssigned(s.body, assigned)
     for n in assigned:
       c.delFacts n
+    inc c.mutBan # the condition re-runs every iteration
     if c.expectVal(s.cond).kind != tyBool:
       err(s.cond.line, "condition must be a bool")
+    dec c.mutBan
     # The termination proof: strict induction progress, or an explicit
     # max N (which bounds the loop by construction - it also stops after
     # N iterations). Runs after the condition is checked (the halving
@@ -1422,6 +1454,10 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
             not typEq(r.params[0].typ, t) or not typRangeEq(r.params[0].typ, t) or
             not r.ret.isNil:
           err(s.line, "with on a " & $t & " needs '" & pn & "' to be: " & want)
+      for pn in ["start", "end"]:
+        if pn in c.routineWrites:
+          for gw in c.routineWrites[pn]:
+            c.delFacts gw
       s.typ = t
     let isLock = s.typ != nil and s.typ.kind == tyLock
     if isLock:
@@ -1429,6 +1465,12 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     inc c.withDepth
     c.checkBody(s.body)
     dec c.withDepth
+    if not isLock:
+      # end(x) runs after the body and may write globals too.
+      for pn in ["start", "end"]:
+        if pn in c.routineWrites:
+          for gw in c.routineWrites[pn]:
+            c.delFacts gw
     if isLock:
       discard c.heldLocks.pop
       # Facts proven under the lock die with it: another thread may take
@@ -1610,6 +1652,11 @@ proc check*(m: Module) =
     access[r.name] = acc
     writes[r.name] = wr
   c.routineWrites = writes
+  for rname, accTab in access:
+    var names: HashSet[string]
+    for g in accTab.keys:
+      names.incl g
+    c.routineAccess[rname] = names
 
   var accThreads: Table[string, seq[string]]
   var lockProt: Table[string, HashSet[string]]

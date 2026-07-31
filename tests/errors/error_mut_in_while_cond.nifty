@@ -1,0 +1,5 @@
+thread main() =
+  var s: seq[4, int]
+  var i: 0 .. 5 = 5
+  while s.push(1) and i > 0:
+    i = i - 1
