@@ -359,7 +359,6 @@ via interval analysis with zero runtime checks in the generated C, `echo`,
 `discard`, C output, generated `main` with thread spawn/join.
 
 Not yet implemented: `index` types, fixed strings, wildcard generics,
-tail-call recursion, the per-thread error flag, loop-induction
-bounds for accumulators (today an accumulator needs a guard like
-`if sum <= 900:` because facts drop at loop entry; induction would prove
-`sum + i` over a counted loop directly).
+tail-call recursion, the per-thread error flag, accumulator induction for
+`while` loops (counted `for` loops have it; a `while` accumulator still
+needs a guard like `if sum <= 900:`).
