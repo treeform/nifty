@@ -93,6 +93,23 @@ v0 types:
   type `T`. Arrays are indexed `a[i]` with a bounds check (traps in v0).
   Whole-array assignment/copy is not allowed; copy elements in a loop.
 - `Lock` — a mutex. Only allowed as a global; only usable via `with`.
+- `object` — a static struct, exactly like C:
+
+  ```nim
+  type Vec2 = object
+    x: int
+    y: int
+  ```
+
+  Nothing grows, everything is defined: fields are `int`, `bool`, arrays,
+  or other objects (no `Lock`). A type can only refer to types declared
+  *above* it — declare-before-use for types — so recursive types, and
+  therefore unknown sizes, are impossible by construction. Objects have C
+  value semantics: assignment and non-`var` parameters copy (a fixed,
+  compile-time-known cost), `var` parameters pass by pointer. Field access
+  is `a.b`, nests freely with indexing (`particles[i].pos.x`). Objects are
+  zero-initialized. There are no constructors and no literals in v0:
+  declare, then assign fields.
 - String literals exist only as `echo` arguments in v0.
 
 Planned types:
@@ -152,6 +169,7 @@ Nifty compiles one module to one portable C file (C99 + pthreads):
 | `const`                | `static const int64_t`                     |
 | `func` / `proc`        | `static` function                          |
 | `thread foo`           | `static void *t_foo(void*)` + `pthread_create`/`join` in generated `main` |
+| `type ... = object`    | `typedef struct`                           |
 | `with` on a `Lock`     | `pthread_mutex_t` lock–unlock pair         |
 | `with` on other types  | `start(x)` / `end(x)` calls around the block |
 | `a[i]`                 | index via bounds-check helper              |
@@ -168,20 +186,23 @@ libc + pthreads and a few line-tagged trap helpers.
 ## Grammar (v0, informal)
 
 ```
-module      = { constDecl | globalDecl | routineDecl }
+module      = { constDecl | globalDecl | typeDecl | routineDecl }
 constDecl   = "const" ident "=" constExpr NL
 globalDecl  = "var" ident ":" type NL
+typeDecl    = "type" ident "=" "object" NL INDENT { fieldDecl } DEDENT
+fieldDecl   = ident { "," ident } ":" type NL
 routineDecl = ("func" | "proc" | "thread") ident "(" [params] ")" [":" type] "=" body
 params      = param { "," param }
 param       = ident { "," ident } ":" ["var"] type
 type        = "int" | "bool" | "Lock" | "array" "[" (int | constIdent) "," type "]"
+            | objectTypeName
 body        = simpleStmt NL | NL INDENT { stmt } DEDENT
 stmt        = simpleStmt NL | ifStmt | whileStmt | forStmt | loopStmt | withStmt
 simpleStmt  = varDecl | assign | callStmt | "return" [expr] | "break"
             | "echo" expr { "," expr } | "discard" expr
 expr        = orExpr; standard precedence:
               or < and < not < (== != < <= > >=) < (+ -) < (* / %) < unary - < postfix
-postfix     = atom { "[" expr "]" | "(" [args] ")" }
+postfix     = atom { "[" expr "]" | "." ident | "(" [args] ")" }
 ```
 
 Comments run from `#` to end of line. Indentation is spaces only.
@@ -189,6 +210,7 @@ Comments run from `#` to end of line. Indentation is spaces only.
 ## v0 implementation status
 
 Implemented: everything above not marked *planned* — `const`/`var` globals,
+`object` types with declare-before-use,
 `func`/`proc`/`thread` with the full rights table, no-recursion via
 declare-before-use, `if`/`while`/`for`/`loop`/`with` (Lock and start/end
 protocol), locks,

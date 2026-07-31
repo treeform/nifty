@@ -38,6 +38,48 @@ block: # producer/consumer over a bounded queue, real pthreads
   doAssert code == 0
   doAssert output == "sum: 4950\n", output
 
+block: # object types: structs, nesting, var params, func by value
+  let (output, code) = buildAndRun(readFile(root / "examples" / "particles.nifty"),
+    "particles")
+  doAssert code == 0
+  doAssert output == "p0 at 4,0 speed 1\np1 at 8,8 speed 8\np2 at 12,16 speed 25\n",
+    output
+
+block: # objects have value semantics: assignment copies
+  let (output, code) = buildAndRun("""
+type Vec2 = object
+  x: int
+  y: int
+
+var a: Vec2
+
+thread main() =
+  a.x = 1
+  var b = a
+  b.x = 2
+  echo a.x, " ", b.x
+""", "objcopy")
+  doAssert code == 0
+  doAssert output == "1 2\n", output
+
+block: # unknown fields are rejected
+  doAssert "has no field" in rejects("""
+type Vec2 = object
+  x: int
+  y: int
+
+var a: Vec2
+
+thread main() =
+  echo a.z
+""")
+
+block: # recursive types are impossible (declare-before-use)
+  doAssert "unknown type" in rejects("""
+type Node = object
+  next: Node
+""")
+
 block: # var parameters
   let (output, code) = buildAndRun("""
 var n: int

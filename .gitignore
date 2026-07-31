@@ -1,5 +1,4 @@
-nifty
+/nifty
 examples/*.c
-examples/hello
-examples/sort
-examples/queue
+examples/*
+!examples/*.nifty

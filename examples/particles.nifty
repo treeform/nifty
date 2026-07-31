@@ -1,0 +1,37 @@
+# Object types: static structs, declare-before-use, value semantics.
+# A type can only refer to types declared above it, so sizes are always
+# finite and known at compile time.
+
+const MaxParticles = 3
+
+type Vec2 = object
+  x: int
+  y: int
+
+type Particle = object
+  pos: Vec2
+  vel: Vec2
+  alive: bool
+
+var particles: array[MaxParticles, Particle]
+
+func speed(v: Vec2): int =
+  return v.x * v.x + v.y * v.y
+
+proc step(p: var Particle) =
+  p.pos.x = p.pos.x + p.vel.x
+  p.pos.y = p.pos.y + p.vel.y
+
+proc spawnAll() =
+  for i in 0 ..< MaxParticles:
+    particles[i].alive = true
+    particles[i].vel.x = i + 1
+    particles[i].vel.y = i * 2
+
+thread main() =
+  spawnAll()
+  for t in 0 ..< 4:
+    for i in 0 ..< MaxParticles:
+      step(particles[i])
+  for i in 0 ..< MaxParticles:
+    echo "p", i, " at ", particles[i].pos.x, ",", particles[i].pos.y, " speed ", speed(particles[i].vel)
