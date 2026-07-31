@@ -1,0 +1,41 @@
+# Every while loop must be provably bounded - an unbounded while does
+# not compile. Three ways a loop is allowed to run:
+#
+# 1. for loops and ranged induction: a finite-ranged counter that
+#    strictly steps toward a bound every iteration (t below, and the
+#    i/j counters in the sort example).
+# 2. Halving progress: d = d / 2 with a condition that exits at zero
+#    (see the division example).
+# 3. An explicit cap: while cond max N. The loop is bounded by
+#    construction - it ALSO stops after N iterations. No trap, no
+#    unbounded spin, and its worst case is exactly N passes.
+#
+# This does not compile:
+#   while x != y:      error: cannot prove this while loop terminates:
+#     ...                     no finite-ranged variable makes strict
+#                             progress every iteration; add 'max N'
+#
+# loop: stays the one sanctioned infinite loop, top of a thread only.
+
+# Subtractive gcd: a human sees x + y shrinks every pass, but the
+# induction checker does not - so the loop carries max.
+func gcd(a, b: 1 .. 1000000): int =
+  var x: 0 .. 1000000 = a
+  var y: 0 .. 1000000 = b
+  while x != y max 2000000:
+    let d = x - y
+    if d > 0:
+      x = d
+    let e = y - x
+    if e > 0:
+      y = e
+  return x
+
+thread main() =
+  # Induction-proven: t has a finite range and strictly decreases.
+  var t: 0 .. 5 = 5
+  while t > 0:
+    echo t
+    t = t - 1
+  echo gcd(12, 18)
+  echo gcd(1071, 462)

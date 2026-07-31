@@ -1,0 +1,8 @@
+var stop: bool
+
+thread main() =
+  var n: 0 .. 10 = 0
+  while not stop:
+    if n < 10:
+      n = n + 1
+  echo n

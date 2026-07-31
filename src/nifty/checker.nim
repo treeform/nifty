@@ -416,6 +416,118 @@ proc alwaysExits(body: seq[Stmt]): bool =
   ## Does this body always leave the enclosing block (return or break)?
   body.len > 0 and (body[^1].kind in {skReturn, skBreak} or alwaysReturns(body))
 
+proc hasLoopBreak(body: seq[Stmt]): bool =
+  ## Is there a break that targets the enclosing loop (not a nested one)?
+  for st in body:
+    case st.kind
+    of skBreak:
+      return true
+    of skWhile, skFor, skLoop:
+      discard # a break in there targets the inner loop
+    of skIf:
+      for br in st.elifs:
+        if hasLoopBreak(br.body):
+          return true
+      if hasLoopBreak(st.elseBody):
+        return true
+    of skWith:
+      if hasLoopBreak(st.body):
+        return true
+    else:
+      discard
+
+# --- termination proof ----------------------------------------------------
+
+proc condZeroExit(c: Ctx, cond: Expr, v: string): bool =
+  ## Does the condition guarantee |v| >= 1 while the loop keeps running?
+  ## (Needed for halving progress: v = v / k stalls at 0.)
+  let f = c.cmpFact(cond)
+  if f.name != v:
+    return false
+  case f.op
+  of "!=": f.k == 0
+  of ">": f.k >= 0
+  of ">=": f.k >= 1
+  of "<": f.k <= 0
+  of "<=": f.k <= -1
+  else: false
+
+proc whileIsBounded(c: Ctx, s: Stmt): bool =
+  ## A while loop is bounded if some finite-ranged local makes strict
+  ## progress on every iteration: every assignment to it is v = v + k or
+  ## v = v - k (same direction, const k >= 1), at least one of them at the
+  ## top level of the body — or v = v / k (|k| >= 2) with a condition
+  ## that exits at zero (halving stalls at 0).
+  type Cand = object
+    dir: int # +1 inc, -1 dec, 2 halving, 0 none
+    top: bool
+    bad: bool
+  var cands: Table[string, Cand]
+
+  proc classify(st: Stmt, top: bool) =
+    if st.kind == skAssign and st.lhs.kind == ekIdent:
+      let v = st.lhs.sval
+      var cd = cands.getOrDefault(v, Cand())
+      var thisDir = 0
+      let r = st.rhs
+      if r.kind == ekBin and r.kids[0].kind == ekIdent and r.kids[0].sval == v:
+        let kc = c.tryConstEval(r.kids[1])
+        if kc.known:
+          if r.sval == "+" and kc.val >= 1: thisDir = 1
+          elif r.sval == "-" and kc.val >= 1: thisDir = -1
+          elif r.sval == "/" and (kc.val >= 2 or kc.val <= -2): thisDir = 2
+      if thisDir == 0 or (cd.dir != 0 and cd.dir != thisDir):
+        cd.bad = true
+      else:
+        cd.dir = thisDir
+        if top:
+          cd.top = true
+      cands[v] = cd
+    if st.kind == skWith:
+      var cd = cands.getOrDefault(st.name, Cand())
+      cd.bad = true
+      cands[st.name] = cd
+    # Anything touched through a var argument makes an unknown change.
+    var touched: HashSet[string]
+    for e in [st.init, st.lhs, st.rhs, st.cond, st.lo, st.hi, st.value]:
+      c.collectAssignedExpr(e, touched)
+    for a in st.args:
+      c.collectAssignedExpr(a, touched)
+    for t in touched:
+      var cd = cands.getOrDefault(t, Cand())
+      cd.bad = true
+      cands[t] = cd
+    for sub in st.body:
+      classify(sub, false)
+    for br in st.elifs:
+      for sub in br.body:
+        classify(sub, false)
+    for sub in st.elseBody:
+      classify(sub, false)
+
+  for st in s.body:
+    classify(st, true)
+
+  for v, cd in cands:
+    if cd.bad or not cd.top or cd.dir == 0:
+      continue
+    var t: Typ = nil
+    for i in countdown(c.scopes.len - 1, 0):
+      if v in c.scopes[i]:
+        if c.scopes[i][v].kind == syLocal:
+          t = c.scopes[i][v].typ
+        break
+    if t == nil or t.kind != tyInt:
+      continue
+    case cd.dir
+    of 1:
+      if t.rhi < IntHigh: return true
+    of -1:
+      if t.rlo > IntLow: return true
+    else:
+      if c.condZeroExit(s.cond, v): return true
+  false
+
 # --- range compatibility --------------------------------------------------
 
 proc typRangeEq(a, b: Typ): bool =
@@ -753,8 +865,18 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     c.loopWiths.add c.withDepth
     c.checkBody(s.body)
     discard c.loopWiths.pop
+    # The termination proof: strict induction progress, or an explicit
+    # max N (which bounds the loop by construction - it also stops after
+    # N iterations).
+    if s.maxTrips == 0 and not c.whileIsBounded(s):
+      err(s.line, "cannot prove this while loop terminates: no finite-" &
+        "ranged variable makes strict progress every iteration; add " &
+        "'max N' to bound it (the loop then also stops after N iterations)")
     c.facts = dropped
-    c.addCondFacts(s.cond, negated = true) # the loop exited: cond is false
+    # After the loop the condition is false - but only if the loop cannot
+    # leave any other way (break, or the max cap).
+    if s.maxTrips == 0 and not hasLoopBreak(s.body):
+      c.addCondFacts(s.cond, negated = true)
   of skFor:
     if c.expectVal(s.lo).kind != tyInt or c.expectVal(s.hi).kind != tyInt:
       err(s.line, "for loop bounds must be ints")

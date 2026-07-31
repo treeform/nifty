@@ -126,9 +126,27 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.genBlock(s.elseBody)
     g.put "}"
   of skWhile:
-    g.put "while " & g.genCond(s.cond) & " {"
-    g.genBlock(s.body)
-    g.put "}"
+    if s.maxTrips > 0:
+      # `while cond max N` is bounded by construction: the loop also
+      # stops after N iterations.
+      let ctr = "ni_trips" & $g.tmpN
+      inc g.tmpN
+      g.put "{"
+      inc g.ind
+      g.put "int64_t " & ctr & " = 0;"
+      g.put "while (" & ctr & " < " & $s.maxTrips & "LL && " &
+        g.genCond(s.cond) & ") {"
+      g.genBlock(s.body)
+      inc g.ind
+      g.put "++" & ctr & ";"
+      dec g.ind
+      g.put "}"
+      dec g.ind
+      g.put "}"
+    else:
+      g.put "while " & g.genCond(s.cond) & " {"
+      g.genBlock(s.body)
+      g.put "}"
   of skFor:
     let tmp = "ni_end" & $g.tmpN
     inc g.tmpN

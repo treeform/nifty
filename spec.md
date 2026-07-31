@@ -144,11 +144,17 @@ Planned types:
 - `if cond: ... elif cond: ... else: ...`
 - `for i in lo ..< hi:` / `for i in lo .. hi:` — bounded by construction;
   `i` is immutable; bounds are evaluated once.
-- `while cond:` — v0 accepts any `while`. Planned rule: a `while` must
-  either have a compiler-recognizable induction bound or an explicit
-  `while cond max N:` clause that traps on overrun. Together with
-  no-recursion this gives a static worst-case iteration count per thread
-  (static gas / WCET).
+- `while cond:` — must be provably bounded. Either the compiler
+  recognizes induction — a finite-ranged local that strictly steps toward
+  a bound on every iteration (`i = i + 1` at the top level of the body),
+  or halves toward a zero-exit condition (`d = d / 2` under
+  `while d != 0:`) — or the loop carries an explicit cap:
+  `while cond max N:`, which is bounded *by construction*: the loop also
+  stops after N iterations (no trap, no unbounded spin; worst case is
+  exactly N passes). Together with no-recursion this gives a static
+  worst-case iteration count per thread (static gas / WCET).
+  Note: facts from the negated condition apply after the loop only when
+  it cannot exit another way (no `break`, no `max` cap).
 - `loop:` — infinite loop, allowed **only at the top level of a `thread`
   body**. This is the event/server loop; everything inside it must
   (eventually) be bounded. `break` is allowed.
@@ -244,6 +250,9 @@ with queueLock:
    fits int64. Full-range `int + int` does not compile — narrow a range
    or guard first (`if sum <= 900: sum = sum + x`). This is what makes
    the interval analysis honest: ranges cannot silently wrap.
+4. **Termination**: every `while` must be provably bounded — induction
+   or an explicit `max N` cap (see Statements). `loop` at the top of a
+   thread is the only infinite control flow in the language.
 
 Stores complete the system: assigning to (or initializing, returning into,
 or passing as an argument for) a ranged location must prove the value fits
@@ -295,6 +304,7 @@ type        = "int" | "bool" | "Lock" | "array" "[" (int | constIdent) "," type 
             | objectTypeName | constExpr (".." | "..<") constExpr
 body        = simpleStmt NL | NL INDENT { stmt } DEDENT
 stmt        = simpleStmt NL | ifStmt | whileStmt | forStmt | loopStmt | withStmt
+whileStmt   = "while" expr ["max" constExpr] ":" body
 simpleStmt  = varDecl | assign | callStmt | "return" [expr] | "break"
             | "echo" expr { "," expr } | "discard" expr
 expr        = orExpr; standard precedence:
@@ -315,7 +325,8 @@ via interval analysis with zero runtime checks in the generated C, `echo`,
 `discard`, C output, generated `main` with thread spawn/join.
 
 Not yet implemented: `index` types, fixed strings, wildcard generics,
-tail-call recursion, `while ... max N` bound checking (termination / WCET),
-the per-thread error flag, loop-induction bounds for accumulators (today an
-accumulator needs a guard like `if sum <= 900:` because facts drop at loop
-entry; induction would prove `sum + i` over a counted loop directly).
+tail-call recursion, the WCET/stack/RAM report (`nifty report` — all three
+are now exact static numbers), the per-thread error flag, loop-induction
+bounds for accumulators (today an accumulator needs a guard like
+`if sum <= 900:` because facts drop at loop entry; induction would prove
+`sum + i` over a counted loop directly).

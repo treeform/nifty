@@ -293,6 +293,12 @@ proc parseStmt(p: var Parser): Stmt =
   of "while":
     discard p.next
     result = Stmt(kind: skWhile, line: t.line, cond: p.parseExpr())
+    if p.atIdent("max"):
+      discard p.next
+      let n = p.evalConst(p.parseExpr())
+      if n < 1:
+        err(t.line, "max bound must be at least 1")
+      result.maxTrips = n
     p.expectOp(":")
     result.body = p.parseBody()
   of "for":

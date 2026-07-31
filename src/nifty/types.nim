@@ -48,6 +48,7 @@ type
     init*: Expr        # var/let initializer
     lhs*, rhs*: Expr   # assign
     cond*: Expr        # while
+    maxTrips*: int64   # while: explicit `max N` bound (0 = none)
     lo*, hi*: Expr     # for
     inclusive*: bool   # for: .. vs ..<
     value*: Expr       # return/discard/call
