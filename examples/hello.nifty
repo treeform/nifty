@@ -1,0 +1,16 @@
+# The smallest useful nifty program: a func, a proc, a global, a thread.
+
+const MaxItems = 10
+
+var total: int
+
+func double(x: int): int =
+  return x * 2
+
+proc addTotal(x: int) =
+  total = total + x
+
+thread main() =
+  for i in 0 ..< MaxItems:
+    addTotal(double(i))
+  echo "total: ", total
