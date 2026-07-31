@@ -22,10 +22,11 @@ static bound on memory, stack depth, and worst-case iterations per thread.
   Stack depth is therefore statically bounded. (Planned: allow self and
   mutual recursion when every call in the cycle is a provable tail call,
   compiled to loops.)
-- **No exceptions.** Errors that the language itself detects (index out of
-  bounds) trap with a message in v0. Planned: a per-thread error flag /
-  lightweight `Result` values. There is no unwinding, ever. Division by
-  zero cannot happen at all — see Static proofs.
+- **No exceptions, no traps.** Division by zero, array indexing, and
+  integer overflow are all proven safe at compile time (see Static proofs);
+  the generated C contains no runtime checks and no exit paths. Planned:
+  a per-thread error flag / lightweight `Result` values for I/O-style
+  errors. There is no unwinding, ever.
 - **No pointers.** `var` parameters cover mutable arguments. Long-lived
   references are array indices. (Planned: `index arr` types — indices bound
   to a specific global array, born in-range and never dangling, so
@@ -88,7 +89,15 @@ there are no forward declarations, and a routine may not call itself.
 
 v0 types:
 
-- `int` — 64-bit signed integer.
+- `int` — 64-bit signed integer (the full range).
+- `lo .. hi` / `lo ..< hi` — a range-restricted int, Pascal-subrange style:
+  `var head: 0 ..< QueueSize`, `func double(x: 0 .. 100): 0 .. 200`.
+  Bounds are constant expressions. A declared range is an *invariant*:
+  every store into the variable/field/element must prove the value fits.
+  That makes reads known-bounded — even reads of globals shared between
+  threads, because no write anywhere can violate the invariant. Ranges
+  are what feed the index and overflow proofs. Zero-initialized locations
+  (globals, fields, un-initialized locals) need 0 inside their range.
 - `bool` — `true` / `false`.
 - `array[N, T]` — fixed length `N` (an integer literal or `const`), element
   type `T`. Arrays are indexed `a[i]` with a bounds check (traps in v0).
@@ -119,13 +128,8 @@ v0 types:
 
 Planned types:
 
-- **Range integers** `lo .. hi`, Pascal-subrange style. Narrowing inserts a
-  runtime check by default; a prove mode reports every check the compiler
-  could not discharge (flow-sensitive narrowing from `if` and loop bounds).
-- **Typed indices** `index arr` — an integer bound to one specific global
-  array, valid by construction (only produced in-range, nothing is ever
-  freed), so indexing needs no check. The out-of-range values encode `none`
-  (niche optimization) for free.
+- **Typed indices** `index arr` — sugar for `0 ..< len(arr)` plus
+  provenance, so an index cannot be used on the wrong array.
 - **Fixed strings** `string[N]` — Turbo Pascal style, stored inline.
 - **Wildcard generics over builtins only** — `proc sort(arr: var array)` or
   `array[N, T]` with `N`, `T` binding implicitly at the call site, checked
@@ -166,46 +170,65 @@ Planned types:
 
 ## Static proofs
 
-Nifty's long-term direction is to prove safety properties at compile time
-instead of checking them at run time. The first proof is implemented:
+Nifty proves safety at compile time instead of checking it at run time.
+There is no gradual fallback: what cannot be proven does not compile, and
+the user adds a test the prover can see. Three proofs are implemented, all
+running on one engine — interval analysis. Every int expression carries a
+proven `[lo, hi]` range (plus a separate nonzero bit, since an interval
+cannot express "anything but zero").
 
-### Division is proven safe
+**Where ranges come from:**
 
-Every `/` and `%` must have a divisor the compiler can prove nonzero:
+- literals and consts: `4` is `[4, 4]`;
+- declared range types: reading `var head: 0 ..< QueueSize` gives
+  `[0, QueueSize-1]` anywhere, even across threads — the range is an
+  invariant every write must prove;
+- `for i in a ..< b:` — the loop variable is `[a.lo, b.hi - 1]`, immutable;
+- flow tests on locals: `if i < 5:` clamps in the then-branch, the else
+  branch gets the negation, `elif` chains accumulate negations,
+  `if x > 100: return` clamps everything after (guard style), `and` is
+  short-circuit-aware (`j >= 0 and data[j] > key` checks `data[j]` under
+  `j >= 0`), and branches rejoin by interval hull — so clamping works:
 
-1. a nonzero constant expression: `x / 4`, `i % QueueSize`, or
-2. a local variable (or non-var parameter) with a dominating test:
+  ```nim
+  var nx = pos + vel        # may be out of range
+  if nx > 1000: nx = 1000   # after the if: proven <= 1000
+  ```
 
-   ```nim
-   if b != 0:
-     echo x / b
-   ```
+- arithmetic: ranges combine through `+ - * / %` exactly.
 
-Nonzero facts flow through the program:
+**What invalidates a flow fact:** assigning something wider, passing the
+variable as a `var` argument, using it as a `with` target, or entering a
+loop whose body modifies it (the loop condition re-proves what it can on
+every entry). Globals and var params never carry flow facts at all —
+another thread (or an alias) could change them between test and use.
+Snapshot into a local first: `let t = total` then test `t`. Declared
+ranges are how shared globals stay provable.
 
-- `if b != 0:`, `b > 0`, `b < 0`, `b >= 1`, `b == 5`, ... prove `b` in the
-  then-branch; `and` conditions prove both sides.
-- The else branch of `if b == 0:` proves `b`.
-- Guard style works: `if b == 0: return` proves `b` for everything after.
-- `while b != 0:` proves `b` inside the loop body (re-tested every entry).
-- `var b = 4` (any nonzero constant initializer or assignment) proves `b`.
-- Assigning anything unprovable, passing `b` as a `var` argument, using it
-  as a `with` target, or entering a loop whose body modifies `b` clears
-  the fact.
+### The three proofs
 
-Globals never carry the fact — another thread could zero a global between
-the test and the division. Snapshot into a local first:
+1. **Division**: every `/` and `%` divisor must be proven nonzero
+   (`if b != 0:`, `b > 0`, a positive range type, ...). The
+   `int64.min / -1` case must also be excluded.
+2. **Indexing**: every `a[i]` must prove `i` inside `0 ..< len`. A
+   provably-bad index (`a[6]` on `array[5, T]`) is reported as always out
+   of bounds; an unprovable one demands a test. `for` loops over
+   `0 ..< len` prove for free; ranged index variables (`var head:
+   0 ..< QueueSize`) make even cross-thread indexing check-free.
+3. **Overflow**: every `+ - * /` (and unary `-`) must prove its result
+   fits int64. Full-range `int + int` does not compile — narrow a range
+   or guard first (`if sum <= 900: sum = sum + x`). This is what makes
+   the interval analysis honest: ranges cannot silently wrap.
 
-```nim
-let d = g
-if d != 0:
-  echo x / d
-```
+Stores complete the system: assigning to (or initializing, returning into,
+or passing as an argument for) a ranged location must prove the value fits
+its declared range. `var` parameters require the exact same range on both
+sides, since writes flow both ways.
 
-The payoff: because every division is proven, the generated C contains no
-runtime division checks — `/` and `%` compile to bare C operators and can
-never trap. This is the model for the planned range and index proofs: the
-check moves from run time to compile time, then disappears from the binary.
+**The payoff:** the generated C contains no runtime checks of any kind —
+no bounds checks, no division checks, no overflow checks, no trap-and-exit
+paths. `queue[tail]` compiles to `g_queue[g_tail]`. What remains at run
+time is exactly the program.
 
 ## Compilation model
 
@@ -220,8 +243,9 @@ Nifty compiles one module to one portable C file (C99 + pthreads):
 | `object Name =`        | `typedef struct`                           |
 | `with` on a `Lock`     | `pthread_mutex_t` lock–unlock pair         |
 | `with` on other types  | `start(x)` / `end(x)` calls around the block |
-| `a[i]`                 | index via bounds-check helper              |
+| `a[i]`                 | bare C indexing (proven safe, no checks)   |
 | `/`, `%`               | bare C `/` and `%` (proven safe, no checks) |
+| `lo .. hi` range types | `int64_t` (ranges exist only at compile time) |
 | `var` param (scalar)   | pointer parameter                          |
 | array param            | decayed pointer, `const` in C unless `var` |
 
@@ -243,7 +267,7 @@ routineDecl = ("func" | "proc" | "thread") ident "(" [params] ")" [":" type] "="
 params      = param { "," param }
 param       = ident { "," ident } ":" ["var"] type
 type        = "int" | "bool" | "Lock" | "array" "[" (int | constIdent) "," type "]"
-            | objectTypeName
+            | objectTypeName | constExpr (".." | "..<") constExpr
 body        = simpleStmt NL | NL INDENT { stmt } DEDENT
 stmt        = simpleStmt NL | ifStmt | whileStmt | forStmt | loopStmt | withStmt
 simpleStmt  = varDecl | assign | callStmt | "return" [expr] | "break"
@@ -258,13 +282,15 @@ Comments run from `#` to end of line. Indentation is spaces only.
 ## v0 implementation status
 
 Implemented: everything above not marked *planned* — `const`/`var` globals,
-`object` types with declare-before-use,
+`object` types and range types with declare-before-use,
 `func`/`proc`/`thread` with the full rights table, no-recursion via
 declare-before-use, `if`/`while`/`for`/`loop`/`with` (Lock and start/end
-protocol), locks, bounds-checked arrays, the division proof (compile-time
-nonzero divisors, no runtime division checks), `echo`, `discard`, C output,
-generated `main` with thread spawn/join.
+protocol), locks, the three static proofs (division, indexing, overflow)
+via interval analysis with zero runtime checks in the generated C, `echo`,
+`discard`, C output, generated `main` with thread spawn/join.
 
-Not yet implemented: range types, `index` types, fixed strings, wildcard
-generics, tail-call recursion, `while ... max N` bound checking, the
-per-thread error flag (v0 traps instead), WCET report.
+Not yet implemented: `index` types, fixed strings, wildcard generics,
+tail-call recursion, `while ... max N` bound checking (termination / WCET),
+the per-thread error flag, loop-induction bounds for accumulators (today an
+accumulator needs a guard like `if sum <= 900:` because facts drop at loop
+entry; induction would prove `sum + i` over a counted loop directly).

@@ -1,3 +1,5 @@
-thread main() =
-  var b = 0
+proc show(b: int) =
   echo 10 / b
+
+thread main() =
+  show(3)

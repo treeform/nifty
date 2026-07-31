@@ -12,6 +12,7 @@ type
     elem*: Typ           # tyArray
     name*: string        # tyObject
     fields*: seq[Field]  # tyObject
+    rlo*, rhi*: int64    # tyInt: declared range; full range = plain int
 
   SymKind* = enum
     syConst, syGlobal, syLocal, syParam
@@ -30,6 +31,8 @@ type
     symKind*: SymKind
     isVarParam*: bool
     mut*: bool
+    rlo*, rhi*: int64 # proven value range, set by the checker for int exprs
+    rnz*: bool        # proven nonzero, set by the checker for int exprs
 
   StmtKind* = enum
     skVar, skLet, skAssign, skIf, skWhile, skFor, skLoop, skWith,
@@ -85,6 +88,13 @@ type
     types*: seq[TypeDef]
     routines*: seq[Routine]
 
+proc intType*(lo = low(int64), hi = high(int64)): Typ =
+  ## An int type, optionally restricted to a declared range.
+  Typ(kind: tyInt, rlo: lo, rhi: hi)
+
+proc isFullRange*(t: Typ): bool =
+  t.rlo == low(int64) and t.rhi == high(int64)
+
 proc typEq*(a, b: Typ): bool =
   if a.isNil or b.isNil:
     return a.isNil and b.isNil
@@ -100,7 +110,8 @@ proc `$`*(t: Typ): string =
   if t.isNil:
     return "void"
   case t.kind
-  of tyInt: "int"
+  of tyInt:
+    if t.isFullRange: "int" else: $t.rlo & " .. " & $t.rhi
   of tyBool: "bool"
   of tyString: "string"
   of tyLock: "Lock"

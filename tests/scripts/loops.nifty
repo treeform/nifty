@@ -1,19 +1,21 @@
 thread main() =
-  var sum = 0
+  var sum: 0 .. 100 = 0
   for i in 0 ..< 5:
-    sum = sum + i
+    if sum <= 90:
+      sum = sum + i
   echo sum
-  var sum2 = 0
+  var sum2: 0 .. 100 = 0
   for j in 1 .. 5:
-    sum2 = sum2 + j
+    if sum2 <= 90:
+      sum2 = sum2 + j
   echo sum2
-  var n = 0
-  while n < 10:
+  var n: 0 .. 10 = 0
+  while n <= 8:
     n = n + 2
   echo n
-  var k = 0
+  var k: 0 .. 3 = 0
   loop:
-    k = k + 1
     if k >= 3:
       break
+    k = k + 1
   echo k

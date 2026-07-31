@@ -1,0 +1,4 @@
+var x: 0 .. 10
+
+thread main() =
+  x = 11

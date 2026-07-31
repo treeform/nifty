@@ -1,33 +1,40 @@
+# Two threads sharing a bounded ring buffer under a lock.
+# The fixed capacity IS the backpressure, and the declared ranges on
+# head, tail, and count are invariants every write must prove - which
+# is what makes queue[head] and queue[tail] check-free at runtime.
+
 const QueueSize = 4
 const Items = 100
 
-var queue: array[QueueSize, int]
-var head: int
-var tail: int
-var count: int
+var queue: array[QueueSize, 0 .. 99]
+var head: 0 ..< QueueSize
+var tail: 0 ..< QueueSize
+var count: 0 .. QueueSize
 var queueLock: Lock
 
-proc tryPush(v: int): bool =
+proc tryPush(v: 0 .. 99): bool =
   var ok = false
   with queueLock:
-    if count < QueueSize:
+    let n = count
+    if n < QueueSize:
       queue[tail] = v
       tail = (tail + 1) % QueueSize
-      count = count + 1
+      count = n + 1
       ok = true
   return ok
 
-proc tryPop(): int =
-  var v = -1
+proc tryPop(): -1 .. 99 =
+  var v: -1 .. 99 = -1
   with queueLock:
-    if count > 0:
+    let n = count
+    if n > 0:
       v = queue[head]
       head = (head + 1) % QueueSize
-      count = count - 1
+      count = n - 1
   return v
 
 thread producer() =
-  var i = 0
+  var i: 0 .. Items = 0
   loop:
     if i >= Items:
       break
@@ -35,13 +42,13 @@ thread producer() =
       i = i + 1
 
 thread consumer() =
-  var received = 0
-  var sum = 0
+  var received: 0 .. Items = 0
+  var sum: 0 .. 10000 = 0
   loop:
     if received >= Items:
       break
     let v = tryPop()
-    if v >= 0:
+    if sum <= 9900 and v >= 0:
       sum = sum + v
       received = received + 1
   echo "sum: ", sum

@@ -3,7 +3,7 @@
 const N = 3
 
 object Row =
-  cells: array[N, int]
+  cells: array[N, 0 .. 1000]
   label: int
 
 object Grid =
@@ -18,13 +18,16 @@ proc fill() =
       g.rows[r].cells[c] = r * 100 + c
 
 func rowSum(row: Row): int =
-  var s = 0
+  var s: 0 .. 10000 = 0
   for i in 0 ..< N:
-    s = s + row.cells[i]
+    if s <= 9000:
+      s = s + row.cells[i]
   return s
 
 proc bumpFirst(row: var Row) =
-  row.cells[0] = row.cells[0] + 1
+  let c0 = row.cells[0]
+  if c0 < 1000:
+    row.cells[0] = c0 + 1
 
 thread main() =
   fill()
@@ -34,6 +37,6 @@ thread main() =
   bumpFirst(g.rows[0])
   echo g.rows[0].cells[0]
   var copy = g.rows[1]
-  copy.cells[0] = 9999
+  copy.cells[0] = 999
   echo g.rows[1].cells[0]
   echo copy.cells[0]

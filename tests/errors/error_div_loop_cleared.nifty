@@ -1,5 +1,5 @@
 thread main() =
-  var b = 5
+  var b: 0 .. 5 = 5
   loop:
     echo 10 / b
     b = b - 1

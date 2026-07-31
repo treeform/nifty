@@ -1,14 +1,18 @@
 # The smallest useful nifty program: a func, a proc, a global, a thread.
+# Every division, index, and arithmetic op is proven safe at compile time,
+# so ranges appear on anything that grows.
 
 const MaxItems = 10
 
-var total: int
+var total: 0 .. 1000
 
-func double(x: int): int =
+func double(x: 0 .. 100): 0 .. 200 =
   return x * 2
 
-proc addTotal(x: int) =
-  total = total + x
+proc addTotal(x: 0 .. 200) =
+  let t = total
+  if t <= 800:
+    total = t + x
 
 thread main() =
   for i in 0 ..< MaxItems:

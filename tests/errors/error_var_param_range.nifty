@@ -1,0 +1,9 @@
+var n: 0 .. 10
+
+proc bump(x: var 0 .. 5) =
+  let t = x
+  if t < 5:
+    x = t + 1
+
+thread main() =
+  bump(n)

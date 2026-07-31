@@ -5,7 +5,7 @@ const K = 4
 
 var g: int
 
-func safeDiv(a, b: int): int =
+func safeDiv(a: 0 .. 100000, b: int): int =
   if b == 0:
     return 0
   return a / b

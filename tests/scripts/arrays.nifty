@@ -1,16 +1,17 @@
 const N = 5
 
-var data: array[N, int]
+var data: array[N, 0 .. 100]
 var grid: array[2, array[3, int]]
 
 proc fill() =
   for i in 0 ..< N:
     data[i] = i * i
 
-func sum(arr: array[N, int]): int =
-  var s = 0
+func sum(arr: array[N, 0 .. 100]): int =
+  var s: 0 .. 1000 = 0
   for i in 0 ..< N:
-    s = s + arr[i]
+    if s <= 900:
+      s = s + arr[i]
   return s
 
 thread main() =

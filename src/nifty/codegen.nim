@@ -29,9 +29,6 @@ proc cQuote(s: string): string =
     else: result.add ch
   result.add "\""
 
-proc where(g: Gen, line: int): string =
-  cQuote(g.src & ":" & $line)
-
 proc cBase(t: Typ): string =
   case t.kind
   of tyBool: "bool"
@@ -81,8 +78,8 @@ proc genExpr(g: var Gen, e: Expr): string =
     of "or": "(" & a & " || " & b & ")"
     else: "(" & a & " " & e.sval & " " & b & ")"
   of ekIndex:
-    g.genExpr(e.kids[0]) & "[ni_idx(" & g.genExpr(e.kids[1]) & ", " &
-      $e.kids[0].typ.len & "LL, " & g.where(e.line) & ")]"
+    # The checker proved the index is in bounds; no runtime check needed.
+    g.genExpr(e.kids[0]) & "[" & g.genExpr(e.kids[1]) & "]"
   of ekCall:
     let r = g.routines[e.sval]
     var parts: seq[string]
@@ -192,20 +189,9 @@ proc genStmt(g: var Gen, s: Stmt) =
 
 const cPrelude = """
 #include <stdio.h>
-#include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
-
-static int64_t ni_idx(int64_t i, int64_t len, const char *where) {
-  if (i < 0 || i >= len) {
-    fprintf(stderr, "nifty: index %lld out of bounds (0 ..< %lld) at %s\n",
-      (long long)i, (long long)len, where);
-    exit(1);
-  }
-  return i;
-}
-
 """
 
 proc generate*(m: Module, src: string): string =

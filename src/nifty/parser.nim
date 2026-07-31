@@ -46,42 +46,58 @@ proc expectNewline(p: var Parser) =
   if p.peek.kind == tkNewline:
     discard p.next
 
-proc parseType(p: var Parser): Typ =
-  let t = p.next
-  if t.kind != tkIdent:
-    err(t.line, "type expected")
-  case t.text
-  of "int":
-    Typ(kind: tyInt)
-  of "bool":
-    Typ(kind: tyBool)
-  of "Lock":
-    Typ(kind: tyLock)
-  of "array":
-    p.expectOp("[")
-    let lt = p.next
-    var n: int64
-    if lt.kind == tkInt:
-      n = parseBiggestInt(lt.text)
-    elif lt.kind == tkIdent and lt.text in p.consts:
-      n = p.consts[lt.text]
-    else:
-      err(lt.line, "array length must be an integer literal or a const")
-    if n <= 0:
-      err(lt.line, "array length must be positive")
-    p.expectOp(",")
-    let e = p.parseType()
-    if e.kind == tyLock:
-      err(lt.line, "Lock cannot be an array element")
-    p.expectOp("]")
-    Typ(kind: tyArray, len: n, elem: e)
-  else:
-    if t.text in p.types:
-      p.types[t.text]
-    else:
-      err(t.line, "unknown type: '" & t.text & "'")
-
 proc parseExpr(p: var Parser): Expr
+proc evalConst(p: Parser, e: Expr): int64
+
+proc parseType(p: var Parser): Typ =
+  let t = p.peek
+  if t.kind == tkIdent and
+      (t.text in ["int", "bool", "Lock", "array"] or t.text in p.types):
+    discard p.next
+    case t.text
+    of "int":
+      intType()
+    of "bool":
+      Typ(kind: tyBool)
+    of "Lock":
+      Typ(kind: tyLock)
+    of "array":
+      p.expectOp("[")
+      let lt = p.next
+      var n: int64
+      if lt.kind == tkInt:
+        n = parseBiggestInt(lt.text)
+      elif lt.kind == tkIdent and lt.text in p.consts:
+        n = p.consts[lt.text]
+      else:
+        err(lt.line, "array length must be an integer literal or a const")
+      if n <= 0:
+        err(lt.line, "array length must be positive")
+      p.expectOp(",")
+      let e = p.parseType()
+      if e.kind == tyLock:
+        err(lt.line, "Lock cannot be an array element")
+      p.expectOp("]")
+      Typ(kind: tyArray, len: n, elem: e)
+    else:
+      p.types[t.text]
+  else:
+    # Range type: constExpr .. constExpr  (or ..< for an exclusive bound).
+    if t.kind == tkIdent and t.text notin p.consts:
+      err(t.line, "unknown type: '" & t.text & "'")
+    let lo = p.evalConst(p.parseExpr())
+    var inclusive = true
+    if p.atOp("..<"):
+      inclusive = false
+    elif not p.atOp(".."):
+      err(t.line, "type expected")
+    discard p.next
+    var hi = p.evalConst(p.parseExpr())
+    if not inclusive:
+      hi = hi - 1
+    if hi < lo:
+      err(t.line, "empty range type: " & $lo & " .. " & $hi)
+    intType(lo, hi)
 
 proc parseAtom(p: var Parser): Expr =
   let t = p.peek

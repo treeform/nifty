@@ -1,12 +1,12 @@
 # Object types: static structs, declare-before-use, value semantics.
-# A type can only refer to types declared above it, so sizes are always
-# finite and known at compile time.
+# Field ranges are invariants: every store must prove it fits, so every
+# read is known-bounded - even across threads.
 
 const MaxParticles = 3
 
 object Vec2 =
-  x: int
-  y: int
+  x: -1000 .. 1000
+  y: -1000 .. 1000
 
 object Particle =
   pos: Vec2
@@ -19,8 +19,12 @@ func speed(v: Vec2): int =
   return v.x * v.x + v.y * v.y
 
 proc step(p: var Particle) =
-  p.pos.x = p.pos.x + p.vel.x
-  p.pos.y = p.pos.y + p.vel.y
+  let nx = p.pos.x + p.vel.x
+  if nx >= -1000 and nx <= 1000:
+    p.pos.x = nx
+  let ny = p.pos.y + p.vel.y
+  if ny >= -1000 and ny <= 1000:
+    p.pos.y = ny
 
 proc spawnAll() =
   for i in 0 ..< MaxParticles:

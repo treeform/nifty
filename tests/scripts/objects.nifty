@@ -1,6 +1,6 @@
 object Vec2 =
-  x: int
-  y: int
+  x: -1000 .. 1000
+  y: -1000 .. 1000
 
 object Rect =
   pos: Vec2
@@ -11,9 +11,13 @@ var screen: Rect
 func area(r: Rect): int =
   return r.size.x * r.size.y
 
-proc grow(r: var Rect, amount: int) =
-  r.size.x = r.size.x + amount
-  r.size.y = r.size.y + amount
+proc grow(r: var Rect, amount: 0 .. 100) =
+  let nx = r.size.x + amount
+  if nx <= 1000:
+    r.size.x = nx
+  let ny = r.size.y + amount
+  if ny <= 1000:
+    r.size.y = ny
 
 thread main() =
   screen.size.x = 10

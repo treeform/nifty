@@ -1,4 +1,5 @@
+var g: int
+
 thread main() =
-  var b = 5
-  b = b - 1
+  let b = g
   echo 10 / b

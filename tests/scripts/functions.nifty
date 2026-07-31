@@ -1,21 +1,25 @@
-var total: int
+var total: 0 .. 1000
 
-func square(x: int): int =
+func square(x: 0 .. 1000): int =
   return x * x
 
-func add(a, b: int): int =
+func add(a, b: 0 .. 1000): int =
   return a + b
 
-proc bump(x: var int) =
-  x = x + 1
+proc bump(x: var 0 .. 100) =
+  let t = x
+  if t < 100:
+    x = t + 1
 
-proc addTotal(x: int) =
-  total = total + x
+proc addTotal(x: 0 .. 100) =
+  let t = total
+  if t <= 900:
+    total = t + x
 
 thread main() =
   echo square(4)
   echo add(2, 3)
-  var n = 10
+  var n: 0 .. 100 = 10
   bump(n)
   bump(n)
   echo n

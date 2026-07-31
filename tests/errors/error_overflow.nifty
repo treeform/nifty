@@ -1,0 +1,5 @@
+func addAll(a, b: int): int =
+  return a + b
+
+thread main() =
+  echo addAll(1, 2)

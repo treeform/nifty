@@ -1,10 +1,14 @@
-var depth: int
+var depth: 0 .. 100
 
-proc start(x: var int) =
-  x = x + 1
+proc start(x: var 0 .. 100) =
+  let t = x
+  if t < 100:
+    x = t + 1
 
-proc end(x: var int) =
-  x = x - 1
+proc end(x: var 0 .. 100) =
+  let t = x
+  if t > 0:
+    x = t - 1
 
 thread main() =
   with depth:

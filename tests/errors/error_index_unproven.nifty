@@ -1,0 +1,7 @@
+var a: array[4, int]
+
+proc put(i: int) =
+  a[i] = 1
+
+thread main() =
+  put(2)
