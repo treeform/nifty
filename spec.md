@@ -116,23 +116,30 @@ v0 types:
   - `s[i]` — requires proof `i < s.len` (pin or test the length first).
   - `for x in s:` — iteration is safe by construction, bounded by `N`
     (termination free); modifying `s` inside is a compile error.
-  Two mutations in one statement are rejected (unspecified order), and
-  a mutating method may only appear where it runs exactly once: not in
+  A mutating method may only appear where it runs exactly once: not in
   `while` conditions (re-run every iteration), not in `elif` conditions
   or `and`/`or` right sides (may be skipped). The first condition of an
   `if` is fine — `if q.push(x):` — and its effect is tracked into every
-  branch and the code after.
+  branch and the code after. Multiple mutations in one statement are
+  fine: evaluation order is defined, left to right.
 
-**Evaluation order is defined — or the program does not compile.** C
-leaves subexpression order within a statement unspecified, so nifty
-rejects any statement where that could matter: two effectful calls whose
-targets overlap, or an effectful call beside a read of something it
-changes (`arr[g] = bump()` where `bump` writes `g`). `echo` arguments are
-hoisted to temporaries left-to-right in the generated C, so their order
-is always defined. Condition side effects are tracked precisely: the
-first `if` condition always runs and its effects persist into every
-branch; `elif` conditions and `and`/`or` right sides may only invalidate
-facts (their calls' write-effects are forgotten conservatively).
+**Evaluation order is strictly left to right, as written — effects
+included.** C leaves subexpression order within a statement unspecified;
+nifty does not inherit that. Whenever a statement contains an effectful
+call (a proc call or a container mutation), the compiler lowers it to
+temporaries in source order in the generated C — reads are captured at
+the moment the program text reaches them, effectful calls become their
+own sequence points, and `and`/`or` keep their short-circuit via
+branches. So `arr[g] = bump()` indexes with the value `g` had *before*
+`bump` ran, `a() + b()` calls `a` first, and `s.pop() - s.pop()` pops
+left then right — one exact meaning each, at zero runtime cost (the C
+optimizer erases the temporaries). The checker's fact tracking follows
+the same order, so proofs and execution always agree. Condition side
+effects are tracked precisely: the first `if` condition always runs and
+its effects persist into every branch; `elif` conditions and `and`/`or`
+right sides may only invalidate facts (their calls' write-effects are
+forgotten conservatively), and container mutations remain banned there
+and in `while` conditions, where execution counts cannot be modeled.
 - `string[N]` — a `seq` of bytes (`0 .. 255`, stored as one byte each)
   with literal syntax: `var s: string[40] = "hello"` (the literal must
   fit, checked at compile time), `s.add(", ")`, `s.add(other)` (append,

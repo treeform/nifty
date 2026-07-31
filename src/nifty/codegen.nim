@@ -136,6 +136,137 @@ proc genExpr(g: var Gen, e: Expr): string =
     else:
       fn & "(" & basePtr & ")"
 
+proc hasEffects(g: Gen, e: Expr): bool =
+  ## Does evaluating this expression run a proc or mutate a container?
+  ## (func calls are pure and echo-free by construction.)
+  if e.isNil:
+    return false
+  if e.kind == ekCall and e.sval in g.routines and
+      g.routines[e.sval].kind == rkProc:
+    return true
+  if e.kind == ekMethod and e.sval in mutMethods:
+    return true
+  for k in e.kids:
+    if g.hasEffects(k):
+      return true
+
+proc genOrdered(g: var Gen, e: Expr): string
+
+proc genPathOrdered(g: var Gen, e: Expr): string =
+  ## An lvalue path with its index expressions hoisted in source order.
+  case e.kind
+  of ekField:
+    g.genPathOrdered(e.kids[0]) & ".m_" & e.sval
+  of ekIndex:
+    let base = g.genPathOrdered(e.kids[0])
+    let idx = g.genOrdered(e.kids[1])
+    if e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr}:
+      base & ".m_data[" & idx & "]"
+    else:
+      base & "[" & idx & "]"
+  else:
+    g.genExpr(e)
+
+proc tempFor(g: var Gen, e: Expr, val: string): string =
+  let t = "ni_t" & $g.tmpN
+  inc g.tmpN
+  let ctype =
+    if e.typ == nil: "int64_t"
+    elif e.typ.kind == tyBool: "bool"
+    elif e.typ.kind in {tyObject, tySeq, tyStr, tySet}: cBase(e.typ)
+    else: "int64_t"
+  g.put ctype & " " & t & " = " & val & ";"
+  t
+
+proc genOrdered(g: var Gen, e: Expr): string =
+  ## Emit the expression with strict left-to-right evaluation, effects
+  ## included: effectful nodes become their own C statements, and every
+  ## read is captured at the moment the program text reaches it, so C's
+  ## unspecified subexpression order can never be observed.
+  case e.kind
+  of ekInt, ekBool, ekStr:
+    g.genExpr(e)
+  of ekIdent:
+    if e.typ != nil and e.typ.kind == tyArray:
+      g.genExpr(e) # arrays are reference-like; the path is the value
+    else:
+      g.tempFor(e, g.genExpr(e))
+  of ekField:
+    if e.typ != nil and e.typ.kind == tyArray:
+      g.genPathOrdered(e)
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr, tySet}:
+      g.tempFor(e, g.genPathOrdered(e.kids[0]) & ".m_len")
+    else:
+      g.tempFor(e, g.genPathOrdered(e))
+  of ekIndex:
+    if e.typ != nil and e.typ.kind == tyArray:
+      g.genPathOrdered(e)
+    else:
+      g.tempFor(e, g.genPathOrdered(e))
+  of ekNeg:
+    "(-" & g.genOrdered(e.kids[0]) & ")"
+  of ekNot:
+    "(!" & g.genOrdered(e.kids[0]) & ")"
+  of ekBin:
+    if e.sval in ["and", "or"]:
+      # Short-circuit preserved: the right side runs only when needed.
+      let t = "ni_t" & $g.tmpN
+      inc g.tmpN
+      g.put "bool " & t & " = " & g.genOrdered(e.kids[0]) & ";"
+      g.put (if e.sval == "and": "if (" & t & ") {"
+        else: "if (!" & t & ") {")
+      inc g.ind
+      let r = g.genOrdered(e.kids[1])
+      g.put t & " = " & r & ";"
+      dec g.ind
+      g.put "}"
+      t
+    else:
+      let a = g.genOrdered(e.kids[0])
+      let b = g.genOrdered(e.kids[1])
+      "(" & a & " " & e.sval & " " & b & ")"
+  of ekCall:
+    let r = g.routines[e.sval]
+    var parts: seq[string]
+    for i, a in e.kids:
+      if r.params[i].isVar and r.params[i].typ.passByPtr:
+        parts.add "&" & g.genPathOrdered(a)
+      elif a.typ != nil and a.typ.kind == tyArray:
+        parts.add g.genPathOrdered(a)
+      else:
+        parts.add g.genOrdered(a)
+    let call = "f_" & e.sval & "(" & parts.join(", ") & ")"
+    if r.kind == rkFunc:
+      call # pure: args are already ordered, the call itself has no effects
+    elif r.ret.isNil:
+      g.put call & ";"
+      ""
+    else:
+      g.tempFor(e, call)
+  of ekMethod:
+    let bt = e.kids[0].typ
+    let base = g.genPathOrdered(e.kids[0])
+    let fn = cBase(bt) & "_" &
+      (if bt.kind == tyStr and e.sval == "add": "adds" else: e.sval)
+    var call: string
+    if bt.kind == tyStr and e.sval == "add":
+      let a = e.kids[1]
+      if a.kind == ekStr and (a.typ == nil or a.typ.kind != tyStr):
+        call = fn & "(&" & base & ", (const uint8_t *)" & cQuote(a.sval) &
+          ", " & $a.sval.len & "LL)"
+      else:
+        let av = g.genPathOrdered(a)
+        call = fn & "(&" & base & ", " & av & ".m_data, " & av & ".m_len)"
+    elif e.kids.len > 1:
+      call = fn & "(&" & base & ", " & g.genOrdered(e.kids[1]) & ")"
+    else:
+      call = fn & "(&" & base & ")"
+    if e.typ.isNil:
+      g.put call & ";"
+      ""
+    else:
+      g.tempFor(e, call)
+
 proc genCond(g: var Gen, e: Expr): string =
   ## A condition wrapped in exactly one set of parentheses.
   let s = g.genExpr(e)
@@ -154,23 +285,81 @@ proc genStmt(g: var Gen, s: Stmt) =
   case s.kind
   of skVar, skLet:
     let init =
-      if s.init != nil: g.genExpr(s.init)
+      if s.init != nil and g.hasEffects(s.init): g.genOrdered(s.init)
+      elif s.init != nil: g.genExpr(s.init)
       elif s.typ.kind in {tyArray, tyObject, tySeq, tyStr, tySet}: "{0}"
       elif s.typ.kind == tyBool: "false"
       else: "0"
     g.put cDecl("v_" & s.name, s.typ) & " = " & init & ";"
   of skAssign:
-    g.put g.genExpr(s.lhs) & " = " & g.genExpr(s.rhs) & ";"
+    if g.hasEffects(s.lhs) or g.hasEffects(s.rhs):
+      # Left-to-right, as written: target indexes first, then the value.
+      let lhs = g.genPathOrdered(s.lhs)
+      let rhs = g.genOrdered(s.rhs)
+      g.put lhs & " = " & rhs & ";"
+    else:
+      g.put g.genExpr(s.lhs) & " = " & g.genExpr(s.rhs) & ";"
   of skIf:
-    for i, br in s.elifs:
-      g.put (if i == 0: "if " else: "} else if ") & g.genCond(br.cond) & " {"
-      g.genBlock(br.body)
-    if s.elseBody.len > 0:
-      g.put "} else {"
-      g.genBlock(s.elseBody)
-    g.put "}"
+    var anyEff = false
+    for br in s.elifs:
+      if g.hasEffects(br.cond):
+        anyEff = true
+    if not anyEff:
+      for i, br in s.elifs:
+        g.put (if i == 0: "if " else: "} else if ") & g.genCond(br.cond) & " {"
+        g.genBlock(br.body)
+      if s.elseBody.len > 0:
+        g.put "} else {"
+        g.genBlock(s.elseBody)
+      g.put "}"
+    else:
+      # Effectful conditions run in order, each only when reached:
+      # nested else blocks give every condition its own sequence point.
+      var closes = 0
+      for i, br in s.elifs:
+        let cnd =
+          if g.hasEffects(br.cond): g.genOrdered(br.cond)
+          else: g.genExpr(br.cond)
+        g.put "if (" & cnd & ") {"
+        g.genBlock(br.body)
+        if i < s.elifs.len - 1 or s.elseBody.len > 0:
+          g.put "} else {"
+          inc g.ind
+          inc closes
+        else:
+          g.put "}"
+      if s.elseBody.len > 0:
+        for st in s.elseBody:
+          g.genStmt(st)
+      for _ in 0 ..< closes:
+        dec g.ind
+        g.put "}"
   of skWhile:
-    if s.maxTrips > 0:
+    if g.hasEffects(s.cond):
+      # The condition re-runs every iteration with defined order:
+      # evaluate it inside the loop, then decide.
+      g.put "{"
+      inc g.ind
+      var ctr = ""
+      if s.maxTrips > 0:
+        ctr = "ni_trips" & $g.tmpN
+        inc g.tmpN
+        g.put "int64_t " & ctr & " = 0;"
+      g.put "for (;;) {"
+      inc g.ind
+      if s.maxTrips > 0:
+        g.put "if (" & ctr & " >= " & $s.maxTrips & "LL) break;"
+      let cnd = g.genOrdered(s.cond)
+      g.put "if (!(" & cnd & ")) break;"
+      for st in s.body:
+        g.genStmt(st)
+      if s.maxTrips > 0:
+        g.put "++" & ctr & ";"
+      dec g.ind
+      g.put "}"
+      dec g.ind
+      g.put "}"
+    elif s.maxTrips > 0:
       # `while cond max N` is bounded by construction: the loop also
       # stops after N iterations.
       let ctr = "ni_trips" & $g.tmpN
@@ -196,8 +385,12 @@ proc genStmt(g: var Gen, s: Stmt) =
     inc g.tmpN
     g.put "{"
     inc g.ind
-    g.put "int64_t v_" & s.name & " = " & g.genExpr(s.lo) & ";"
-    g.put "const int64_t " & tmp & " = " & g.genExpr(s.hi) & ";"
+    let loS =
+      if g.hasEffects(s.lo): g.genOrdered(s.lo) else: g.genExpr(s.lo)
+    g.put "int64_t v_" & s.name & " = " & loS & ";"
+    let hiS =
+      if g.hasEffects(s.hi): g.genOrdered(s.hi) else: g.genExpr(s.hi)
+    g.put "const int64_t " & tmp & " = " & hiS & ";"
     g.put "for (; v_" & s.name & (if s.inclusive: " <= " else: " < ") & tmp &
       "; ++v_" & s.name & ") {"
     g.genBlock(s.body)
@@ -225,6 +418,8 @@ proc genStmt(g: var Gen, s: Stmt) =
   of skReturn:
     if s.value.isNil:
       g.put "return;"
+    elif g.hasEffects(s.value):
+      g.put "return " & g.genOrdered(s.value) & ";"
     else:
       g.put "return " & g.genExpr(s.value) & ";"
   of skBreak:
@@ -247,7 +442,9 @@ proc genStmt(g: var Gen, s: Stmt) =
             of tyBool: "bool"
             of tyStr: cBase(a.typ)
             else: "int64_t"
-          g.put ctype & " " & temps[i] & " = " & g.genExpr(a) & ";"
+          let v =
+            if g.hasEffects(a): g.genOrdered(a) else: g.genExpr(a)
+          g.put ctype & " " & temps[i] & " = " & v & ";"
     var fmt = ""
     var cargs: seq[string]
     for i, a in s.args:
@@ -282,7 +479,10 @@ proc genStmt(g: var Gen, s: Stmt) =
     inc g.tmpN
     g.put "{"
     inc g.ind
-    g.put cBase(s.value.typ) & " *" & it & " = &" & g.genExpr(s.value) & ";"
+    let basePath =
+      if g.hasEffects(s.value): g.genPathOrdered(s.value)
+      else: g.genExpr(s.value)
+    g.put cBase(s.value.typ) & " *" & it & " = &" & basePath & ";"
     if s.value.typ.kind == tySet:
       let lo = $s.value.typ.elem.rlo & "LL"
       let hi = $s.value.typ.elem.rhi & "LL"
@@ -305,9 +505,19 @@ proc genStmt(g: var Gen, s: Stmt) =
     dec g.ind
     g.put "}"
   of skDiscard:
-    g.put "(void)(" & g.genExpr(s.value) & ");"
+    if g.hasEffects(s.value):
+      let v = g.genOrdered(s.value)
+      if v.len > 0:
+        g.put "(void)(" & v & ");"
+    else:
+      g.put "(void)(" & g.genExpr(s.value) & ");"
   of skCall:
-    g.put g.genExpr(s.value) & ";"
+    if g.hasEffects(s.value):
+      let v = g.genOrdered(s.value)
+      if v.len > 0:
+        g.put v & ";"
+    else:
+      g.put g.genExpr(s.value) & ";"
 
 const cPrelude = """
 #include <stdio.h>

@@ -92,6 +92,8 @@ type
     types*: seq[TypeDef]
     routines*: seq[Routine]
 
+const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl"]
+
 proc intType*(lo = low(int64), hi = high(int64)): Typ =
   ## An int type, optionally restricted to a declared range.
   Typ(kind: tyInt, rlo: lo, rhi: hi)

@@ -1,0 +1,40 @@
+# Evaluation is strictly left to right, effects included: the compiler
+# hoists temporaries so C's unspecified evaluation order can never be
+# observed. Every statement below has one exact, defined meaning.
+
+var arr: array[4, int]
+var g: 0 .. 100
+var log: seq[8, 0 .. 99]
+
+proc bump(): 0 .. 9 =
+  g = 50
+  return 1
+
+proc note(v: 0 .. 99): 0 .. 9 =
+  if log.len < 8:
+    log.add(v)
+  return 0
+
+thread main() =
+  # The index reads g BEFORE bump changes it: arr[2] = 1, then g = 50.
+  g = 2
+  if g < 4:
+    arr[g] = bump()
+  echo arr[2], " ", g
+
+  # Two effectful calls in one expression run left to right.
+  discard note(1) + note(2)
+  for v in log:
+    echo v
+
+  # Two pops in one expression: the right-hand pop sees the first's effect.
+  var s: seq[4, 0 .. 9]
+  s.add(3)
+  s.add(7)
+  let d = s.pop() - s.pop()
+  echo d, " ", s.len
+
+  # Short-circuit still short-circuits: note(9) never runs here.
+  var flag = true
+  if flag or note(9) == 0:
+    echo log.len
