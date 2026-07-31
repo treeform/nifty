@@ -1,0 +1,31 @@
+# queue[N, T]: a FIFO ring buffer. push returns false when full
+# (backpressure); pop takes from the FRONT and needs a nonempty proof;
+# iteration runs front to back; the ring wraps invisibly.
+
+thread main() =
+  var q: queue[3, 0 .. 9]
+  echo q.push(1)
+  echo q.push(2)
+  echo q.push(3)
+  echo q.push(4)
+  echo q.len
+  for x in q:
+    echo x
+  if q.len > 0:
+    echo q.pop()
+  echo q.len
+  if q.len < 3:
+    q.add(9)
+  for x in q:
+    echo x
+  q.clear()
+  echo q.len
+
+  # Cycle the ring far past its capacity: head wraps around the buffer.
+  var i: 0 .. 20 = 0
+  while i < 10:
+    discard q.push(i % 10)
+    if q.len > 1:
+      discard q.pop()
+    i = i + 1
+  echo q.len

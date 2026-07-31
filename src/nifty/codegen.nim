@@ -41,6 +41,7 @@ proc mangle(t: Typ): string =
   of tySeq: "q" & $t.len & "_" & mangle(t.elem)
   of tyStr: "s" & $t.len
   of tySet: "t" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi)
+  of tyQueue: "u" & $t.len & "_" & mangle(t.elem)
   of tyObject: "o" & t.name
   else: "x"
 
@@ -48,7 +49,7 @@ proc cBase(t: Typ): string =
   case t.kind
   of tyBool: "bool"
   of tyObject: "S_" & t.name
-  of tySeq, tyStr, tySet: "NS_" & mangle(t)
+  of tySeq, tyStr, tySet, tyQueue: "NS_" & mangle(t)
   else: "int64_t"
 
 proc cDecl(name: string, t: Typ): string =
@@ -113,7 +114,8 @@ proc genExpr(g: var Gen, e: Expr): string =
         parts.add g.genExpr(a)
     "f_" & e.sval & "(" & parts.join(", ") & ")"
   of ekField:
-    if e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr, tySet}:
+    if e.kids[0].typ != nil and
+        e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue}:
       g.genExpr(e.kids[0]) & ".m_len"
     else:
       g.genExpr(e.kids[0]) & ".m_" & e.sval
@@ -173,7 +175,7 @@ proc tempFor(g: var Gen, e: Expr, val: string): string =
   let ctype =
     if e.typ == nil: "int64_t"
     elif e.typ.kind == tyBool: "bool"
-    elif e.typ.kind in {tyObject, tySeq, tyStr, tySet}: cBase(e.typ)
+    elif e.typ.kind in {tyObject, tySeq, tyStr, tySet, tyQueue}: cBase(e.typ)
     else: "int64_t"
   g.put ctype & " " & t & " = " & val & ";"
   t
@@ -194,7 +196,8 @@ proc genOrdered(g: var Gen, e: Expr): string =
   of ekField:
     if e.typ != nil and e.typ.kind == tyArray:
       g.genPathOrdered(e)
-    elif e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr, tySet}:
+    elif e.kids[0].typ != nil and
+        e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue}:
       g.tempFor(e, g.genPathOrdered(e.kids[0]) & ".m_len")
     else:
       g.tempFor(e, g.genPathOrdered(e))
@@ -287,7 +290,7 @@ proc genStmt(g: var Gen, s: Stmt) =
     let init =
       if s.init != nil and g.hasEffects(s.init): g.genOrdered(s.init)
       elif s.init != nil: g.genExpr(s.init)
-      elif s.typ.kind in {tyArray, tyObject, tySeq, tyStr, tySet}: "{0}"
+      elif s.typ.kind in {tyArray, tyObject, tySeq, tyStr, tySet, tyQueue}: "{0}"
       elif s.typ.kind == tyBool: "false"
       else: "0"
     g.put cDecl("v_" & s.name, s.typ) & " = " & init & ";"
@@ -492,6 +495,13 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "if (!" & cBase(s.value.typ) & "_contains(" & it & ", " & ix &
         ")) continue;"
       g.put cBase(s.typ) & " v_" & s.name & " = " & ix & ";"
+    elif s.value.typ.kind == tyQueue:
+      g.put "const int64_t " & nn & " = " & it & "->m_len;"
+      g.put "for (int64_t " & ix & " = 0; " & ix & " < " & nn & "; ++" & ix &
+        ") {"
+      inc g.ind
+      g.put cBase(s.typ) & " v_" & s.name & " = " & it & "->m_data[(" & it &
+        "->m_head + " & ix & ") % " & $s.value.typ.len & "LL];"
     else:
       g.put "const int64_t " & nn & " = " & it & "->m_len;"
       g.put "for (int64_t " & ix & " = 0; " & ix & " < " & nn & "; ++" & ix &
@@ -583,6 +593,33 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       " *s, const uint8_t *d, int64_t k) { " &
       "memcpy(&s->m_data[s->m_len], d, (size_t)k); s->m_len += k; }"
     g.put "static void " & n & "_clear(" & n & " *s) { s->m_len = 0; }"
+  of tyQueue:
+    g.emitTypeDefs(t.elem)
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    let n = "NS_" & key
+    let e = cBase(t.elem)
+    let cap = $t.len & "LL"
+    g.put ""
+    g.put "typedef struct {"
+    g.put "  int64_t m_len;"
+    g.put "  int64_t m_head;"
+    g.put "  " & e & " m_data[" & $t.len & "];"
+    g.put "} " & n & ";"
+    g.put "static void " & n & "_add(" & n & " *s, " & e & " v) { " &
+      "s->m_data[(s->m_head + s->m_len) % " & cap &
+      "] = v; s->m_len += 1; }"
+    g.put "static bool " & n & "_push(" & n & " *s, " & e & " v) { " &
+      "if (s->m_len >= " & cap & ") return false; " &
+      "s->m_data[(s->m_head + s->m_len) % " & cap &
+      "] = v; s->m_len += 1; return true; }"
+    g.put "static " & e & " " & n & "_pop(" & n & " *s) { " &
+      e & " v = s->m_data[s->m_head]; " &
+      "s->m_head = (s->m_head + 1) % " & cap & "; s->m_len -= 1; return v; }"
+    g.put "static void " & n & "_clear(" & n &
+      " *s) { s->m_len = 0; s->m_head = 0; }"
   of tySet:
     let key = mangle(t)
     if key in g.emitted:

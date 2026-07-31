@@ -58,7 +58,8 @@ proc evalConst(p: Parser, e: Expr): int64
 proc parseType(p: var Parser): Typ =
   let t = p.peek
   if t.kind == tkIdent and
-      (t.text in ["int", "bool", "Lock", "array", "seq", "string", "set"] or
+      (t.text in ["int", "bool", "Lock", "array", "seq", "string", "set",
+        "queue"] or
        t.text in p.types):
     discard p.next
     case t.text
@@ -68,7 +69,7 @@ proc parseType(p: var Parser): Typ =
       Typ(kind: tyBool)
     of "Lock":
       Typ(kind: tyLock)
-    of "array", "seq":
+    of "array", "seq", "queue":
       p.expectOp("[")
       let lt = p.next
       var n: int64
@@ -84,10 +85,14 @@ proc parseType(p: var Parser): Typ =
       let e = p.parseType()
       if e.kind == tyLock:
         err(lt.line, "Lock cannot be a " & t.text & " element")
-      if t.text == "seq" and e.kind == tyArray:
-        err(lt.line, "a seq element cannot be a plain array; wrap it in an object")
+      if t.text in ["seq", "queue"] and e.kind == tyArray:
+        err(lt.line, "a " & t.text & " element cannot be a plain array; " &
+          "wrap it in an object")
       p.expectOp("]")
-      Typ(kind: (if t.text == "seq": tySeq else: tyArray), len: n, elem: e)
+      Typ(kind: (case t.text
+        of "seq": tySeq
+        of "queue": tyQueue
+        else: tyArray), len: n, elem: e)
     of "set":
       p.expectOp("[")
       let e = p.parseType()

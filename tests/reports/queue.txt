@@ -1,16 +1,13 @@
 nifty report: queue.nifty
 
 globals:
-  queue: 32 bytes (array[4, 0 .. 99])
-  head: 8 bytes (0 .. 3)
-  tail: 8 bytes (0 .. 3)
-  count: 8 bytes (0 .. 4)
-  total: 56 bytes + 1 lock (platform-sized)
+  q: 48 bytes (queue[4, 0 .. 99])
+  total: 48 bytes + 1 lock (platform-sized)
 
 stack, worst case per thread (estimate: locals + params + 16 bytes/frame):
-  producer: 49 bytes (producer -> tryPush)
-  consumer: 64 bytes (consumer -> tryPop)
+  producer: 25 bytes (producer)
+  consumer: 40 bytes (consumer)
 
 worst-case abstract ops per thread:
-  producer: 2 ops outside the loop, 45 ops per loop pass
-  consumer: 7 ops outside the loop, 55 ops per loop pass
+  producer: 2 ops outside the loop, 23 ops per loop pass
+  consumer: 7 ops outside the loop, 39 ops per loop pass

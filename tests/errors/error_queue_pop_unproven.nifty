@@ -1,0 +1,4 @@
+thread main() =
+  var q: queue[4, int]
+  discard q.push(1)
+  discard q.pop()

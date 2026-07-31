@@ -218,12 +218,12 @@ proc declFactByName(c: Ctx, name: string): Fact =
     for i in countdown(c.scopes.len - 1, 0):
       if root in c.scopes[i]:
         let t = c.scopes[i][root].typ
-        if t.kind in {tySeq, tyStr}:
+        if t.kind in {tySeq, tyStr, tyQueue}:
           return Fact(lo: 0, hi: t.len)
         if t.kind == tySet:
           return Fact(lo: 0, hi: t.setSize)
         return fullFact()
-    if root in c.globals and c.globals[root].kind in {tySeq, tyStr}:
+    if root in c.globals and c.globals[root].kind in {tySeq, tyStr, tyQueue}:
       return Fact(lo: 0, hi: c.globals[root].len)
     if root in c.globals and c.globals[root].kind == tySet:
       return Fact(lo: 0, hi: c.globals[root].setSize)
@@ -305,7 +305,8 @@ proc factName(c: Ctx, e: Expr): string =
 proc lenPathName(c: Ctx, e: Expr): string =
   ## "s.len" when e reads the length of a factable seq/string variable.
   if e.kind == ekField and e.sval == "len" and e.kids[0].kind == ekIdent and
-      e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr, tySet} and
+      e.kids[0].typ != nil and
+      e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue} and
       c.factEligibleIdent(e.kids[0]):
     e.kids[0].sval & ".len"
   else:
@@ -783,7 +784,7 @@ proc typRangeEq(a, b: Typ): bool =
     return false
   case a.kind
   of tyInt: a.rlo == b.rlo and a.rhi == b.rhi
-  of tyArray, tySeq: a.len == b.len and typRangeEq(a.elem, b.elem)
+  of tyArray, tySeq, tyQueue: a.len == b.len and typRangeEq(a.elem, b.elem)
   else: true
 
 proc typRangeFits(a, b: Typ): bool =
@@ -792,7 +793,7 @@ proc typRangeFits(a, b: Typ): bool =
     return false
   case a.kind
   of tyInt: a.rlo >= b.rlo and a.rhi <= b.rhi
-  of tyArray, tySeq: a.len == b.len and typRangeFits(a.elem, b.elem)
+  of tyArray, tySeq, tyQueue: a.len == b.len and typRangeFits(a.elem, b.elem)
   else: true
 
 proc zeroOk(t: Typ): bool =
@@ -963,7 +964,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     e.setFact typFact(e.typ)
   of ekField:
     let base = c.expectVal(e.kids[0])
-    if base.kind in {tySeq, tyStr, tySet}:
+    if base.kind in {tySeq, tyStr, tySet, tyQueue}:
       if e.sval != "len":
         err(e.line, $base & " has no property '" & e.sval & "' (only .len)")
       e.typ = intType(0, (if base.kind == tySet: base.setSize else: base.len))
@@ -998,13 +999,13 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     if e.kids[0].kind == ekIdent and c.factEligibleIdent(e.kids[0]):
       key = e.kids[0].sval & ".len"
     var lf = Fact(lo: 0, hi: (
-      if bt.kind in {tySeq, tyStr}: bt.len
+      if bt.kind in {tySeq, tyStr, tyQueue}: bt.len
       elif bt.kind == tySet: bt.setSize
       else: 0))
     if key != "":
       lf = c.curFact(key)
     case bt.kind
-    of tySeq:
+    of tySeq, tyQueue:
       case e.sval
       of "add", "push":
         if nArgs != 1:
@@ -1392,8 +1393,9 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     c.facts = dropped
   of skForEach:
     let t = c.expectVal(s.value)
-    if t.kind notin {tySeq, tyStr, tySet}:
-      err(s.line, "for-in needs a seq, string, or set to iterate, got " & $t)
+    if t.kind notin {tySeq, tyStr, tySet, tyQueue}:
+      err(s.line, "for-in needs a seq, string, set, or queue to iterate, " &
+        "got " & $t)
     let root = s.value.rootIdent
     if root.kind != ekIdent:
       err(s.line, "iterate a seq/string through a variable path")
@@ -1405,7 +1407,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       err(s.line, "cannot modify '" & root.sval & "' while iterating it")
     s.tripBound = if t.kind == tySet: t.setSize else: t.len
     let elemT =
-      if t.kind == tySeq: t.elem
+      if t.kind in {tySeq, tyQueue}: t.elem
       elif t.kind == tySet: t.elem
       else: intType(0, 255)
     s.typ = elemT # recorded for codegen

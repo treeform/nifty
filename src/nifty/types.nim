@@ -2,7 +2,8 @@
 
 type
   TypKind* = enum
-    tyInt, tyBool, tyString, tyLock, tyArray, tyObject, tySeq, tyStr, tySet
+    tyInt, tyBool, tyString, tyLock, tyArray, tyObject, tySeq, tyStr, tySet,
+    tyQueue
   Field* = object
     name*: string
     typ*: Typ
@@ -110,7 +111,7 @@ proc typEq*(a, b: Typ): bool =
     return a.isNil and b.isNil
   if a.kind != b.kind:
     return false
-  if a.kind in {tyArray, tySeq}:
+  if a.kind in {tyArray, tySeq, tyQueue}:
     return a.len == b.len and typEq(a.elem, b.elem)
   if a.kind == tyStr:
     return a.len == b.len
@@ -133,4 +134,5 @@ proc `$`*(t: Typ): string =
   of tySeq: "seq[" & $t.len & ", " & $t.elem & "]"
   of tyStr: "string[" & $t.len & "]"
   of tySet: "set[" & $t.elem & "]"
+  of tyQueue: "queue[" & $t.len & ", " & $t.elem & "]"
   of tyObject: t.name

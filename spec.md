@@ -153,6 +153,15 @@ and in `while` conditions, where execution counts cannot be modeled.
   like any store), `s.contains(x)` (accepts any int; out-of-range is
   simply false), `s.len` (cardinality), `s.clear()`, and `for x in s:`
   (ascending order, `x` typed as the element range).
+- `queue[N, T]` — a FIFO ring buffer: storage for `N` elements plus an
+  internal head and a length `0 .. N` (the ring wraps invisibly).
+  `q.push(x)` returns `false` when full — the bounded capacity IS the
+  backpressure, no separate protocol needed. `q.pop()` takes from the
+  *front* and requires a nonempty proof (`if q.len > 0:`); `q.add(x)` is
+  the strict push (requires proof of room); `q.len`, `q.clear()`, and
+  `for x in q:` iterates front to back. Length facts, sharing rules, and
+  zero-init-is-empty all work exactly as for `seq`. There is no `q[i]` —
+  queues are streams, not tables.
 - `Lock` — a mutex. Only allowed as a global; only usable via `with`.
 - `object` — a static struct, exactly like C:
 
@@ -420,9 +429,9 @@ protocol), locks, the three static proofs (division, indexing, overflow)
 via interval analysis with zero runtime checks in the generated C, `echo`,
 `discard`, C output, generated `main` with thread spawn/join.
 
-Not yet implemented: `index` types, wildcard generics, `map`/`queue`
-builtins (same recipe as seq: fixed storage + range-typed state + op
-contracts), tail-call recursion, the per-thread error flag,
+Not yet implemented: `index` types, wildcard generics, the `map` builtin
+(waiting on error values for an honest `get`), tail-call recursion, the
+per-thread error flag,
 deterministic floats and fixed-point (`fixed[lo .. hi, step]` — a scaled
 ranged int, so the existing proofs apply directly), int width from ranges
 (seq elements are still 8 bytes each; string data is already 1 byte).

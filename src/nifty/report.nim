@@ -51,6 +51,9 @@ proc typeSize(t: Typ): int64 =
   of tySet:
     # int64 cardinality + one bit per possible value, in 64-bit words.
     sadd(8, (t.setSize + 63) div 64 * 8)
+  of tyQueue:
+    # int64 length + int64 head + data, padded to 8.
+    (sadd(16, smul(t.len, typeSize(t.elem))) + 7) div 8 * 8
   of tyObject:
     var off = 0'i64
     for f in t.fields:
