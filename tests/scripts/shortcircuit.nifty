@@ -1,0 +1,54 @@
+# and/or keep short-circuit semantics with nifty's defined left-to-right
+# order, even when operands call procs with effects. The log records
+# exactly which calls ran, and in what order.
+
+var log: seq[16, 0 .. 99]
+
+proc note(v: 0 .. 99, r: bool): bool =
+  if log.len < 16:
+    log.add(v)
+  return r
+
+proc dump() =
+  echo "--"
+  for v in log:
+    echo v
+  log.clear()
+
+thread main() =
+  # and: the right side runs only when the left is true.
+  if note(1, true) and note(2, true):
+    echo "a"
+  dump()
+  if note(3, false) and note(4, true):
+    echo "b"
+  else:
+    echo "not b"
+  dump()
+
+  # or: the right side runs only when the left is false.
+  if note(5, true) or note(6, true):
+    echo "c"
+  dump()
+  if note(7, false) or note(8, true):
+    echo "d"
+  dump()
+
+  # elif chain: conditions run in order, only until one is true.
+  if note(9, false) and true:
+    echo "e"
+  elif note(10, false) or note(11, false):
+    echo "f"
+  elif note(12, true):
+    echo "g"
+  else:
+    echo "h"
+  dump()
+
+  # while condition with short-circuit effects, re-evaluated each pass:
+  # note runs three times, then i < 3 fails and short-circuits it away.
+  var i: 0 .. 5 = 0
+  while i < 3 and note(20 + i, true):
+    i = i + 1
+  echo i
+  dump()
