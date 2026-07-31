@@ -122,6 +122,17 @@ v0 types:
   or `and`/`or` right sides (may be skipped). The first condition of an
   `if` is fine — `if q.push(x):` — and its effect is tracked into every
   branch and the code after.
+
+**Evaluation order is defined — or the program does not compile.** C
+leaves subexpression order within a statement unspecified, so nifty
+rejects any statement where that could matter: two effectful calls whose
+targets overlap, or an effectful call beside a read of something it
+changes (`arr[g] = bump()` where `bump` writes `g`). `echo` arguments are
+hoisted to temporaries left-to-right in the generated C, so their order
+is always defined. Condition side effects are tracked precisely: the
+first `if` condition always runs and its effects persist into every
+branch; `elif` conditions and `and`/`or` right sides may only invalidate
+facts (their calls' write-effects are forgotten conservatively).
 - `string[N]` — a `seq` of bytes (`0 .. 255`, stored as one byte each)
   with literal syntax: `var s: string[40] = "hello"` (the literal must
   fit, checked at compile time), `s.add(", ")`, `s.add(other)` (append,

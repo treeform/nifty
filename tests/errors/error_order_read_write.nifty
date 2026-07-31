@@ -1,0 +1,11 @@
+var arr: array[4, int]
+var g: 0 .. 100
+
+proc bump(): int =
+  g = 50
+  return 1
+
+thread main() =
+  g = 2
+  if g < 4:
+    arr[g] = bump()

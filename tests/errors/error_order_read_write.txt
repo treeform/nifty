@@ -1,0 +1,1 @@
+both changes and reads 'g'

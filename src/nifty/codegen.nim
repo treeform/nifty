@@ -230,18 +230,24 @@ proc genStmt(g: var Gen, s: Stmt) =
   of skBreak:
     g.put "break;"
   of skEcho:
-    # string[N] values are copied to temps first so each is evaluated once.
+    # Every value argument is hoisted to a temp, in order: C leaves printf
+    # argument evaluation order unspecified, nifty does not.
     var temps: Table[int, string]
     for i, a in s.args:
-      if a.typ.kind == tyStr:
-        temps[i] = "ni_es" & $g.tmpN
+      if a.typ.kind != tyString:
+        temps[i] = "ni_e" & $g.tmpN
         inc g.tmpN
     if temps.len > 0:
       g.put "{"
       inc g.ind
       for i, a in s.args:
         if i in temps:
-          g.put cBase(a.typ) & " " & temps[i] & " = " & g.genExpr(a) & ";"
+          let ctype =
+            case a.typ.kind
+            of tyBool: "bool"
+            of tyStr: cBase(a.typ)
+            else: "int64_t"
+          g.put ctype & " " & temps[i] & " = " & g.genExpr(a) & ";"
     var fmt = ""
     var cargs: seq[string]
     for i, a in s.args:
@@ -254,10 +260,10 @@ proc genStmt(g: var Gen, s: Stmt) =
         cargs.add "(const char *)" & temps[i] & ".m_data"
       of tyInt:
         fmt.add "%lld"
-        cargs.add "(long long)(" & g.genExpr(a) & ")"
+        cargs.add "(long long)(" & temps[i] & ")"
       of tyBool:
         fmt.add "%s"
-        cargs.add "((" & g.genExpr(a) & ") ? \"true\" : \"false\")"
+        cargs.add "((" & temps[i] & ") ? \"true\" : \"false\")"
       else:
         discard
     fmt.add "\n"

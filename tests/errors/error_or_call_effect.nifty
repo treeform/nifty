@@ -1,0 +1,12 @@
+var g: 0 .. 10
+
+proc peek(): bool =
+  g = 0
+  return false
+
+thread main() =
+  g = 5
+  var b = false
+  if b or peek():
+    echo 1
+  echo 10 / g

@@ -871,6 +871,11 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         err(e.line, "'" & e.sval & "' needs bool operands")
       dec c.mutBan
       c.facts = saved
+      # The right side MAY have run: anything it can change is unknown now.
+      var rhsTouched: HashSet[string]
+      c.collectAssignedExpr(e.kids[1], rhsTouched)
+      for n in rhsTouched:
+        c.delFacts n
       e.typ = Typ(kind: tyBool)
     else:
       let a = c.expectVal(e.kids[0])
@@ -1197,6 +1202,81 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
 
 # --- statement checking ---------------------------------------------------
 
+proc lhsInnerExprs(e: Expr): seq[Expr] =
+  ## The index expressions inside an assignment target (the root name
+  ## itself is a store target, not a read).
+  var cur = e
+  while cur.kind in {ekIndex, ekField}:
+    if cur.kind == ekIndex:
+      result.add cur.kids[1]
+    cur = cur.kids[0]
+
+proc unitHazards(c: Ctx, unit: seq[Expr]) =
+  ## C evaluates the subexpressions of one statement in unspecified order.
+  ## Reject statements where that could matter: two effectful calls with
+  ## overlapping targets, or an effectful call next to a read of
+  ## something it changes.
+  type CallEff = tuple[eff: HashSet[string], reads: HashSet[string], line: int]
+  var calls: seq[CallEff]
+  var top: HashSet[string]
+
+  proc walk(e: Expr, acc: var HashSet[string]) =
+    if e.isNil:
+      return
+    case e.kind
+    of ekIdent:
+      acc.incl e.sval
+    of ekCall:
+      if e.sval in c.routineTab and c.routineTab[e.sval].kind == rkProc:
+        var eff: HashSet[string]
+        if e.sval in c.routineWrites:
+          eff = c.routineWrites[e.sval]
+        let r = c.routineTab[e.sval]
+        var inner: HashSet[string]
+        for i, a in e.kids:
+          walk(a, inner)
+          if i < r.params.len and r.params[i].isVar:
+            let root = a.rootIdent
+            if root.kind == ekIdent:
+              eff.incl root.sval
+        if eff.len > 0:
+          calls.add (eff, inner, e.line)
+        else:
+          for n in inner:
+            acc.incl n
+        return
+      for k in e.kids:
+        walk(k, acc)
+    of ekMethod:
+      if e.sval in mutMethods:
+        var inner: HashSet[string]
+        for i in 1 ..< e.kids.len:
+          walk(e.kids[i], inner)
+        var eff: HashSet[string]
+        if e.kids[0].kind == ekIdent:
+          eff.incl e.kids[0].sval
+        calls.add (eff, inner, e.line)
+        return
+      for k in e.kids:
+        walk(k, acc)
+    else:
+      for k in e.kids:
+        walk(k, acc)
+
+  for e in unit:
+    walk(e, top)
+  for i in 0 ..< calls.len:
+    let clash = calls[i].eff * top
+    if clash.len > 0:
+      for n in clash:
+        err(calls[i].line, "evaluation order here is unspecified in C: " &
+          "this statement both changes and reads '" & n &
+          "'; split it into separate statements")
+    for j in 0 ..< calls.len:
+      if i != j and (calls[i].eff * (calls[j].eff + calls[j].reads)).len > 0:
+        err(calls[i].line, "the order of two effectful calls in one " &
+          "statement is unspecified; split them into separate statements")
+
 proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool)
 
 proc checkBody(c: var Ctx, body: seq[Stmt]) =
@@ -1289,10 +1369,10 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         err(br.cond.line, "condition must be a bool")
       if i > 0:
         dec c.mutBan
-      else:
-        # The first condition always runs exactly once: its side effects
-        # (a pop, a push) persist for every branch and the code after.
-        negAcc = c.facts
+      # Condition side effects persist for everything after: the first
+      # condition always runs; later ones only invalidate facts (their
+      # mutations are banned), and forgetting early is always sound.
+      negAcc = c.facts
       c.addCondFacts(br.cond)
       c.checkBody(br.body)
       if not alwaysExits(br.body):
@@ -1523,6 +1603,31 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     if not t.isNil:
       err(s.line, "return value of '" & s.value.sval &
         "' is discarded (use discard or assign it)")
+  # Evaluation-order hazards, per independently-evaluated expression unit.
+  case s.kind
+  of skVar, skLet:
+    if s.init != nil:
+      c.unitHazards(@[s.init])
+  of skAssign:
+    c.unitHazards(lhsInnerExprs(s.lhs) & @[s.rhs])
+  of skIf:
+    for br in s.elifs:
+      c.unitHazards(@[br.cond])
+  of skWhile:
+    c.unitHazards(@[s.cond])
+  of skFor:
+    c.unitHazards(@[s.lo])
+    c.unitHazards(@[s.hi])
+  of skForEach:
+    c.unitHazards(@[s.value])
+  of skReturn, skDiscard, skCall:
+    if s.value != nil:
+      c.unitHazards(@[s.value])
+  of skEcho:
+    for a in s.args:
+      c.unitHazards(@[a])
+  else:
+    discard
 
 proc check*(m: Module) =
   ## Check the whole module; raises NiftyError on the first violation.

@@ -1,0 +1,13 @@
+var g: 0 .. 10
+
+proc a(): 0 .. 5 =
+  g = 1
+  return 1
+
+proc b(): 0 .. 5 =
+  g = 2
+  return 2
+
+thread main() =
+  let x = a() + b()
+  echo x, " ", g
