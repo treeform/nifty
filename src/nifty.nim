@@ -151,7 +151,7 @@ type
     mut: bool
 
   StmtKind = enum
-    skVar, skLet, skAssign, skIf, skWhile, skFor, skLoop, skWithLock,
+    skVar, skLet, skAssign, skIf, skWhile, skFor, skLoop, skWith,
     skReturn, skBreak, skEcho, skDiscard, skCall
   Elif = object
     cond: Expr
@@ -159,7 +159,7 @@ type
   Stmt = ref object
     kind: StmtKind
     line: int
-    name: string      # var/let/for/withLock
+    name: string      # var/let/for/with
     typ: Typ          # var/let declared or inferred type
     init: Expr        # var/let initializer
     lhs, rhs: Expr    # assign
@@ -508,9 +508,11 @@ proc parseStmt(p: var Parser): Stmt =
     result = Stmt(kind: skLoop, line: t.line)
     p.expectOp(":")
     result.body = p.parseBody()
-  of "withLock":
+  of "with":
     discard p.next
-    result = Stmt(kind: skWithLock, line: t.line, name: p.expectIdent())
+    let target = p.expectIdent()
+    result = Stmt(kind: skWith, line: t.line, name: target,
+      lhs: Expr(kind: ekIdent, line: t.line, sval: target))
     p.expectOp(":")
     result.body = p.parseBody()
   else:
@@ -630,8 +632,8 @@ type
     checked: HashSet[string]   # routines whose bodies passed the checker
     cur: Routine
     scopes: seq[Table[string, Sym]]
-    lockDepth: int
-    loopLocks: seq[int]        # lockDepth at entry of each enclosing loop
+    withDepth: int
+    loopWiths: seq[int]        # withDepth at entry of each enclosing loop
 
 proc isDeclared(c: Ctx, name: string): bool =
   for sc in c.scopes:
@@ -666,7 +668,7 @@ proc resolveIdent(c: var Ctx, e: Expr) =
       err(e.line, "func '" & c.cur.name & "' cannot access global '" & name & "'")
     let t = c.globals[name]
     if t.kind == tyLock:
-      err(e.line, "'" & name & "' is a Lock; it can only be used with withLock")
+      err(e.line, "'" & name & "' is a Lock; it can only be used in a with statement")
     e.symKind = syGlobal
     e.mut = true
     e.typ = t
@@ -818,9 +820,9 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
   of skWhile:
     if c.expectVal(s.cond).kind != tyBool:
       err(s.cond.line, "condition must be a bool")
-    c.loopLocks.add c.lockDepth
+    c.loopWiths.add c.withDepth
     c.checkBody(s.body)
-    discard c.loopLocks.pop
+    discard c.loopWiths.pop
   of skFor:
     if c.expectVal(s.lo).kind != tyInt or c.expectVal(s.hi).kind != tyInt:
       err(s.line, "for loop bounds must be ints")
@@ -828,28 +830,45 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       err(s.line, "'" & s.name & "' is already declared (shadowing is not allowed)")
     c.scopes.add initTable[string, Sym]()
     c.scopes[^1][s.name] = Sym(kind: syLocal, typ: Typ(kind: tyInt), mutable: false)
-    c.loopLocks.add c.lockDepth
+    c.loopWiths.add c.withDepth
     for st in s.body:
       c.checkStmt(st, false)
-    discard c.loopLocks.pop
+    discard c.loopWiths.pop
     discard c.scopes.pop
   of skLoop:
     if c.cur.kind != rkThread or not topLevel:
       err(s.line, "loop is only allowed at the top level of a thread body")
-    c.loopLocks.add c.lockDepth
+    c.loopWiths.add c.withDepth
     c.checkBody(s.body)
-    discard c.loopLocks.pop
-  of skWithLock:
+    discard c.loopWiths.pop
+  of skWith:
     if c.cur.kind == rkFunc:
-      err(s.line, "withLock is not allowed in func")
-    if s.name notin c.globals or c.globals[s.name].kind != tyLock:
-      err(s.line, "withLock expects a global of type Lock")
-    inc c.lockDepth
+      err(s.line, "with is not allowed in func (start/end are side effects)")
+    if s.name in c.globals and c.globals[s.name].kind == tyLock:
+      # Builtin protocol: start = acquire the mutex, end = release it.
+      s.typ = c.globals[s.name]
+    else:
+      # User protocol: with x calls start(x) on entry and end(x) on exit.
+      let t = c.expectVal(s.lhs)
+      if not s.lhs.mut:
+        err(s.line, "with target '" & s.name & "' must be mutable")
+      let want = "proc name(x: var " & $t & ")"
+      for pn in ["start", "end"]:
+        if pn notin c.allRoutines:
+          err(s.line, "with on a " & $t & " needs a '" & pn & "' proc: " & want)
+        if pn notin c.checked:
+          err(s.line, "'" & pn & "' must be declared before this with statement")
+        let r = c.routineTab[pn]
+        if r.kind != rkProc or r.params.len != 1 or not r.params[0].isVar or
+            not typEq(r.params[0].typ, t) or not r.ret.isNil:
+          err(s.line, "with on a " & $t & " needs '" & pn & "' to be: " & want)
+      s.typ = t
+    inc c.withDepth
     c.checkBody(s.body)
-    dec c.lockDepth
+    dec c.withDepth
   of skReturn:
-    if c.lockDepth > 0:
-      err(s.line, "return inside withLock is not allowed (the lock would never be released)")
+    if c.withDepth > 0:
+      err(s.line, "cannot return inside a with block (its end would never run)")
     if c.cur.kind == rkThread:
       err(s.line, "threads do not return; let the body end instead")
     if c.cur.ret.isNil:
@@ -862,10 +881,10 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       if not typEq(t, c.cur.ret):
         err(s.line, "return type mismatch: got " & $t & ", expected " & $c.cur.ret)
   of skBreak:
-    if c.loopLocks.len == 0:
+    if c.loopWiths.len == 0:
       err(s.line, "break outside a loop")
-    if c.lockDepth != c.loopLocks[^1]:
-      err(s.line, "break out of withLock is not allowed (the lock would never be released)")
+    if c.withDepth != c.loopWiths[^1]:
+      err(s.line, "cannot break out of a with block (its end would never run)")
   of skEcho:
     if c.cur.kind == rkFunc:
       err(s.line, "echo is a side effect; not allowed in func")
@@ -923,8 +942,8 @@ proc check(m: Module) =
     err(1, "a nifty program needs at least one thread (thread name() = ...)")
   for r in m.routines:
     c.cur = r
-    c.lockDepth = 0
-    c.loopLocks = @[]
+    c.withDepth = 0
+    c.loopWiths = @[]
     case r.kind
     of rkThread:
       if r.params.len > 0:
@@ -1094,12 +1113,20 @@ proc genStmt(g: var Gen, s: Stmt) =
     g.put "for (;;) {"
     g.genBlock(s.body)
     g.put "}"
-  of skWithLock:
-    g.put "pthread_mutex_lock(&g_" & s.name & ");"
-    g.put "{"
-    g.genBlock(s.body)
-    g.put "}"
-    g.put "pthread_mutex_unlock(&g_" & s.name & ");"
+  of skWith:
+    if s.typ.kind == tyLock:
+      g.put "pthread_mutex_lock(&g_" & s.name & ");"
+      g.put "{"
+      g.genBlock(s.body)
+      g.put "}"
+      g.put "pthread_mutex_unlock(&g_" & s.name & ");"
+    else:
+      let arg = (if s.typ.isScalar: "&" else: "") & g.genExpr(s.lhs)
+      g.put "f_start(" & arg & ");"
+      g.put "{"
+      g.genBlock(s.body)
+      g.put "}"
+      g.put "f_end(" & arg & ");"
   of skReturn:
     if s.value.isNil:
       g.put "return;"

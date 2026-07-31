@@ -13,7 +13,7 @@ var queueLock: Lock
 
 proc tryPush(v: int): bool =
   var ok = false
-  withLock queueLock:
+  with queueLock:
     if count < QueueSize:
       queue[tail] = v
       tail = (tail + 1) % QueueSize
@@ -23,7 +23,7 @@ proc tryPush(v: int): bool =
 
 proc tryPop(): int =
   var v = -1
-  withLock queueLock:
+  with queueLock:
     if count > 0:
       v = queue[head]
       head = (head + 1) % QueueSize

@@ -46,7 +46,7 @@ func double(x: int): int = # pure: params in, value out
   return x * 2
 
 proc addItem(v: int) =     # may touch globals
-  withLock itemsLock:
+  with itemsLock:
     items[total] = v
     total = total + 1
 
@@ -67,7 +67,7 @@ Three kinds of routines, in increasing order of rights:
 | call `func`s          | yes    | yes    | yes      |
 | call `proc`s          | no     | yes    | yes      |
 | `echo`                | no     | yes    | yes      |
-| `withLock`            | no     | yes    | yes      |
+| `with`                | no     | yes    | yes      |
 | return value          | required | optional | none |
 | callable              | yes    | yes    | never    |
 
@@ -92,7 +92,7 @@ v0 types:
 - `array[N, T]` — fixed length `N` (an integer literal or `const`), element
   type `T`. Arrays are indexed `a[i]` with a bounds check (traps in v0).
   Whole-array assignment/copy is not allowed; copy elements in a loop.
-- `Lock` — a mutex. Only allowed as a global; only usable via `withLock`.
+- `Lock` — a mutex. Only allowed as a global; only usable via `with`.
 - String literals exist only as `echo` arguments in v0.
 
 Planned types:
@@ -126,9 +126,15 @@ Planned types:
 - `loop:` — infinite loop, allowed **only at the top level of a `thread`
   body**. This is the event/server loop; everything inside it must
   (eventually) be bounded. `break` is allowed.
-- `withLock lockName:` — acquire/release a global `Lock` around a block.
-  `return` and `break` may not jump out of a `withLock` block (the lock
-  would never be released); the compiler rejects them.
+- `with x:` — a scoped resource block. `with x:` desugars to
+  `start(x)`, the block body, then `end(x)`:
+  - if `x` is a `Lock`, `start`/`end` are builtin: acquire and release the
+    mutex;
+  - for any other type `T`, the program must define `proc start(v: var T)`
+    and `proc end(v: var T)`, declared before the `with` statement.
+  `return` and `break` may not jump out of a `with` block — `end` would
+  never run — and the compiler rejects them. `with` is not allowed in
+  `func` (start/end are side effects).
 - `return expr` / `return`
 - `break`
 - `echo a, b, c` — writes a line to stdout. Accepts `int`, `bool`, and
@@ -146,7 +152,8 @@ Nifty compiles one module to one portable C file (C99 + pthreads):
 | `const`                | `static const int64_t`                     |
 | `func` / `proc`        | `static` function                          |
 | `thread foo`           | `static void *t_foo(void*)` + `pthread_create`/`join` in generated `main` |
-| `Lock` / `withLock`    | `pthread_mutex_t` / lock–unlock pair       |
+| `with` on a `Lock`     | `pthread_mutex_t` lock–unlock pair         |
+| `with` on other types  | `start(x)` / `end(x)` calls around the block |
 | `a[i]`                 | index via bounds-check helper              |
 | `/`, `%`               | zero-check helpers                         |
 | `var` param (scalar)   | pointer parameter                          |
@@ -169,7 +176,7 @@ params      = param { "," param }
 param       = ident { "," ident } ":" ["var"] type
 type        = "int" | "bool" | "Lock" | "array" "[" (int | constIdent) "," type "]"
 body        = simpleStmt NL | NL INDENT { stmt } DEDENT
-stmt        = simpleStmt NL | ifStmt | whileStmt | forStmt | loopStmt | withLockStmt
+stmt        = simpleStmt NL | ifStmt | whileStmt | forStmt | loopStmt | withStmt
 simpleStmt  = varDecl | assign | callStmt | "return" [expr] | "break"
             | "echo" expr { "," expr } | "discard" expr
 expr        = orExpr; standard precedence:
@@ -183,7 +190,8 @@ Comments run from `#` to end of line. Indentation is spaces only.
 
 Implemented: everything above not marked *planned* — `const`/`var` globals,
 `func`/`proc`/`thread` with the full rights table, no-recursion via
-declare-before-use, `if`/`while`/`for`/`loop`/`withLock`, locks,
+declare-before-use, `if`/`while`/`for`/`loop`/`with` (Lock and start/end
+protocol), locks,
 bounds-checked arrays, zero-checked `/` `%`, `echo`, `discard`, C output,
 generated `main` with thread spawn/join.
 

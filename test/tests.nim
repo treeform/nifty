@@ -131,12 +131,41 @@ thread t(x: int) =
   echo x
 """)
 
-block: # return inside withLock is rejected
-  doAssert "withLock" in rejects("""
+block: # with on a type with start/end procs
+  let (output, code) = buildAndRun("""
+var indentLevel: int
+
+proc start(x: var int) =
+  x = x + 1
+
+proc end(x: var int) =
+  x = x - 1
+
+thread main() =
+  with indentLevel:
+    echo "inside: ", indentLevel
+    with indentLevel:
+      echo "nested: ", indentLevel
+  echo "after: ", indentLevel
+""", "withproto")
+  doAssert code == 0
+  doAssert output == "inside: 1\nnested: 2\nafter: 0\n", output
+
+block: # with on a type without start/end is rejected
+  doAssert "needs a 'start' proc" in rejects("""
+var n: int
+
+thread main() =
+  with n:
+    echo n
+""")
+
+block: # return inside a with block is rejected
+  doAssert "with block" in rejects("""
 var l: Lock
 
 proc p(): int =
-  withLock l:
+  with l:
     return 1
 
 thread main() =
