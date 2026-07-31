@@ -25,8 +25,16 @@ thread main() =              # one OS thread, starts at program start
 ## Usage
 
 ```
+nim r src/nifty.nim examples/sort.nifty    # build and, if no errors, run (default)
+```
+
+Or with a compiled `nifty` binary:
+
+```
 nim c -d:release -o:nifty src/nifty.nim
-./nifty examples/hello.nifty -r
+./nifty examples/hello.nifty         # run is the default command
+./nifty build examples/hello.nifty   # build only
+./nifty run examples/hello.nifty     # explicit run
 ```
 
 ## Tests

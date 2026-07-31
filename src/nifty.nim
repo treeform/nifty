@@ -1242,28 +1242,34 @@ when isMainModule:
   const usage = """
 nifty - compile a .nifty file to C and build it with cc
 
-usage: nifty file.nifty [-o binary] [--emit-c] [-r]
+usage:
+  nifty [run] file.nifty [options]   build and, if there are no errors, run (default)
+  nifty build file.nifty [options]   build only
+
+options:
   -o binary   output binary path (default: source path without extension)
   --emit-c    only write the .c file, do not run cc
-  -r          run the binary after building
 """
+  var cmd = "run"
+  var sawCmd = false
   var srcPath = ""
   var outPath = ""
   var emitOnly = false
-  var runIt = false
   let params = commandLineParams()
   var i = 0
   while i < params.len:
     let a = params[i]
     case a
+    of "run", "build":
+      if sawCmd or srcPath.len > 0: quit(usage, 1)
+      cmd = a
+      sawCmd = true
     of "-o":
       inc i
       if i >= params.len: quit(usage, 1)
       outPath = params[i]
     of "--emit-c", "-c":
       emitOnly = true
-    of "-r":
-      runIt = true
     of "-h", "--help":
       echo usage
       quit(0)
@@ -1289,5 +1295,6 @@ usage: nifty file.nifty [-o binary] [--emit-c] [-r]
   if execShellCmd("cc -O2 -pthread -o " & quoteShell(bin) & " " & quoteShell(cPath)) != 0:
     quit("nifty: C compilation failed", 1)
   echo "built ", bin
-  if runIt:
-    quit(execShellCmd(quoteShell(bin)))
+  if cmd == "run":
+    let exe = if '/' in bin: bin else: "./" & bin
+    quit(execShellCmd(quoteShell(exe)))
