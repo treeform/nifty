@@ -1,0 +1,7 @@
+var data: array[3, int]
+
+thread main() =
+  var s = 0
+  for i in 0 ..< 3:
+    s = s + data[i]
+  echo s

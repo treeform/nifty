@@ -1,0 +1,29 @@
+# Loop-induction for accumulators: in a counted for loop, a local
+# assigned only as v = v + e (or v - e) keeps a widened fact:
+# start + tripCount * per-iteration delta. No guard, no range needed.
+
+thread main() =
+  # Plain int, zero annotations: sum is proven <= 5 * 4 = 20.
+  var sum = 0
+  for i in 0 ..< 5:
+    sum = sum + i
+  echo sum
+
+  # Widened result must still fit a declared range: 10 * 10 = 100 <= 1000.
+  var total: 0 .. 1000 = 0
+  for j in 1 .. 10:
+    total = total + j
+  echo total
+
+  # Mixed directions: delta per pass is [-3, 3], so wave stays in
+  # [-12, 12] over 4 passes.
+  var wave = 0
+  for k in 0 ..< 4:
+    if k % 2 == 0:
+      wave = wave + k
+    else:
+      wave = wave - k
+  echo wave
+
+  # The widened fact survives the loop: sum + total still proves.
+  echo sum + total

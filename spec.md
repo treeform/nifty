@@ -213,6 +213,23 @@ routine that may write it, or entering a loop whose body modifies it (the
 loop condition re-proves what it can on every entry). Var params never
 carry flow facts — they may alias anything.
 
+One loop exception — **accumulator induction**: in a counted `for` loop, a
+local assigned *only* as `v = v + e` / `v = v - e` (with `e` independent
+of `v` and the sites outside nested loops) keeps a widened fact instead of
+losing everything: its entry value plus `tripCount ×` the per-iteration
+delta, where `e`'s bound comes from declared ranges, consts, and the loop
+variable only. So this proves with zero annotations:
+
+```nim
+var sum = 0
+for i in 0 ..< 5:
+  sum = sum + i     # proven: sum stays within 0 .. 20
+echo sum
+```
+
+The widened fact survives the loop, so downstream arithmetic proves too.
+`while`-loop accumulators still need a guard.
+
 **Globals and threads.** The checker computes, from the static call graph,
 which threads touch each global:
 

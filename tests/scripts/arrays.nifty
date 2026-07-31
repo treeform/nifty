@@ -8,10 +8,9 @@ proc fill() =
     data[i] = i * i
 
 func sum(arr: array[N, 0 .. 100]): int =
-  var s: 0 .. 1000 = 0
+  var s = 0
   for i in 0 ..< N:
-    if s <= 900:
-      s = s + arr[i]
+    s = s + arr[i]
   return s
 
 thread main() =

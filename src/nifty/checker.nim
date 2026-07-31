@@ -436,6 +436,179 @@ proc hasLoopBreak(body: seq[Stmt]): bool =
     else:
       discard
 
+# --- accumulator widening -------------------------------------------------
+
+proc containsIdent(e: Expr, v: string): bool =
+  if e.isNil:
+    return false
+  if e.kind == ekIdent and e.sval == v:
+    return true
+  for k in e.kids:
+    if containsIdent(k, v):
+      return true
+
+proc declTypeOf(c: Ctx, e: Expr): Typ =
+  ## The type of a value expression from declarations only (no checking).
+  case e.kind
+  of ekIdent:
+    for i in countdown(c.scopes.len - 1, 0):
+      if e.sval in c.scopes[i]:
+        return c.scopes[i][e.sval].typ
+    if e.sval in c.globals:
+      return c.globals[e.sval]
+    nil
+  of ekIndex:
+    let b = c.declTypeOf(e.kids[0])
+    if b != nil and b.kind == tyArray: b.elem else: nil
+  of ekField:
+    let b = c.declTypeOf(e.kids[0])
+    if b != nil and b.kind == tyObject:
+      for f in b.fields:
+        if f.name == e.sval:
+          return f.typ
+    nil
+  else:
+    nil
+
+proc declFact(c: Ctx, e: Expr, loopVar: string, loopFact: Fact):
+    tuple[ok: bool, f: Fact] =
+  ## Interval of an expression from declared ranges, consts, and the loop
+  ## variable only — no flow facts, so it is valid on every iteration.
+  result = (false, fullFact())
+  case e.kind
+  of ekInt:
+    result = (true, Fact(lo: e.ival, hi: e.ival))
+  of ekIdent:
+    if e.sval == loopVar:
+      result = (true, loopFact)
+    elif e.sval in c.consts:
+      let v = c.consts[e.sval]
+      result = (true, Fact(lo: v, hi: v))
+    else:
+      let t = c.declTypeOf(e)
+      if t != nil and t.kind == tyInt:
+        result = (true, typFact(t))
+  of ekNeg:
+    let a = c.declFact(e.kids[0], loopVar, loopFact)
+    if a.ok:
+      let l = satNeg(a.f.hi)
+      let h = satNeg(a.f.lo)
+      if not (l.ov or h.ov):
+        result = (true, Fact(lo: l.v, hi: h.v))
+  of ekBin:
+    let a = c.declFact(e.kids[0], loopVar, loopFact)
+    let b = c.declFact(e.kids[1], loopVar, loopFact)
+    if a.ok and b.ok:
+      case e.sval
+      of "+":
+        let r = addF(a.f, b.f)
+        if not r.ov: result = (true, r.f)
+      of "-":
+        let r = subF(a.f, b.f)
+        if not r.ov: result = (true, r.f)
+      of "*":
+        let r = mulF(a.f, b.f)
+        if not r.ov: result = (true, r.f)
+      of "/", "%":
+        if (b.f.lo > 0 or b.f.hi < 0) and
+            not (a.f.lo == IntLow and b.f.lo <= -1 and b.f.hi >= -1):
+          if e.sval == "/":
+            result = (true, divF(a.f, b.f))
+          else:
+            result = (true, modF(a.f, b.f))
+      else:
+        discard
+  of ekIndex, ekField:
+    let t = c.declTypeOf(e)
+    if t != nil and t.kind == tyInt:
+      result = (true, typFact(t))
+  of ekCall:
+    if e.sval in c.routineTab:
+      let rt = c.routineTab[e.sval].ret
+      if rt != nil and rt.kind == tyInt:
+        result = (true, typFact(rt))
+  else:
+    discard
+
+proc accumWiden(c: Ctx, s: Stmt, assigned: HashSet[string],
+    loopFact: Fact): Table[string, Fact] =
+  ## Induction for accumulators in a counted for loop: a local assigned
+  ## ONLY as v = v + e / v = v - e (e independent of v, not inside a
+  ## nested loop) keeps a widened fact instead of losing everything:
+  ## its entry value plus tripCount * the per-iteration delta.
+  let trips = s.tripBound
+  for v in assigned:
+    var isLocalInt = false
+    for i in countdown(c.scopes.len - 1, 0):
+      if v in c.scopes[i]:
+        isLocalInt = c.scopes[i][v].kind == syLocal and
+          c.scopes[i][v].typ.kind == tyInt
+        break
+    if not isLocalInt:
+      continue
+    var sites: seq[tuple[sign: int, e: Expr]]
+    var ok = true
+
+    proc walk(body: seq[Stmt], nested: bool) =
+      for st in body:
+        var touched: HashSet[string]
+        for e in [st.init, st.lhs, st.rhs, st.cond, st.lo, st.hi, st.value]:
+          c.collectAssignedExpr(e, touched)
+        for a in st.args:
+          c.collectAssignedExpr(a, touched)
+        for br in st.elifs:
+          c.collectAssignedExpr(br.cond, touched)
+        if v in touched or (st.kind == skWith and st.name == v):
+          ok = false
+        if st.kind == skAssign and st.lhs.kind == ekIdent and st.lhs.sval == v:
+          if nested:
+            ok = false
+          else:
+            let r = st.rhs
+            if r.kind == ekBin and r.sval in ["+", "-"] and
+                r.kids[0].kind == ekIdent and r.kids[0].sval == v and
+                not containsIdent(r.kids[1], v):
+              sites.add (sign: (if r.sval == "+": 1 else: -1), e: r.kids[1])
+            else:
+              ok = false
+        let deeper = nested or st.kind in {skWhile, skFor, skLoop}
+        walk(st.body, deeper)
+        for br in st.elifs:
+          walk(br.body, deeper)
+        walk(st.elseBody, deeper)
+
+    walk(s.body, false)
+    if not ok or sites.len == 0:
+      continue
+    # Per-iteration delta: each site runs at most once per iteration.
+    var dLo = 0'i64
+    var dHi = 0'i64
+    var good = true
+    for site in sites:
+      let r = c.declFact(site.e, s.name, loopFact)
+      if not r.ok:
+        good = false
+        break
+      var lo = r.f.lo
+      var hi = r.f.hi
+      if site.sign < 0:
+        let nl = satNeg(hi)
+        let nh = satNeg(lo)
+        if nl.ov or nh.ov:
+          good = false
+          break
+        lo = nl.v
+        hi = nh.v
+      dLo = satAdd(dLo, min(0'i64, lo)).v
+      dHi = satAdd(dHi, max(0'i64, hi)).v
+    if not good:
+      continue
+    # Saturation only widens the interval, which stays sound.
+    let v0 = c.curFact(v)
+    result[v] = Fact(
+      lo: satAdd(v0.lo, satMul(trips, dLo).v).v,
+      hi: satAdd(v0.hi, satMul(trips, dHi).v).v)
+
 # --- termination proof ----------------------------------------------------
 
 proc condZeroExit(c: Ctx, cond: Expr, v: string): bool =
@@ -908,11 +1081,19 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     else:
       iHi = satSub(iHi, 1).v
     s.tripBound = max(0'i64, satAdd(satSub(iHi, lof.lo).v, 1).v)
-    c.dropAssigned(s.body)
+    let loopFact = Fact(lo: lof.lo, hi: iHi)
+    var assigned: HashSet[string]
+    c.collectAssigned(s.body, assigned)
+    # Simple accumulators keep a widened fact instead of losing everything.
+    let widened = c.accumWiden(s, assigned, loopFact)
+    for n in assigned:
+      c.facts.del n
+    for n, f in widened:
+      c.facts[n] = f
     let dropped = c.facts
     c.scopes.add initTable[string, Sym]()
     c.scopes[^1][s.name] = Sym(kind: syLocal, typ: intType(), mutable: false)
-    c.facts[s.name] = Fact(lo: lof.lo, hi: iHi)
+    c.facts[s.name] = loopFact
     c.loopWiths.add c.withDepth
     for st in s.body:
       c.checkStmt(st, false)

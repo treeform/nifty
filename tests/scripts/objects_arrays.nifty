@@ -18,10 +18,9 @@ proc fill() =
       g.rows[r].cells[c] = r * 100 + c
 
 func rowSum(row: Row): int =
-  var s: 0 .. 10000 = 0
+  var s = 0
   for i in 0 ..< N:
-    if s <= 9000:
-      s = s + row.cells[i]
+    s = s + row.cells[i]
   return s
 
 proc bumpFirst(row: var Row) =
