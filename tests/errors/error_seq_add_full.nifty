@@ -1,0 +1,7 @@
+var items: seq[4, int]
+
+proc put(v: int) =
+  items.add(v)
+
+thread main() =
+  put(1)

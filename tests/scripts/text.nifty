@@ -1,0 +1,48 @@
+# seq[N, T] and string[N]: bounded containers with a compile-time max
+# and a runtime length. Only the live part 0 ..< len is ever readable,
+# so dead slots are free and zero-init means empty. All operations are
+# proven: add needs room, pop needs elements, indexing needs i < len.
+
+const MaxWords = 8
+
+var words: seq[MaxWords, string[20]]
+
+proc collect() =
+  # add requires proof there is room; the .len test provides it.
+  if words.len < MaxWords:
+    words.add("nifty")
+  if words.len < MaxWords:
+    words.add("proves")
+  if words.len < MaxWords:
+    words.add("bounded")
+
+func score(s: string[20]): int =
+  # Iteration is safe by construction - no index, no proof needed.
+  var total = 0
+  for b in s:
+    total = total + b
+  return total
+
+thread main() =
+  var greeting: string[40] = "hello"
+  greeting.add(", ")
+  greeting.add("world")
+  echo greeting
+  echo greeting.len
+
+  collect()
+  echo words.len
+  for w in words:
+    echo w, " -> ", score(w)
+
+  # push returns false when full instead of demanding a proof.
+  var nums: seq[4, 0 .. 100]
+  var i: 0 .. 6 = 0
+  while i < 6:
+    if nums.push(i * 10):
+      echo "pushed ", i * 10
+    else:
+      echo "full at ", i * 10
+    i = i + 1
+  if nums.len > 2:
+    echo nums[0], " ", nums[2]

@@ -1,0 +1,7 @@
+var items: seq[8, int]
+
+proc read(i: 0 ..< 8): int =
+  return items[i]
+
+thread main() =
+  echo read(2)

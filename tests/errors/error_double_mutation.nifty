@@ -1,0 +1,7 @@
+thread main() =
+  var a: seq[4, int]
+  var b: seq[4, int]
+  a.add(1)
+  b.add(2)
+  if a.len > 0 and b.len > 0:
+    echo a.pop() + b.pop()

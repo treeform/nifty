@@ -102,6 +102,24 @@ v0 types:
 - `array[N, T]` — fixed length `N` (an integer literal or `const`), element
   type `T`. Arrays are indexed `a[i]` with a bounds check (traps in v0).
   Whole-array assignment/copy is not allowed; copy elements in a loop.
+- `seq[N, T]` — a bounded dynamic array: storage for `N` elements plus a
+  runtime length `0 .. N`. Zero-init means empty; only the live part
+  `0 ..< len` is ever readable or writable, so dead slots are free (a
+  `seq` of `1 .. 5` ints is fine zero-initialized). Value semantics like
+  objects. Operations carry proof contracts:
+  - `s.len` — the length, typed `0 .. N`; tests on it (`if s.len < N:`)
+    create flow facts exactly like ints, invalidated when `s` changes.
+  - `s.add(x)` — requires proof there is room; `s.push(x)` returns
+    `false` when full instead (backpressure style, usable in helpers).
+  - `s.pop()` — requires proof `s` is not empty. `s.clear()`.
+  - `s[i]` — requires proof `i < s.len` (pin or test the length first).
+  - `for x in s:` — iteration is safe by construction, bounded by `N`
+    (termination free); modifying `s` inside is a compile error.
+  Two mutations in one statement are rejected (unspecified order).
+- `string[N]` — a `seq` of bytes (`0 .. 255`, stored as one byte each)
+  with literal syntax: `var s: string[40] = "hello"` (the literal must
+  fit, checked at compile time), `s.add(", ")`, `s.add(other)` (append,
+  with a capacity proof), `echo s`, `s[i]`, `for b in s:`.
 - `Lock` — a mutex. Only allowed as a global; only usable via `with`.
 - `object` — a static struct, exactly like C:
 
@@ -144,6 +162,9 @@ Planned types:
 - `if cond: ... elif cond: ... else: ...`
 - `for i in lo ..< hi:` / `for i in lo .. hi:` — bounded by construction;
   `i` is immutable; bounds are evaluated once.
+- `for x in s:` — iterate a seq or string; `x` is an immutable copy of
+  each live element. Safe by construction: no index, no proof, bounded
+  by the capacity.
 - `while cond:` — must be provably bounded. Either the compiler
   recognizes induction — a finite-ranged local that strictly steps toward
   a bound on every iteration (`i = i + 1` at the top level of the body),
@@ -361,7 +382,10 @@ protocol), locks, the three static proofs (division, indexing, overflow)
 via interval analysis with zero runtime checks in the generated C, `echo`,
 `discard`, C output, generated `main` with thread spawn/join.
 
-Not yet implemented: `index` types, fixed strings, wildcard generics,
-tail-call recursion, the per-thread error flag, deterministic floats and
-fixed-point (`fixed[lo .. hi, step]` — a scaled ranged int, so the
-existing proofs apply directly).
+Not yet implemented: `index` types, wildcard generics, `map`/`set`/`queue`
+builtins (same recipe as seq: fixed storage + range-typed state + op
+contracts; `set[T]` over a range type needs no capacity at all — the range
+is the capacity), tail-call recursion, the per-thread error flag,
+deterministic floats and fixed-point (`fixed[lo .. hi, step]` — a scaled
+ranged int, so the existing proofs apply directly), int width from ranges
+(seq elements are still 8 bytes each; string data is already 1 byte).

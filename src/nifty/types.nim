@@ -2,14 +2,14 @@
 
 type
   TypKind* = enum
-    tyInt, tyBool, tyString, tyLock, tyArray, tyObject
+    tyInt, tyBool, tyString, tyLock, tyArray, tyObject, tySeq, tyStr
   Field* = object
     name*: string
     typ*: Typ
   Typ* = ref object
     kind*: TypKind
-    len*: int64          # tyArray
-    elem*: Typ           # tyArray
+    len*: int64          # tyArray/tySeq/tyStr: capacity
+    elem*: Typ           # tyArray/tySeq
     name*: string        # tyObject
     fields*: seq[Field]  # tyObject
     rlo*, rhi*: int64    # tyInt: declared range; full range = plain int
@@ -18,7 +18,8 @@ type
     syConst, syGlobal, syLocal, syParam
 
   ExprKind* = enum
-    ekInt, ekBool, ekStr, ekIdent, ekBin, ekNot, ekNeg, ekIndex, ekCall, ekField
+    ekInt, ekBool, ekStr, ekIdent, ekBin, ekNot, ekNeg, ekIndex, ekCall,
+    ekField, ekMethod # ekMethod: builtin op on a seq/string, kids[0] = base
   Expr* = ref object
     kind*: ExprKind
     line*: int
@@ -36,7 +37,8 @@ type
 
   StmtKind* = enum
     skVar, skLet, skAssign, skIf, skWhile, skFor, skLoop, skWith,
-    skReturn, skBreak, skEcho, skDiscard, skCall
+    skReturn, skBreak, skEcho, skDiscard, skCall,
+    skForEach # for x in s: over a seq/string; value = s, name = x
   Elif* = object
     cond*: Expr
     body*: seq[Stmt]
@@ -102,8 +104,10 @@ proc typEq*(a, b: Typ): bool =
     return a.isNil and b.isNil
   if a.kind != b.kind:
     return false
-  if a.kind == tyArray:
+  if a.kind in {tyArray, tySeq}:
     return a.len == b.len and typEq(a.elem, b.elem)
+  if a.kind == tyStr:
+    return a.len == b.len
   if a.kind == tyObject:
     return a.name == b.name
   true
@@ -118,4 +122,6 @@ proc `$`*(t: Typ): string =
   of tyString: "string"
   of tyLock: "Lock"
   of tyArray: "array[" & $t.len & ", " & $t.elem & "]"
+  of tySeq: "seq[" & $t.len & ", " & $t.elem & "]"
+  of tyStr: "string[" & $t.len & "]"
   of tyObject: t.name

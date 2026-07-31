@@ -1,1 +1,1 @@
-expected '..' or '..<'
+expected '..', '..<'

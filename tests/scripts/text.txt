@@ -1,0 +1,13 @@
+hello, world
+12
+3
+nifty -> 554
+proves -> 671
+bounded -> 737
+pushed 0
+pushed 10
+pushed 20
+pushed 30
+full at 40
+full at 50
+0 20

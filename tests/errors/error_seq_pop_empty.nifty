@@ -1,0 +1,5 @@
+thread main() =
+  var items: seq[4, int]
+  items.add(1)
+  discard items.pop()
+  discard items.pop()

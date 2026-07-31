@@ -34,13 +34,20 @@ proc typeAlign(t: Typ): int64 =
     for f in t.fields:
       result = max(result, typeAlign(f.typ))
   else:
-    result = 8
+    result = 8 # int, seq/string (int64 length field first), Lock
 
 proc typeSize(t: Typ): int64 =
   case t.kind
   of tyBool: 1
   of tyInt: 8
   of tyArray: smul(t.len, typeSize(t.elem))
+  of tySeq:
+    # int64 length + data, padded to 8.
+    let data = smul(t.len, typeSize(t.elem))
+    (sadd(8, data) + 7) div 8 * 8
+  of tyStr:
+    # int64 length + one byte per capacity, padded to 8.
+    (sadd(8, t.len) + 7) div 8 * 8
   of tyObject:
     var off = 0'i64
     for f in t.fields:
@@ -85,6 +92,9 @@ proc stmtOps(s: Stmt, costs: Table[string, int64]): int64 =
     result = sadd(result, sadd(exprOps(s.lo, costs), exprOps(s.hi, costs)))
     result = sadd(result, smul(sat(s.tripBound),
       sadd(bodyOps(s.body, costs), 1)))
+  of skForEach:
+    result = sadd(result, smul(sat(s.tripBound),
+      sadd(bodyOps(s.body, costs), 1)))
   of skWith:
     # Lock/unlock (or start/end) plus the body.
     result = sadd(result, 2)
@@ -114,6 +124,8 @@ proc localBytes(body: seq[Stmt]): int64 =
       result = sadd(result, typeSize(s.typ))
     if s.kind == skFor:
       result = sadd(result, 8)
+    if s.kind == skForEach:
+      result = sadd(result, sadd(typeSize(s.typ), 16)) # elem + iterator
     result = sadd(result, localBytes(s.body))
     for br in s.elifs:
       result = sadd(result, localBytes(br.body))

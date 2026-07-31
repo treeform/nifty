@@ -52,7 +52,8 @@ proc evalConst(p: Parser, e: Expr): int64
 proc parseType(p: var Parser): Typ =
   let t = p.peek
   if t.kind == tkIdent and
-      (t.text in ["int", "bool", "Lock", "array"] or t.text in p.types):
+      (t.text in ["int", "bool", "Lock", "array", "seq", "string"] or
+       t.text in p.types):
     discard p.next
     case t.text
     of "int":
@@ -61,7 +62,7 @@ proc parseType(p: var Parser): Typ =
       Typ(kind: tyBool)
     of "Lock":
       Typ(kind: tyLock)
-    of "array":
+    of "array", "seq":
       p.expectOp("[")
       let lt = p.next
       var n: int64
@@ -70,15 +71,31 @@ proc parseType(p: var Parser): Typ =
       elif lt.kind == tkIdent and lt.text in p.consts:
         n = p.consts[lt.text]
       else:
-        err(lt.line, "array length must be an integer literal or a const")
+        err(lt.line, t.text & " capacity must be an integer literal or a const")
       if n <= 0:
-        err(lt.line, "array length must be positive")
+        err(lt.line, t.text & " capacity must be positive")
       p.expectOp(",")
       let e = p.parseType()
       if e.kind == tyLock:
-        err(lt.line, "Lock cannot be an array element")
+        err(lt.line, "Lock cannot be a " & t.text & " element")
+      if t.text == "seq" and e.kind == tyArray:
+        err(lt.line, "a seq element cannot be a plain array; wrap it in an object")
       p.expectOp("]")
-      Typ(kind: tyArray, len: n, elem: e)
+      Typ(kind: (if t.text == "seq": tySeq else: tyArray), len: n, elem: e)
+    of "string":
+      p.expectOp("[")
+      let lt = p.next
+      var n: int64
+      if lt.kind == tkInt:
+        n = parseBiggestInt(lt.text)
+      elif lt.kind == tkIdent and lt.text in p.consts:
+        n = p.consts[lt.text]
+      else:
+        err(lt.line, "string capacity must be an integer literal or a const")
+      if n <= 0:
+        err(lt.line, "string capacity must be positive")
+      p.expectOp("]")
+      Typ(kind: tyStr, len: n)
     else:
       p.types[t.text]
   else:
@@ -134,8 +151,22 @@ proc parsePostfix(p: var Parser): Expr =
       result = Expr(kind: ekIndex, line: result.line, kids: @[result, idx])
     elif p.atOp("."):
       discard p.next
-      result = Expr(kind: ekField, line: result.line, sval: p.expectIdent(),
-        kids: @[result])
+      let fname = p.expectIdent()
+      if p.atOp("("):
+        # Builtin method call: s.add(x), s.pop(), s.clear(), s.push(x)
+        discard p.next
+        var m = Expr(kind: ekMethod, line: result.line, sval: fname,
+          kids: @[result])
+        if not p.atOp(")"):
+          m.kids.add p.parseExpr()
+          while p.atOp(","):
+            discard p.next
+            m.kids.add p.parseExpr()
+        p.expectOp(")")
+        result = m
+      else:
+        result = Expr(kind: ekField, line: result.line, sval: fname,
+          kids: @[result])
     elif p.atOp("("):
       if result.kind != ekIdent:
         err(result.line, "only a named func or proc can be called")
@@ -247,7 +278,7 @@ proc parseSimpleStmt(p: var Parser): Stmt =
         err(e.line, "cannot assign to this expression")
       Stmt(kind: skAssign, line: t.line, lhs: e, rhs: p.parseExpr())
     else:
-      if e.kind != ekCall:
+      if e.kind notin {ekCall, ekMethod}:
         err(e.line, "expression has no effect")
       Stmt(kind: skCall, line: t.line, value: e)
 
@@ -303,17 +334,20 @@ proc parseStmt(p: var Parser): Stmt =
     result.body = p.parseBody()
   of "for":
     discard p.next
-    result = Stmt(kind: skFor, line: t.line, name: p.expectIdent())
+    let vname = p.expectIdent()
     p.expectKeyword("in")
-    result.lo = p.parseExpr()
-    if p.atOp("..<"):
-      result.inclusive = false
-    elif p.atOp(".."):
-      result.inclusive = true
+    let first = p.parseExpr()
+    if p.atOp("..<") or p.atOp(".."):
+      result = Stmt(kind: skFor, line: t.line, name: vname, lo: first)
+      result.inclusive = p.peek.text == ".."
+      discard p.next
+      result.hi = p.parseExpr()
+    elif p.atOp(":"):
+      # for x in s: - iterate a seq or string
+      result = Stmt(kind: skForEach, line: t.line, name: vname, value: first)
     else:
-      err(p.peek.line, "expected '..' or '..<' in for loop")
-    discard p.next
-    result.hi = p.parseExpr()
+      err(p.peek.line, "expected '..', '..<' (a range) or ':' (iterate a " &
+        "seq/string) in for loop")
     p.expectOp(":")
     result.body = p.parseBody()
   of "loop":

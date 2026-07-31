@@ -2,7 +2,7 @@
 ## Because nifty enforces declare-before-use, the generated C needs no
 ## forward prototypes: definitions appear in call order.
 
-import std/[strutils, tables, sequtils]
+import std/[strutils, tables, sets, sequtils]
 import types
 
 type
@@ -12,6 +12,7 @@ type
     tmpN: int
     src: string
     routines: Table[string, Routine]
+    emitted: HashSet[string] # typedefs already generated, by mangled name
 
 proc put(g: var Gen, s: string) =
   g.o.add spaces(g.ind * 2)
@@ -29,10 +30,21 @@ proc cQuote(s: string): string =
     else: result.add ch
   result.add "\""
 
+proc mangle(t: Typ): string =
+  case t.kind
+  of tyInt: "i"
+  of tyBool: "b"
+  of tyArray: "a" & $t.len & "_" & mangle(t.elem)
+  of tySeq: "q" & $t.len & "_" & mangle(t.elem)
+  of tyStr: "s" & $t.len
+  of tyObject: "o" & t.name
+  else: "x"
+
 proc cBase(t: Typ): string =
   case t.kind
   of tyBool: "bool"
   of tyObject: "S_" & t.name
+  of tySeq, tyStr: "NS_" & mangle(t)
   else: "int64_t"
 
 proc cDecl(name: string, t: Typ): string =
@@ -54,7 +66,11 @@ proc genExpr(g: var Gen, e: Expr): string =
   of ekBool:
     if e.bval: "true" else: "false"
   of ekStr:
-    cQuote(e.sval)
+    if e.typ != nil and e.typ.kind == tyStr:
+      "(" & cBase(e.typ) & "){ .m_len = " & $e.sval.len & "LL, .m_data = " &
+        cQuote(e.sval) & " }"
+    else:
+      cQuote(e.sval)
   of ekIdent:
     case e.symKind
     of syConst: "C_" & e.sval
@@ -79,7 +95,10 @@ proc genExpr(g: var Gen, e: Expr): string =
     else: "(" & a & " " & e.sval & " " & b & ")"
   of ekIndex:
     # The checker proved the index is in bounds; no runtime check needed.
-    g.genExpr(e.kids[0]) & "[" & g.genExpr(e.kids[1]) & "]"
+    if e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr}:
+      g.genExpr(e.kids[0]) & ".m_data[" & g.genExpr(e.kids[1]) & "]"
+    else:
+      g.genExpr(e.kids[0]) & "[" & g.genExpr(e.kids[1]) & "]"
   of ekCall:
     let r = g.routines[e.sval]
     var parts: seq[string]
@@ -90,7 +109,28 @@ proc genExpr(g: var Gen, e: Expr): string =
         parts.add g.genExpr(a)
     "f_" & e.sval & "(" & parts.join(", ") & ")"
   of ekField:
-    g.genExpr(e.kids[0]) & ".m_" & e.sval
+    if e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr}:
+      g.genExpr(e.kids[0]) & ".m_len"
+    else:
+      g.genExpr(e.kids[0]) & ".m_" & e.sval
+  of ekMethod:
+    let bt = e.kids[0].typ
+    let fn = cBase(bt) & "_" & (if bt.kind == tyStr and e.sval == "add": "adds"
+      else: e.sval)
+    let basePtr = "&" & g.genExpr(e.kids[0])
+    if bt.kind == tyStr and e.sval == "add":
+      let a = e.kids[1]
+      if a.kind == ekStr and (a.typ == nil or a.typ.kind != tyStr):
+        fn & "(" & basePtr & ", (const uint8_t *)" & cQuote(a.sval) & ", " &
+          $a.sval.len & "LL)"
+      else:
+        # The argument is a path-like string value; safe to mention twice.
+        let av = g.genExpr(a)
+        fn & "(" & basePtr & ", " & av & ".m_data, " & av & ".m_len)"
+    elif e.kids.len > 1:
+      fn & "(" & basePtr & ", " & g.genExpr(e.kids[1]) & ")"
+    else:
+      fn & "(" & basePtr & ")"
 
 proc genCond(g: var Gen, e: Expr): string =
   ## A condition wrapped in exactly one set of parentheses.
@@ -111,7 +151,7 @@ proc genStmt(g: var Gen, s: Stmt) =
   of skVar, skLet:
     let init =
       if s.init != nil: g.genExpr(s.init)
-      elif s.typ.kind in {tyArray, tyObject}: "{0}"
+      elif s.typ.kind in {tyArray, tyObject, tySeq, tyStr}: "{0}"
       elif s.typ.kind == tyBool: "false"
       else: "0"
     g.put cDecl("v_" & s.name, s.typ) & " = " & init & ";"
@@ -186,12 +226,28 @@ proc genStmt(g: var Gen, s: Stmt) =
   of skBreak:
     g.put "break;"
   of skEcho:
+    # string[N] values are copied to temps first so each is evaluated once.
+    var temps: Table[int, string]
+    for i, a in s.args:
+      if a.typ.kind == tyStr:
+        temps[i] = "ni_es" & $g.tmpN
+        inc g.tmpN
+    if temps.len > 0:
+      g.put "{"
+      inc g.ind
+      for i, a in s.args:
+        if i in temps:
+          g.put cBase(a.typ) & " " & temps[i] & " = " & g.genExpr(a) & ";"
     var fmt = ""
     var cargs: seq[string]
-    for a in s.args:
+    for i, a in s.args:
       case a.typ.kind
       of tyString:
         fmt.add a.sval.replace("%", "%%")
+      of tyStr:
+        fmt.add "%.*s"
+        cargs.add "(int)(" & temps[i] & ".m_len)"
+        cargs.add "(const char *)" & temps[i] & ".m_data"
       of tyInt:
         fmt.add "%lld"
         cargs.add "(long long)(" & g.genExpr(a) & ")"
@@ -206,6 +262,27 @@ proc genStmt(g: var Gen, s: Stmt) =
       call.add ", " & x
     call.add ");"
     g.put call
+    if temps.len > 0:
+      dec g.ind
+      g.put "}"
+  of skForEach:
+    let it = "ni_it" & $g.tmpN
+    let ix = "ni_ix" & $g.tmpN
+    let nn = "ni_n" & $g.tmpN
+    inc g.tmpN
+    g.put "{"
+    inc g.ind
+    g.put cBase(s.value.typ) & " *" & it & " = &" & g.genExpr(s.value) & ";"
+    g.put "const int64_t " & nn & " = " & it & "->m_len;"
+    g.put "for (int64_t " & ix & " = 0; " & ix & " < " & nn & "; ++" & ix & ") {"
+    inc g.ind
+    g.put cBase(s.typ) & " v_" & s.name & " = " & it & "->m_data[" & ix & "];"
+    for st in s.body:
+      g.genStmt(st)
+    dec g.ind
+    g.put "}"
+    dec g.ind
+    g.put "}"
   of skDiscard:
     g.put "(void)(" & g.genExpr(s.value) & ");"
   of skCall:
@@ -215,8 +292,77 @@ const cPrelude = """
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 #include <pthread.h>
 """
+
+proc emitTypeDefs(g: var Gen, t: Typ) =
+  ## Emit typedefs (and the inline ops for seq/string) exactly once each,
+  ## dependencies first. Declare-before-use makes this a simple post-order.
+  if t.isNil:
+    return
+  case t.kind
+  of tyArray:
+    g.emitTypeDefs(t.elem)
+  of tyObject:
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    for f in t.fields:
+      g.emitTypeDefs(f.typ)
+    g.put ""
+    g.put "typedef struct {"
+    for f in t.fields:
+      g.put "  " & cDecl("m_" & f.name, f.typ) & ";"
+    g.put "} S_" & t.name & ";"
+  of tySeq:
+    g.emitTypeDefs(t.elem)
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    let n = "NS_" & key
+    let e = cBase(t.elem)
+    g.put ""
+    g.put "typedef struct {"
+    g.put "  int64_t m_len;"
+    g.put "  " & e & " m_data[" & $t.len & "];"
+    g.put "} " & n & ";"
+    g.put "static void " & n & "_add(" & n & " *s, " & e &
+      " v) { s->m_data[s->m_len] = v; s->m_len += 1; }"
+    g.put "static bool " & n & "_push(" & n & " *s, " & e &
+      " v) { if (s->m_len >= " & $t.len &
+      "LL) return false; s->m_data[s->m_len] = v; s->m_len += 1; return true; }"
+    g.put "static " & e & " " & n & "_pop(" & n &
+      " *s) { s->m_len -= 1; return s->m_data[s->m_len]; }"
+    g.put "static void " & n & "_clear(" & n & " *s) { s->m_len = 0; }"
+  of tyStr:
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    let n = "NS_" & key
+    g.put ""
+    g.put "typedef struct {"
+    g.put "  int64_t m_len;"
+    g.put "  uint8_t m_data[" & $t.len & "];"
+    g.put "} " & n & ";"
+    g.put "static void " & n & "_adds(" & n &
+      " *s, const uint8_t *d, int64_t k) { " &
+      "memcpy(&s->m_data[s->m_len], d, (size_t)k); s->m_len += k; }"
+    g.put "static void " & n & "_clear(" & n & " *s) { s->m_len = 0; }"
+  else:
+    discard
+
+proc emitBodyTypeDefs(g: var Gen, body: seq[Stmt]) =
+  for s in body:
+    if s.kind in {skVar, skLet, skForEach}:
+      g.emitTypeDefs(s.typ)
+    g.emitBodyTypeDefs(s.body)
+    for br in s.elifs:
+      g.emitBodyTypeDefs(br.body)
+    g.emitBodyTypeDefs(s.elseBody)
 
 proc generate*(m: Module, src: string): string =
   ## Generate the complete C translation unit for a checked module.
@@ -226,11 +372,14 @@ proc generate*(m: Module, src: string): string =
   g.put "// Generated by nifty from " & src & ". Do not edit."
   g.o.add cPrelude
   for td in m.types:
-    g.put ""
-    g.put "typedef struct {"
-    for f in td.typ.fields:
-      g.put "  " & cDecl("m_" & f.name, f.typ) & ";"
-    g.put "} S_" & td.name & ";"
+    g.emitTypeDefs(td.typ)
+  for gd in m.globals:
+    g.emitTypeDefs(gd.typ)
+  for r in m.routines:
+    for pm in r.params:
+      g.emitTypeDefs(pm.typ)
+    g.emitTypeDefs(r.ret)
+    g.emitBodyTypeDefs(r.body)
   if m.consts.len > 0:
     g.put ""
     for cd in m.consts:
