@@ -1,0 +1,10 @@
+object Vec2 =
+  x: int
+  y: int
+
+func f(v: Vec2): int =
+  v.x = 1
+  return v.x
+
+thread main() =
+  echo 1

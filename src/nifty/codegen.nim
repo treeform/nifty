@@ -248,6 +248,10 @@ proc generate*(m: Module, src: string): string =
       for pm in r.params:
         if pm.isVar and pm.typ.passByPtr:
           ps.add cBase(pm.typ) & " *p_" & pm.name
+        elif pm.typ.kind == tyArray:
+          # Non-var arrays decay to pointers in C; const makes the C
+          # compiler enforce read-only as a second line of defense.
+          ps.add "const " & cDecl("p_" & pm.name, pm.typ)
         else:
           ps.add cDecl("p_" & pm.name, pm.typ)
       let ret = if r.ret.isNil: "void" else: cBase(r.ret)

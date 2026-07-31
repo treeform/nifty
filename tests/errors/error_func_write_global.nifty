@@ -1,0 +1,8 @@
+var g: int
+
+func f(x: int): int =
+  g = x
+  return x
+
+thread main() =
+  echo 1

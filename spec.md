@@ -223,7 +223,7 @@ Nifty compiles one module to one portable C file (C99 + pthreads):
 | `a[i]`                 | index via bounds-check helper              |
 | `/`, `%`               | bare C `/` and `%` (proven safe, no checks) |
 | `var` param (scalar)   | pointer parameter                          |
-| array param            | decayed pointer (read-only unless `var`)   |
+| array param            | decayed pointer, `const` in C unless `var` |
 
 Because declare-before-use is required in nifty, the generated C needs no
 forward prototypes — definitions appear in call order.

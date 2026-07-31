@@ -1,0 +1,6 @@
+func f(x: int): int =
+  x = 2
+  return x
+
+thread main() =
+  echo 1

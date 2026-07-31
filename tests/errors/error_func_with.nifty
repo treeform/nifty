@@ -1,0 +1,8 @@
+var l: Lock
+
+func f(x: int): int =
+  with l:
+    return x
+
+thread main() =
+  echo 1

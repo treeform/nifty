@@ -1,0 +1,6 @@
+func f(a: array[3, int]): int =
+  a[0] = 1
+  return a[0]
+
+thread main() =
+  echo 1
