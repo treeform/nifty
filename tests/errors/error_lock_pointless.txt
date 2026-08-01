@@ -1,0 +1,1 @@
+error_lock_pointless.nifty:1: lock 'quiet' does not protect anything shared: nothing accessed while it is held is used by more than one thread; remove it

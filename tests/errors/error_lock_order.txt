@@ -1,0 +1,1 @@
+error_lock_order.nifty:6: deadlock risk: locks must be acquired in declaration order; 'first' is declared before 'second', which is already held (swap the with blocks, or swap the two lock declarations)

@@ -1,0 +1,7 @@
+var first: Lock
+var second: Lock
+
+thread main() =
+  with second:
+    with first:
+      echo 1

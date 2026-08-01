@@ -1,0 +1,6 @@
+var l: Lock
+
+thread main() =
+  with l:
+    with l:
+      echo 1

@@ -1,0 +1,1 @@
+error_lock_order_call.nifty:10: deadlock risk: 'log' acquires lock 'first' while 'second' is held; locks must be acquired in declaration order

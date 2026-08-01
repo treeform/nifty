@@ -1,0 +1,10 @@
+var first: Lock
+var second: Lock
+
+proc log() =
+  with first:
+    echo 1
+
+thread main() =
+  with second:
+    log()

@@ -373,6 +373,29 @@ deliberately: verification here is the checker's job, not the
 reviewer's eyeball span, and `block:` gives scoped sections inside one
 long readable routine.
 
+## Locks: order and honesty
+
+Data-race freedom was already proven (every access to a shared global
+must hold its one common lock). Two more lock rules close the story:
+
+- **Deadlock freedom by total order.** Locks may only be acquired in
+  declaration order: `with second:` while `first` is held is fine only
+  if `first` is declared first. The rule is checked lexically and
+  across calls (a proc's whole transitive lock set must sort after
+  every lock held at the call site), and re-acquiring a held lock is an
+  error outright (pthread mutexes are not recursive). A waits-for cycle
+  needs two threads acquiring two locks in opposite orders; a total
+  order makes that unrepresentable, so deadlock is impossible — the
+  same shape of argument as no-recursion, one level up.
+- **Pointless locks are errors.** A lock used by one thread protects
+  nothing. A lock under which nothing shared is ever touched (and no
+  output is serialized — `echo` under a lock counts as intentional
+  serialization) only costs cycles: remove it.
+
+`nifty report` prints the lock story it proved: each lock, what it
+protects, and which routines take it
+(`qLock: protects q; used by consumer, producer`).
+
 ## Evaluation order
 
 **Strictly left to right, as written — effects included.** Whenever a
@@ -635,6 +658,8 @@ via `$` substitution variables (splice-per-instantiation, proven per
 binding, `$T.lo`/`$T.hi`, computed return ranges);
 smallest-scope enforcement (unused/one-thread/scratch globals,
 narrowable locals) and `block:` with sibling-block arena overlay;
+lock order (deadlock freedom, lexical + cross-call), pointless-lock
+errors, and the report's locks section;
 `echo`/`discard`; C output
 with zero runtime checks; generated `main` with thread spawn/join;
 `nifty report` (globals / stack / arena / ops); splice-once imports with
@@ -647,5 +672,5 @@ a `Result`-returning `map.get` (needs absence reasons; `get(k, fallback)`
 and proven `m[k]` cover today), tail-call recursion, int width from
 ranges (container elements are still 8 bytes each; string data is
 already 1 byte), deterministic floats and `fixed[lo .. hi, step]`,
-volatile registers and interrupt handlers, deadlock lock-ordering,
+volatile registers and interrupt handlers,
 optional niche packing.

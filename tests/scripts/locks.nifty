@@ -1,0 +1,23 @@
+# Locks are acquired in declaration order (talk before data), each lock
+# provably guards something, and the handshake makes output exact.
+var talk: Lock
+var data: Lock
+var ready: 0 .. 1
+var value: int
+
+thread producer() =
+  with talk:
+    echo "sending"
+    with data:
+      value = 42
+      ready = 1
+
+thread consumer() =
+  var done = false
+  while not done max 1000000000:
+    with data:
+      if ready == 1:
+        done = true
+  with talk:
+    with data:
+      echo value

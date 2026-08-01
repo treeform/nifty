@@ -8,7 +8,7 @@
 ##   worst-case abstract operation count per pass of its outer loop.
 
 import std/[strutils, tables, sets]
-import types
+import types, checker
 
 const frameOverhead = 16'i64 # return address + saved frame pointer
 
@@ -196,6 +196,18 @@ proc buildReport*(m: Module, src: string): string =
     totalLine.add " + " & $locks & " lock" & (if locks > 1: "s" else: "") &
       " (platform-sized)"
   lines.add totalLine
+
+  # Locks: what each one actually protects (from the checker's
+  # ownership analysis - a lock that protected nothing did not compile).
+  if lockReport.len > 0:
+    lines.add ""
+    lines.add "locks (acquired in declaration order - deadlock-free):"
+    for lk in lockReport:
+      var what =
+        if lk.guards.len > 0: "protects " & lk.guards.join(", ")
+        else: "serializes output"
+      lines.add "  " & lk.name & ": " & what & "; used by " &
+        lk.users.join(", ")
 
   # Per-routine cost and frame tables, in declaration order (callees
   # first, so a single pass suffices - declare-before-use is a topological

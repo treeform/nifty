@@ -1,0 +1,11 @@
+var quiet: Lock
+var a: int
+var b: int
+
+thread one() =
+  with quiet:
+    a = 1
+
+thread two() =
+  with quiet:
+    b = 2

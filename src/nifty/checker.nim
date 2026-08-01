@@ -12,7 +12,7 @@
 ## another thread (or an alias) could change them between test and use —
 ## so their declared range is all the checker will believe.
 
-import std/[strutils, tables, sets]
+import std/[algorithm, strutils, tables, sets]
 import common, lexer, types, parser
 
 type
@@ -49,6 +49,8 @@ type
     instCache: Table[string, string]    # binding key -> instance name
     instances: Table[string, seq[Routine]] # generic name -> its instances
     instStack: seq[string]              # generics being instantiated (recursion)
+    lockOrder: Table[string, int]       # lock name -> declaration position
+    routineLocks: Table[string, HashSet[string]] # routine -> locks it may take
 
 const
   IntLow = low(int64)
@@ -219,6 +221,9 @@ proc coerceStrLit(c: Ctx, e: Expr, target: Typ): bool =
 
 proc checkExpr(c: var Ctx, e: Expr): Typ
 proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string
+
+var lockReport*: seq[tuple[name: string, guards: seq[string],
+  users: seq[string]]] ## for `nifty report`: what each lock protects
 
 proc expectVal(c: var Ctx, e: Expr): Typ =
   result = c.checkExpr(e)
@@ -1549,6 +1554,16 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         elif not typeRangeFits(at, pt.typ):
           err(arg.line, "argument " & $(i + 1) & " of '" & name &
             "': element ranges of " & $at & " do not fit " & $pt.typ)
+    if c.heldLocks.len > 0 and name in c.routineLocks:
+      for xl in c.routineLocks[name]:
+        for hl in c.heldLocks:
+          if xl == hl:
+            err(e.line, "deadlock: '" & name & "' acquires lock '" & xl &
+              "', which is already held here")
+          if c.lockOrder[xl] <= c.lockOrder[hl]:
+            err(e.line, "deadlock risk: '" & name & "' acquires lock '" &
+              xl & "' while '" & hl & "' is held; locks must be acquired " &
+              "in declaration order")
     # The callee may write globals; facts about them are now stale.
     if name in c.routineWrites:
       for g in c.routineWrites[name]:
@@ -2015,9 +2030,26 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         if pn in c.routineWrites:
           for gw in c.routineWrites[pn]:
             c.delFacts gw
+        if c.heldLocks.len > 0 and pn in c.routineLocks:
+          for xl in c.routineLocks[pn]:
+            for hl in c.heldLocks:
+              if c.lockOrder[xl] <= c.lockOrder[hl]:
+                err(s.line, "deadlock risk: '" & pn & "' acquires lock '" &
+                  xl & "' while '" & hl & "' is held; locks must be " &
+                  "acquired in declaration order")
       s.typ = t
     let isLock = s.typ != nil and s.typ.kind == LockType
     if isLock:
+      # Deadlock freedom by total order: locks may only be acquired in
+      # declaration order, so a cycle of waiters cannot exist.
+      for hl in c.heldLocks:
+        if s.name == hl:
+          err(s.line, "deadlock: lock '" & s.name & "' is already held")
+        if c.lockOrder[s.name] <= c.lockOrder[hl]:
+          err(s.line, "deadlock risk: locks must be acquired in " &
+            "declaration order; '" & s.name & "' is declared before '" &
+            hl & "', which is already held (swap the with blocks, or " &
+            "swap the two lock declarations)")
       c.heldLocks.add s.name
     inc c.withDepth
     c.checkBody(s.body)
@@ -2591,6 +2623,7 @@ proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string =
 
 proc check*(m: Module) =
   ## Check the whole module; raises NiftyError on the first violation.
+  lockReport = @[]
   var c = Ctx()
   var used: HashSet[string]
   for td in m.types:
@@ -2612,6 +2645,8 @@ proc check*(m: Module) =
     if not zeroOk(gd.typ):
       err(gd.line, "global '" & gd.name & "' is zero-initialized, but 0 is " &
         "not in " & $gd.typ)
+    if gd.typ.kind == LockType:
+      c.lockOrder[gd.name] = c.lockOrder.len
     c.globals[gd.name] = gd.typ
   var anyThread = false
   for r in m.routines:
@@ -2629,7 +2664,7 @@ proc check*(m: Module) =
   if not anyThread:
     err(1, "a nifty program needs at least one thread (thread name() = ...)")
 
-  # --- thread ownership and lock protection of globals ---------------------
+  ## Thread Ownership and Lock Protection
   # For every routine, compute (a) which globals it may touch and which
   # locks are held at EVERY such access (including transitively through
   # calls), and (b) which globals it may write. Then: a global accessed by
@@ -2646,11 +2681,25 @@ proc check*(m: Module) =
   proc isPlainGlobal(name: string): bool =
     name in c.globals and c.globals[name].kind != LockType
 
+  var lockGlobals: Table[string, HashSet[string]] # lock -> globals under it
+  var lockEcho: HashSet[string]                   # locks held around an echo
+  var routineEcho: Table[string, bool]
+  var routineLocks: Table[string, HashSet[string]]
+  var curEcho = false
+  var curLocks: HashSet[string]
+
   proc note(g: string, held: HashSet[string]) =
     if g in acc:
       acc[g] = acc[g] * held
     else:
       acc[g] = held
+    for lk in held:
+      lockGlobals.mgetOrPut(lk, initHashSet[string]()).incl g
+
+  proc noteEcho(held: HashSet[string]) =
+    curEcho = true
+    for lk in held:
+      lockEcho.incl lk
 
   proc mergeCallee(callee: string, held: HashSet[string]) =
     if callee in access:
@@ -2658,6 +2707,10 @@ proc check*(m: Module) =
         note(g, held + ls)
       for g in writes[callee]:
         wr.incl g
+    if routineEcho.getOrDefault(callee, false):
+      noteEcho(held)
+    for lk in routineLocks.getOrDefault(callee, initHashSet[string]()):
+      curLocks.incl lk
 
   proc scanE(e: Expr, held: HashSet[string]) =
     if e.isNil:
@@ -2687,6 +2740,8 @@ proc check*(m: Module) =
     for a in s.args:
       scanE(a, held)
     var bodyHeld = held
+    if s.kind == EchoStmt:
+      noteEcho(held)
     case s.kind
     of AssignStmt:
       let root = s.lhs.rootIdent
@@ -2696,6 +2751,7 @@ proc check*(m: Module) =
     of WithStmt:
       if s.name in c.globals and c.globals[s.name].kind == LockType:
         bodyHeld = held + [s.name].toHashSet
+        curLocks.incl s.name
       else:
         if isPlainGlobal(s.name):
           note(s.name, held)
@@ -2716,10 +2772,15 @@ proc check*(m: Module) =
   for r in m.routines:
     acc = initTable[string, HashSet[string]]()
     wr = initHashSet[string]()
+    curEcho = false
+    curLocks = initHashSet[string]()
     for st in r.body:
       scanS(st, initHashSet[string]())
     access[r.name] = acc
     writes[r.name] = wr
+    routineEcho[r.name] = curEcho
+    routineLocks[r.name] = curLocks
+  c.routineLocks = routineLocks
   c.routineWrites = writes
   for rname, accTab in access:
     var names: HashSet[string]
@@ -2799,3 +2860,20 @@ proc check*(m: Module) =
           err(gd.line, "global '" & gd.name & "' is only used by '" & rn &
             "', which always overwrites it before reading; declare it " &
             "as a local there")
+    if gd.typ.kind == LockType and users.len >= 2:
+      # A lock earns its place by guarding shared state (or, at minimum,
+      # serializing output). Otherwise it only costs cycles.
+      var guards: seq[string]
+      for g in lockGlobals.getOrDefault(gd.name, initHashSet[string]()):
+        if g in c.sharedProt and gd.name in c.sharedProt[g]:
+          guards.add g
+      guards.sort()
+      if guards.len == 0 and gd.name notin lockEcho:
+        err(gd.line, "lock '" & gd.name & "' does not protect anything " &
+          "shared: nothing accessed while it is held is used by more " &
+          "than one thread; remove it")
+      var us: seq[string]
+      for u in users:
+        us.add u
+      us.sort()
+      lockReport.add (name: gd.name, guards: guards, users: us)

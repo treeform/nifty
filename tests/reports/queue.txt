@@ -4,6 +4,9 @@ globals:
   q: 48 bytes (queue[4, 0 .. 99])
   total: 48 bytes + 1 lock (platform-sized)
 
+locks (acquired in declaration order - deadlock-free):
+  qLock: protects q; used by consumer, producer
+
 stack, worst case per thread (estimate: locals + params + 16 bytes/frame; big locals are on the arena):
   producer: 25 bytes (producer)
   consumer: 40 bytes (consumer)
