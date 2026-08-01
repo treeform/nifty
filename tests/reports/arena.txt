@@ -1,0 +1,13 @@
+nifty report: arena.nifty
+
+globals:
+  total: 0 bytes
+
+stack, worst case per thread (estimate: locals + params + 16 bytes/frame; big locals are on the arena):
+  main: 120 bytes (main -> layer -> crunch)
+
+arena per thread (exact; big locals, allocated up front):
+  main: 25165824 bytes (main -> layer -> crunch)
+
+worst-case abstract ops per thread:
+  main: 37748804 ops total

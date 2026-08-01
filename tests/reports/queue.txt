@@ -4,7 +4,7 @@ globals:
   q: 48 bytes (queue[4, 0 .. 99])
   total: 48 bytes + 1 lock (platform-sized)
 
-stack, worst case per thread (estimate: locals + params + 16 bytes/frame):
+stack, worst case per thread (estimate: locals + params + 16 bytes/frame; big locals are on the arena):
   producer: 25 bytes (producer)
   consumer: 40 bytes (consumer)
 

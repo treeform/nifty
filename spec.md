@@ -423,6 +423,27 @@ forward prototypes — definitions appear in call order.
 The host compiles; the target only executes. There is no runtime beyond
 libc + pthreads and a few line-tagged trap helpers.
 
+## Big locals: per-thread arenas
+
+Locals larger than 256 bytes do not live on the C stack — they live on a
+**per-thread arena**: a global byte array sized to that thread's proven
+worst-case call path (the no-recursion DAG walk), bumped by a constant on
+entry to each frame-owning routine and restored on every return. The
+bump pointer is one thread-local; every offset is a compile-time
+constant; and since capacity equals the proof, **arena overflow is
+impossible** — no check, no trap. The C stack carries only scalars and
+small frames, safely inside any OS default (macOS pthreads: 512 KB).
+
+Consequences worth knowing: declare 10 MB of scratch arrays in a proc
+freely — allocation is a pointer bump, deallocation is the return;
+successive calls reuse the same bytes (different types in the same place
+is fine — zero-init at declaration means stale bytes are never
+observable, and there are no pointers to alias them); untouched arena
+pages cost address space, not RAM. Big *by-value object parameters* and
+big foreach element copies still use the C stack — keep those small or
+pass by `var`. The report prints both numbers: the (small) C-stack
+estimate and the exact arena per thread.
+
 ## The report
 
 `nifty report file.nifty` prints the program's static resource footprint —

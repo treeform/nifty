@@ -4,7 +4,7 @@ globals:
   particles: 120 bytes (array[3, Particle])
   total: 120 bytes
 
-stack, worst case per thread (estimate: locals + params + 16 bytes/frame):
+stack, worst case per thread (estimate: locals + params + 16 bytes/frame; big locals are on the arena):
   main: 80 bytes (main -> step)
 
 worst-case abstract ops per thread:

@@ -1,0 +1,30 @@
+# Big locals live on per-thread arenas, not the C stack. This program
+# keeps ~24 MB of frame data live across a call chain - any default OS
+# thread stack (512 KB for pthreads on macOS) would be blown. The
+# arena is a global, sized to the proven worst-case path, bumped by
+# constants on entry and restored on return. Overflow is impossible:
+# capacity equals the proof.
+
+const Mega = 1_048_576
+
+proc crunch(seed: 0 .. 255): 0 .. 300_000_000 =
+  var scratch: array[Mega, 0 .. 255]     # 8 MB, arena
+  for i in 0 ..< Mega:
+    scratch[i] = (i + seed) % 256
+  var total = 0
+  for i in 0 ..< Mega:
+    total = total + scratch[i]
+  return total
+
+proc layer(seed: 0 .. 255): 0 .. 300_000_255 =
+  var buf: array[Mega, 0 .. 255]         # +8 MB live while crunch runs
+  buf[0] = seed
+  let t = crunch(seed)                   # 24 MB deep at this point
+  return t + buf[0]
+
+thread main() =
+  echo layer(1)
+  echo layer(2)                          # same arena bytes, reused
+  var local: array[Mega, int]            # the thread's own 8 MB big local
+  local[7] = 42
+  echo local[7]

@@ -13,6 +13,11 @@ type
     src: string
     routines: Table[string, Routine]
     emitted: HashSet[string] # typedefs already generated, by mangled name
+    frameOf: Table[string, int64]  # routine -> its own arena frame bytes
+    needOf: Table[string, int64]   # routine -> worst-case arena incl callees
+    bigOffs: Table[string, Table[string, int64]] # routine -> local -> offset
+    curArena: Table[string, int64] # current routine's big locals
+    curFrame: int64                # current routine's arena frame bytes
 
 proc put(g: var Gen, s: string) =
   g.o.add spaces(g.ind * 2)
@@ -99,7 +104,11 @@ proc genExpr(g: var Gen, e: Expr): string =
       case e.symKind
       of syConst: "C_" & e.sval
       of syGlobal: "g_" & e.sval
-      of syLocal: "v_" & e.sval
+      of syLocal:
+        if e.sval in g.curArena:
+          "(*v_" & e.sval & ")" # big local: lives on the thread's arena
+        else:
+          "v_" & e.sval
       of syParam:
         if e.isVarParam and e.typ.passByPtr:
           "(*p_" & e.sval & ")"
@@ -333,6 +342,43 @@ proc genOrdered(g: var Gen, e: Expr): string =
     else:
       g.tempFor(e, call)
 
+proc collectBig(body: seq[Stmt], offs: var Table[string, int64],
+    off: var int64) =
+  ## Assign arena offsets (8-aligned) to every big local in a routine.
+  for s in body:
+    if s.kind in {skVar, skLet} and s.typ != nil and
+        typeSize(s.typ) > arenaThreshold:
+      off = (off + 7) div 8 * 8
+      offs[s.name] = off
+      off = off + typeSize(s.typ)
+    collectBig(s.body, offs, off)
+    for br in s.elifs:
+      collectBig(br.body, offs, off)
+    collectBig(s.elseBody, offs, off)
+
+proc walkCalleeExpr(e: Expr, into: var HashSet[string]) =
+  if e.isNil:
+    return
+  if e.kind == ekCall:
+    into.incl e.sval
+  for k in e.kids:
+    walkCalleeExpr(k, into)
+
+proc collectCallees(body: seq[Stmt], into: var HashSet[string]) =
+  for s in body:
+    for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
+      walkCalleeExpr(e, into)
+    for a in s.args:
+      walkCalleeExpr(a, into)
+    if s.kind == skWith and s.typ != nil and s.typ.kind != tyLock:
+      into.incl "start"
+      into.incl "end"
+    collectCallees(s.body, into)
+    for br in s.elifs:
+      walkCalleeExpr(br.cond, into)
+      collectCallees(br.body, into)
+    collectCallees(s.elseBody, into)
+
 proc genCond(g: var Gen, e: Expr): string =
   ## A condition wrapped in exactly one set of parentheses.
   let s = g.genExpr(e)
@@ -350,6 +396,28 @@ proc genBlock(g: var Gen, body: seq[Stmt]) =
 proc genStmt(g: var Gen, s: Stmt) =
   case s.kind
   of skVar, skLet:
+    if s.name in g.curArena:
+      # A big local: a typed pointer into this thread's arena.
+      let off = $g.curArena[s.name] & "LL"
+      var base = s.typ
+      var dims = ""
+      while base.kind == tyArray:
+        dims.add "[" & $base.len & "]"
+        base = base.elem
+      if dims.len > 0:
+        g.put cBase(base) & " (*v_" & s.name & ")" & dims & " = (" &
+          cBase(base) & " (*)" & dims & ")(ni_base + " & off & ");"
+      else:
+        g.put cBase(s.typ) & " *v_" & s.name & " = (" & cBase(s.typ) &
+          " *)(ni_base + " & off & ");"
+      if s.init != nil:
+        let v =
+          if g.hasEffects(s.init): g.genOrdered(s.init)
+          else: g.genExpr(s.init)
+        g.put "*v_" & s.name & " = " & v & ";"
+      else:
+        g.put "memset(v_" & s.name & ", 0, " & $typeSize(s.typ) & "LL);"
+      return
     let init =
       if s.init != nil and g.hasEffects(s.init): g.genOrdered(s.init)
       elif s.init != nil: g.genExpr(s.init)
@@ -502,11 +570,19 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "f_end(" & arg & ");"
   of skReturn:
     if s.value.isNil:
+      if g.curFrame > 0:
+        g.put "ni_sp = ni_base;"
       g.put "return;"
     elif g.hasEffects(s.value):
-      g.put "return " & g.genOrdered(s.value) & ";"
+      let v = g.genOrdered(s.value)
+      if g.curFrame > 0:
+        g.put "ni_sp = ni_base;" # arena memory stays intact until the call ends
+      g.put "return " & v & ";"
     else:
-      g.put "return " & g.genExpr(s.value) & ";"
+      let v = g.genExpr(s.value)
+      if g.curFrame > 0:
+        g.put "ni_sp = ni_base;"
+      g.put "return " & v & ";"
   of skBreak:
     g.put "break;"
   of skEcho:
@@ -873,8 +949,30 @@ proc generate*(m: Module, src: string): string =
   var g = Gen(src: src)
   for r in m.routines:
     g.routines[r.name] = r
+  # Arena analysis: big locals leave the C stack for per-thread arenas,
+  # sized by the same call-DAG walk the report uses. One bump pointer
+  # per thread; constant offsets; overflow impossible by sizing.
+  for r in m.routines:
+    var offs: Table[string, int64]
+    var off = 0'i64
+    collectBig(r.body, offs, off)
+    g.bigOffs[r.name] = offs
+    g.frameOf[r.name] = (off + 15) div 16 * 16
+    var callees: HashSet[string]
+    collectCallees(r.body, callees)
+    var worst = 0'i64
+    for c2 in callees:
+      if c2 in g.needOf and g.needOf[c2] > worst:
+        worst = g.needOf[c2]
+    g.needOf[r.name] = g.frameOf[r.name] + worst
+  var anyArena = false
+  for r in m.routines:
+    if r.kind == rkThread and g.needOf[r.name] > 0:
+      anyArena = true
   g.put "// Generated by nifty from " & src & ". Do not edit."
   g.o.add cPrelude
+  if anyArena:
+    g.put "static _Thread_local uint8_t *ni_sp;"
   for td in m.types:
     g.emitTypeDefs(td.typ)
   for gd in m.globals:
@@ -895,14 +993,29 @@ proc generate*(m: Module, src: string): string =
         g.put "static pthread_mutex_t g_" & gd.name & " = PTHREAD_MUTEX_INITIALIZER;"
       else:
         g.put "static " & cDecl("g_" & gd.name, gd.typ) & ";"
+  if anyArena:
+    g.put ""
+    for r in m.routines:
+      if r.kind == rkThread and g.needOf[r.name] > 0:
+        g.put "static _Alignas(16) uint8_t ni_arena_" & r.name & "[" &
+          $g.needOf[r.name] & "];"
   for r in m.routines:
+    g.curArena = g.bigOffs[r.name]
+    g.curFrame = g.frameOf[r.name]
     g.put ""
     if r.kind == rkThread:
       g.put "static void *t_" & r.name & "(void *ni_arg) {"
       inc g.ind
       g.put "(void)ni_arg;"
+      if g.needOf[r.name] > 0:
+        g.put "ni_sp = ni_arena_" & r.name & ";"
+      if g.curFrame > 0:
+        g.put "uint8_t *ni_base = ni_sp;"
+        g.put "ni_sp += " & $g.curFrame & "LL;"
       for s in r.body:
         g.genStmt(s)
+      if g.curFrame > 0:
+        g.put "ni_sp = ni_base;"
       g.put "return NULL;"
       dec g.ind
       g.put "}"
@@ -921,8 +1034,13 @@ proc generate*(m: Module, src: string): string =
       g.put "static " & ret & " f_" & r.name & "(" &
         (if ps.len == 0: "void" else: ps.join(", ")) & ") {"
       inc g.ind
+      if g.curFrame > 0:
+        g.put "uint8_t *ni_base = ni_sp;"
+        g.put "ni_sp += " & $g.curFrame & "LL;"
       for s in r.body:
         g.genStmt(s)
+      if g.curFrame > 0 and r.ret.isNil:
+        g.put "ni_sp = ni_base;" # fall-off-the-end exit for void procs
       dec g.ind
       g.put "}"
   let threads = m.routines.filterIt(it.kind == rkThread)

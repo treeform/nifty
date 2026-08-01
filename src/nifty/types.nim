@@ -127,6 +127,60 @@ proc setSize*(t: Typ): int64 =
   ## Number of possible values of a set's (or dense map's) element range.
   t.elem.rhi - t.elem.rlo + 1
 
+const arenaThreshold* = 256'i64 # locals bigger than this go to the arena
+
+proc sizeAdd(a, b: int64): int64 =
+  if a > high(int64) - b: high(int64) else: a + b
+
+proc sizeMul(a, b: int64): int64 =
+  if a != 0 and b > high(int64) div a: high(int64) else: a * b
+
+proc typeAlign*(t: Typ): int64 =
+  case t.kind
+  of tyBool:
+    result = 1
+  of tyArray:
+    result = typeAlign(t.elem)
+  of tyObject:
+    result = 1
+    for f in t.fields:
+      result = max(result, typeAlign(f.typ))
+  else:
+    result = 8 # int, containers (int64 length field first), Lock
+
+proc typeSize*(t: Typ): int64 =
+  ## C layout size, with alignment and padding.
+  if t.opt:
+    let a = typeAlign(deOpt(t))
+    return (sizeAdd(typeSize(deOpt(t)), 1) + a - 1) div a * a
+  case t.kind
+  of tyBool: 1
+  of tyInt: 8
+  of tyArray: sizeMul(t.len, typeSize(t.elem))
+  of tySeq:
+    (sizeAdd(8, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
+  of tyStr:
+    (sizeAdd(8, t.len) + 7) div 8 * 8
+  of tySet:
+    sizeAdd(8, (t.setSize + 63) div 64 * 8)
+  of tyQueue:
+    (sizeAdd(16, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
+  of tyMapD:
+    (sizeAdd(sizeAdd(8, (t.setSize + 63) div 64 * 8),
+      sizeMul(t.setSize, typeSize(t.val))) + 7) div 8 * 8
+  of tyMapS:
+    (sizeAdd(8, sizeAdd(sizeMul(t.len, typeSize(t.elem)),
+      sizeMul(t.len, typeSize(t.val)))) + 7) div 8 * 8
+  of tyObject:
+    var off = 0'i64
+    for f in t.fields:
+      let a = typeAlign(f.typ)
+      off = (off + a - 1) div a * a
+      off = sizeAdd(off, typeSize(f.typ))
+    let a = typeAlign(t)
+    (off + a - 1) div a * a
+  else: 0 # Lock: platform-sized, reported separately
+
 proc typEq*(a, b: Typ): bool =
   if a.isNil or b.isNil:
     return a.isNil and b.isNil

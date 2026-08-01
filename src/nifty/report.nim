@@ -23,60 +23,6 @@ proc smul(a, b: int64): int64 =
 
 # --- sizes (C layout: alignment and padding) ------------------------------
 
-proc typeAlign(t: Typ): int64 =
-  if t.opt:
-    return typeAlign(deOpt(t))
-  case t.kind
-  of tyBool:
-    result = 1
-  of tyArray:
-    result = typeAlign(t.elem)
-  of tyObject:
-    result = 1
-    for f in t.fields:
-      result = max(result, typeAlign(f.typ))
-  else:
-    result = 8 # int, seq/string (int64 length field first), Lock
-
-proc typeSize(t: Typ): int64 =
-  if t.opt:
-    let a = typeAlign(deOpt(t))
-    return (sadd(typeSize(deOpt(t)), 1) + a - 1) div a * a
-  case t.kind
-  of tyBool: 1
-  of tyInt: 8
-  of tyArray: smul(t.len, typeSize(t.elem))
-  of tySeq:
-    # int64 length + data, padded to 8.
-    let data = smul(t.len, typeSize(t.elem))
-    (sadd(8, data) + 7) div 8 * 8
-  of tyStr:
-    # int64 length + one byte per capacity, padded to 8.
-    (sadd(8, t.len) + 7) div 8 * 8
-  of tySet:
-    # int64 cardinality + one bit per possible value, in 64-bit words.
-    sadd(8, (t.setSize + 63) div 64 * 8)
-  of tyQueue:
-    # int64 length + int64 head + data, padded to 8.
-    (sadd(16, smul(t.len, typeSize(t.elem))) + 7) div 8 * 8
-  of tyMapD:
-    # int64 count + presence bits + one value slot per possible key.
-    (sadd(sadd(8, (t.setSize + 63) div 64 * 8),
-      smul(t.setSize, typeSize(t.val))) + 7) div 8 * 8
-  of tyMapS:
-    # int64 count + sorted keys + values, padded to 8.
-    (sadd(8, sadd(smul(t.len, typeSize(t.elem)),
-      smul(t.len, typeSize(t.val)))) + 7) div 8 * 8
-  of tyObject:
-    var off = 0'i64
-    for f in t.fields:
-      let a = typeAlign(f.typ)
-      off = (off + a - 1) div a * a
-      off = sadd(off, typeSize(f.typ))
-    let a = typeAlign(t)
-    (off + a - 1) div a * a
-  else: 0 # Lock: platform-sized, reported separately
-
 # --- worst-case ops -------------------------------------------------------
 
 proc log2Ceil(n: int64): int64 =
@@ -155,9 +101,12 @@ proc paramBytes(p: Param): int64 =
     typeSize(p.typ)
 
 proc localBytes(body: seq[Stmt]): int64 =
+  ## C-stack bytes only: big locals live on the thread arena and cost a
+  ## pointer here.
   for s in body:
     if s.kind in {skVar, skLet}:
-      result = sadd(result, typeSize(s.typ))
+      let sz = typeSize(s.typ)
+      result = sadd(result, (if sz > arenaThreshold: 8'i64 else: sz))
     if s.kind == skFor:
       result = sadd(result, 8)
     if s.kind == skForEach:
@@ -166,6 +115,18 @@ proc localBytes(body: seq[Stmt]): int64 =
     for br in s.elifs:
       result = sadd(result, localBytes(br.body))
     result = sadd(result, localBytes(s.elseBody))
+
+proc arenaBytes(body: seq[Stmt]): int64 =
+  ## Bytes of big locals: this routine's arena frame.
+  for s in body:
+    if s.kind in {skVar, skLet}:
+      let sz = typeSize(s.typ)
+      if sz > arenaThreshold:
+        result = sadd(result, (sz + 7) div 8 * 8)
+    result = sadd(result, arenaBytes(s.body))
+    for br in s.elifs:
+      result = sadd(result, arenaBytes(br.body))
+    result = sadd(result, arenaBytes(s.elseBody))
 
 proc collectCallsExpr(e: Expr, into: var HashSet[string]) =
   if e.isNil:
@@ -247,12 +208,38 @@ proc buildReport*(m: Module, src: string): string =
 
   lines.add ""
   lines.add "stack, worst case per thread (estimate: locals + params + " &
-    $frameOverhead & " bytes/frame):"
+    $frameOverhead & " bytes/frame; big locals are on the arena):"
   for r in m.routines:
     if r.kind != rkThread:
       continue
     let d = deepest[r.name]
     lines.add "  " & r.name & ": " & $d.bytes & " bytes (" & d.chain & ")"
+
+  # Arenas: exact, allocated at that size, so overflow is impossible.
+  var aframes: Table[string, int64]
+  var adeep: Table[string, tuple[bytes: int64, chain: string]]
+  var anyArena = false
+  for r in m.routines:
+    aframes[r.name] = (arenaBytes(r.body) + 15) div 16 * 16
+    var calls: HashSet[string]
+    collectCalls(r.body, globals, calls)
+    var best = (bytes: 0'i64, chain: "")
+    for callee in calls:
+      if callee in adeep and adeep[callee].bytes > best.bytes:
+        best = adeep[callee]
+    adeep[r.name] = (bytes: sadd(aframes[r.name], best.bytes),
+      chain: r.name & (if best.chain.len > 0: " -> " & best.chain else: ""))
+    if r.kind == rkThread and adeep[r.name].bytes > 0:
+      anyArena = true
+  if anyArena:
+    lines.add ""
+    lines.add "arena per thread (exact; big locals, allocated up front):"
+    for r in m.routines:
+      if r.kind != rkThread:
+        continue
+      let d = adeep[r.name]
+      if d.bytes > 0:
+        lines.add "  " & r.name & ": " & $d.bytes & " bytes (" & d.chain & ")"
 
   # Ops: for a thread with top-level loops, report the cost of one pass
   # of each loop plus everything outside them; otherwise the total.
