@@ -2,7 +2,6 @@
 # hoists temporaries so C's unspecified evaluation order can never be
 # observed. Every statement below has one exact, defined meaning.
 
-var arr: array[4, int]
 var g: 0 .. 100
 var log: seq[8, 0 .. 99]
 
@@ -16,6 +15,7 @@ proc note(v: 0 .. 99): 0 .. 9 =
   return 0
 
 thread main() =
+  var arr: array[4, int]
   # The index reads g BEFORE bump changes it: arr[2] = 1, then g = 50.
   g = 2
   if g < 4:

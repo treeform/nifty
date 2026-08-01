@@ -51,7 +51,8 @@ type
   StmtKind* = enum
     VarStmt, LetStmt, AssignStmt, IfStmt, WhileStmt, ForStmt, LoopStmt, WithStmt,
     ReturnStmt, BreakStmt, EchoStmt, DiscardStmt, CallStmt,
-    ForEachStmt # for x in s: over a seq/string; value = s, name = x
+    ForEachStmt, # for x in s: over a seq/string; value = s, name = x
+    BlockStmt # block: - a scope inside a routine; sibling blocks share arena
   Elif* = object
     cond*: Expr
     body*: seq[Stmt]

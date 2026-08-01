@@ -1,0 +1,12 @@
+proc work() =
+  block:
+    var a: array[400000, int]
+    a[0] = 1
+    echo a[0]
+  block:
+    var b: array[400000, int]
+    b[5] = 2
+    echo b[5]
+
+thread main() =
+  work()

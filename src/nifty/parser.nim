@@ -458,6 +458,11 @@ proc parseStmt(p: var Parser): Stmt =
     result = Stmt(kind: LoopStmt, line: t.line)
     p.expectOp(":")
     result.body = p.parseBody()
+  of "block":
+    discard p.next
+    result = Stmt(kind: BlockStmt, line: t.line)
+    p.expectOp(":")
+    result.body = p.parseBody()
   of "with":
     discard p.next
     let target = p.expectIdent()

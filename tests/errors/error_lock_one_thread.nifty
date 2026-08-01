@@ -1,0 +1,5 @@
+var guard: Lock
+
+thread main() =
+  with guard:
+    echo 5

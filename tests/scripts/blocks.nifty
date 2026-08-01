@@ -1,0 +1,13 @@
+thread main() =
+  var total = 0
+  block:
+    var t = 2
+    t = t + 3
+    total = total + t
+  block:
+    # Sibling blocks are separate scopes: the name is free again, and
+    # big locals in sibling blocks would share the same arena bytes.
+    var t = 10
+    t = t + 1
+    total = total + t
+  echo total

@@ -116,17 +116,33 @@ proc localBytes(body: seq[Stmt]): int64 =
       result = sadd(result, localBytes(br.body))
     result = sadd(result, localBytes(s.elseBody))
 
-proc arenaBytes(body: seq[Stmt]): int64 =
-  ## Bytes of big locals: this routine's arena frame.
+proc arenaWalk(body: seq[Stmt], off: var int64, hi: var int64) =
+  ## Mirrors codegen's collectBig: sequential 8-aligned allocation,
+  ## blocks rewind on exit, and the frame is the high-water mark.
   for s in body:
     if s.kind in {VarStmt, LetStmt}:
       let sz = typeSize(s.typ)
       if sz > arenaThreshold:
-        result = sadd(result, (sz + 7) div 8 * 8)
-    result = sadd(result, arenaBytes(s.body))
+        off = (off + 7) div 8 * 8
+        off = sadd(off, sz)
+        if off > hi:
+          hi = off
+    if s.kind == BlockStmt:
+      let entry = off
+      arenaWalk(s.body, off, hi)
+      off = entry
+    else:
+      arenaWalk(s.body, off, hi)
     for br in s.elifs:
-      result = sadd(result, arenaBytes(br.body))
-    result = sadd(result, arenaBytes(s.elseBody))
+      arenaWalk(br.body, off, hi)
+    arenaWalk(s.elseBody, off, hi)
+
+proc arenaBytes(body: seq[Stmt]): int64 =
+  ## Bytes of big locals: this routine's arena frame.
+  var off = 0'i64
+  var hi = 0'i64
+  arenaWalk(body, off, hi)
+  hi
 
 proc collectCallsExpr(e: Expr, into: var HashSet[string]) =
   if e.isNil:

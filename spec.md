@@ -301,6 +301,11 @@ deterministic floats. Generics exist — see Generics above.
   never writes. Reading a declaration tells you the truth: `let` never
   changes, `var` definitely does. (`start`/`end` are exempt from the
   `var`-parameter rule — the `with` protocol imposes their signature.)
+- `block:` — a bare scope inside a routine. Locals declared in a block
+  die with it; sibling blocks may reuse names. Big locals in sibling
+  blocks share the same arena bytes (the frame is the high-water mark,
+  not the sum), so blocks are also a RAM tool: scoped scratch sections
+  inside one long, readable routine.
 - `name = expr`, `a[i] = expr`, `o.f = expr`, `m[k] = expr` — assignment.
 - `if cond: ... elif cond: ... else: ...`
 - `for i in lo ..< hi:` / `for i in lo .. hi:` — bounded by construction;
@@ -334,6 +339,39 @@ deterministic floats. Generics exist — see Generics above.
   right (hoisted to temporaries in the generated C).
 - `discard expr` — explicitly drop a value. Silently ignoring a returned
   value is an error.
+
+## Smallest scope (Power of 10, rule 6)
+
+Scope is strategic, like mutability: a declaration's placement must
+tell the truth about its lifetime. Where the truth is provable, wider
+than needed is a compile error:
+
+- A global used by **nothing** is an error: remove it.
+- A global used by exactly **one thread** is an error: threads run
+  once, so a local of the thread has identical semantics (same
+  zero-init, same persistence across `loop` iterations, arena for the
+  big ones). Same for a **lock** used by a single thread — it protects
+  nothing.
+- A global used by exactly **one proc** that provably overwrites it
+  before every read is an error: cross-call persistence is
+  unobservable, so it is a local (a scratch buffer masquerading as
+  state). If any path reads first, it is honest cross-call state and
+  stays a global — `seen = seen + 1` counters are untouched.
+- A local (with a zero or literal initializer — timing-independent by
+  construction) whose every use sits inside one block, one `with`, or
+  one `if` branch must be declared there. Inside one **loop** body it
+  must move only when it provably never carries a value across
+  iterations — accumulators stay outside.
+
+The nifty scorecard for the rest of the Power of 10: rules 1, 2, 3, 8,
+9 hold by construction (no goto/recursion, proven loop bounds, no
+allocation, no preprocessor, no pointers); rule 5's assertions became
+compile-time proof obligations on every division, index, store, and
+loop; rule 7 is the discard rule plus ranged parameters; rule 10 has no
+warning tier to negotiate with. Rule 4 (short functions) is rejected
+deliberately: verification here is the checker's job, not the
+reviewer's eyeball span, and `block:` gives scoped sections inside one
+long readable routine.
 
 ## Evaluation order
 
@@ -595,6 +633,8 @@ copies with element-range fit proofs; strategic `var`/`let` (unmodified
 `var` is an error); any-size returns via destination passing; generics
 via `$` substitution variables (splice-per-instantiation, proven per
 binding, `$T.lo`/`$T.hi`, computed return ranges);
+smallest-scope enforcement (unused/one-thread/scratch globals,
+narrowable locals) and `block:` with sibling-block arena overlay;
 `echo`/`discard`; C output
 with zero runtime checks; generated `main` with thread spawn/join;
 `nifty report` (globals / stack / arena / ops); splice-once imports with

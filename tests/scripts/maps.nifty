@@ -8,9 +8,8 @@
 # contains or room); reading m[k] needs a proven contains - the test,
 # a strict write, or iteration provides it.
 
-var modes: map[0 .. 7, 0 .. 99]
-
 thread main() =
+  var modes: map[0 .. 7, 0 .. 99]
   echo modes.len
   modes.put(3, 30)
   modes[5] = 50

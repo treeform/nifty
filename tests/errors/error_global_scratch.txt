@@ -1,0 +1,1 @@
+error_global_scratch.nifty:1: global 'scratch' is only used by 'render', which always overwrites it before reading; declare it as a local there

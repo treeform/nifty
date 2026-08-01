@@ -1,0 +1,1 @@
+error_var_into_branch.nifty:2: 'flag' is only used inside one branch of the if at line 5; declare it in that branch

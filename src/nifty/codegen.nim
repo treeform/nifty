@@ -360,18 +360,29 @@ proc genCallInto(g: var Gen, e: Expr, dest: string) =
   g.put "f_" & e.sval & "(" & parts.join(", ") & ");"
 
 proc collectBig(body: seq[Stmt], offs: var Table[string, int64],
-    off: var int64) =
+    off: var int64, hi: var int64) =
   ## Assign arena offsets (8-aligned) to every big local in a routine.
+  ## A block's big locals die with the block, so after it the offset
+  ## rewinds: sibling blocks overlay the same bytes (zero-init at every
+  ## declaration makes the reuse invisible), and the frame is the
+  ## high-water mark, not the sum.
   for s in body:
     if s.kind in {VarStmt, LetStmt} and s.typ != nil and
         typeSize(s.typ) > arenaThreshold:
       off = (off + 7) div 8 * 8
       offs[s.name] = off
       off = off + typeSize(s.typ)
-    collectBig(s.body, offs, off)
+      if off > hi:
+        hi = off
+    if s.kind == BlockStmt:
+      let entry = off
+      collectBig(s.body, offs, off, hi)
+      off = entry
+    else:
+      collectBig(s.body, offs, off, hi)
     for br in s.elifs:
-      collectBig(br.body, offs, off)
-    collectBig(s.elseBody, offs, off)
+      collectBig(br.body, offs, off, hi)
+    collectBig(s.elseBody, offs, off, hi)
 
 proc walkCalleeExpr(e: Expr, into: var HashSet[string]) =
   if e.isNil:
@@ -704,6 +715,10 @@ proc genStmt(g: var Gen, s: Stmt) =
     if temps.len > 0:
       dec g.ind
       g.put "}"
+  of BlockStmt:
+    g.put "{"
+    g.genBlock(s.body)
+    g.put "}"
   of ForEachStmt:
     let it = "ni_it" & $g.tmpN
     let ix = "ni_ix" & $g.tmpN
@@ -1026,9 +1041,10 @@ proc generate*(m: Module, src: string): string =
   for r in m.routines:
     var offs: Table[string, int64]
     var off = 0'i64
-    collectBig(r.body, offs, off)
+    var hiWater = 0'i64
+    collectBig(r.body, offs, off, hiWater)
     g.bigOffs[r.name] = offs
-    g.frameOf[r.name] = (off + 15) div 16 * 16
+    g.frameOf[r.name] = (hiWater + 15) div 16 * 16
     var callees: HashSet[string]
     collectCallees(r.body, callees)
     var worst = 0'i64

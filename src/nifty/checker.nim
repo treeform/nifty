@@ -589,6 +589,8 @@ proc alwaysReturns(body: seq[Stmt]): bool =
       if not alwaysReturns(br.body):
         return false
     alwaysReturns(s.elseBody)
+  of BlockStmt:
+    alwaysReturns(s.body)
   else:
     false
 
@@ -610,7 +612,7 @@ proc hasLoopBreak(body: seq[Stmt]): bool =
           return true
       if hasLoopBreak(st.elseBody):
         return true
-    of WithStmt:
+    of WithStmt, BlockStmt:
       if hasLoopBreak(st.body):
         return true
     else:
@@ -1926,6 +1928,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     c.checkBody(s.body)
     discard c.loopWiths.pop
     c.facts = dropped
+  of BlockStmt:
+    c.checkBody(s.body)
   of ForEachStmt:
     let t = c.expectVal(s.value)
     if t.kind notin {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
@@ -1986,6 +1990,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
   of WithStmt:
     if c.cur.kind == FuncRoutine:
       err(s.line, "with is not allowed in func (start/end are side effects)")
+    c.markModified(s.name) # start/end write the target through var
     c.delFacts s.name
     if s.name in c.globals and c.globals[s.name].kind == LockType:
       # Builtin protocol: start = acquire the mutex, end = release it.
@@ -2093,6 +2098,186 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       err(s.line, "return value of '" & s.value.sval &
         "' is discarded (use discard or assign it)")
 
+## Smallest-Scope Enforcement (Power of 10, rule 6)
+
+proc usesName(e: Expr, name: string): bool =
+  if e.isNil:
+    return false
+  if e.kind == IdentExpr and e.sval == name:
+    return true
+  for k in e.kids:
+    if usesName(k, name):
+      return true
+
+proc stmtUsesName(s: Stmt, name: string): bool =
+  if s.kind == WithStmt and s.name == name:
+    return true
+  for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
+    if usesName(e, name):
+      return true
+  for a in s.args:
+    if usesName(a, name):
+      return true
+  for st in s.body:
+    if stmtUsesName(st, name):
+      return true
+  for br in s.elifs:
+    if usesName(br.cond, name):
+      return true
+    for st in br.body:
+      if stmtUsesName(st, name):
+        return true
+  for st in s.elseBody:
+    if stmtUsesName(st, name):
+      return true
+
+proc mayReadFirst(body: seq[Stmt], name: string, written: var bool): bool =
+  ## Could this body observe `name`'s value from before it runs?
+  ## Conservative: true means "possibly"; false is a proof that every
+  ## path fully overwrites the location before any read.
+  for s in body:
+    if written:
+      return false
+    case s.kind
+    of AssignStmt:
+      if usesName(s.rhs, name):
+        return true
+      if s.lhs.kind == IdentExpr and s.lhs.sval == name:
+        written = true
+      elif usesName(s.lhs, name):
+        return true # a partial write keeps the rest of the old value
+    of VarStmt, LetStmt:
+      if usesName(s.init, name):
+        return true
+    of IfStmt:
+      var allWrote = s.elseBody.len > 0
+      for br in s.elifs:
+        if usesName(br.cond, name):
+          return true
+        var w = written
+        if mayReadFirst(br.body, name, w):
+          return true
+        if not w:
+          allWrote = false
+      var w = written
+      if mayReadFirst(s.elseBody, name, w):
+        return true
+      if not w:
+        allWrote = false
+      if allWrote:
+        written = true
+    of WhileStmt:
+      if usesName(s.cond, name):
+        return true
+      var w = written
+      if mayReadFirst(s.body, name, w):
+        return true # zero iterations possible: body writes don't count
+    of ForStmt:
+      if usesName(s.lo, name) or usesName(s.hi, name):
+        return true
+      var w = written
+      if mayReadFirst(s.body, name, w):
+        return true
+    of ForEachStmt:
+      if usesName(s.value, name):
+        return true
+      var w = written
+      if mayReadFirst(s.body, name, w):
+        return true
+    of LoopStmt:
+      var w = written
+      if mayReadFirst(s.body, name, w):
+        return true
+    of WithStmt:
+      if s.name == name or usesName(s.lhs, name):
+        return true
+      if mayReadFirst(s.body, name, written):
+        return true
+    of BlockStmt:
+      if mayReadFirst(s.body, name, written):
+        return true
+    of ReturnStmt:
+      if usesName(s.value, name):
+        return true
+      return false # this path ends without reading
+    of BreakStmt:
+      return false
+    of EchoStmt:
+      for a in s.args:
+        if usesName(a, name):
+          return true
+    of DiscardStmt, CallStmt:
+      if usesName(s.value, name):
+        return true
+  false
+
+proc narrowTarget(u: Stmt, name: string): string =
+  ## If every use of a local lives inside this one statement, can (and
+  ## therefore must) the declaration move inside it? Returns the error
+  ## text, or "" when moving would change meaning.
+  case u.kind
+  of BlockStmt:
+    "'" & name & "' is only used inside the block at line " &
+      $(u.line mod fileLineBase) & "; declare it inside the block"
+  of WithStmt:
+    if u.name == name or usesName(u.lhs, name):
+      return ""
+    "'" & name & "' is only used inside the with block at line " &
+      $(u.line mod fileLineBase) & "; declare it there"
+  of IfStmt:
+    var inBranches = 0
+    for br in u.elifs:
+      if usesName(br.cond, name):
+        return ""
+      var found = false
+      for st in br.body:
+        if stmtUsesName(st, name):
+          found = true
+      if found:
+        inBranches.inc
+    var inElse = false
+    for st in u.elseBody:
+      if stmtUsesName(st, name):
+        inElse = true
+    if inElse:
+      inBranches.inc
+    if inBranches != 1:
+      return ""
+    "'" & name & "' is only used inside one branch of the if at line " &
+      $(u.line mod fileLineBase) & "; declare it in that branch"
+  of WhileStmt, ForStmt, ForEachStmt, LoopStmt:
+    for e in [u.cond, u.lo, u.hi, u.value]:
+      if usesName(e, name):
+        return ""
+    var w = false
+    if mayReadFirst(u.body, name, w):
+      return "" # carries a value across iterations; must stay outside
+    "'" & name & "' is only used inside the loop at line " &
+      $(u.line mod fileLineBase) & " and never carries a value across " &
+      "iterations; declare it inside the loop"
+  else:
+    ""
+
+proc checkSmallestScope(body: seq[Stmt]) =
+  ## A local declared wider than its use must move in. Only literal or
+  ## missing initializers are considered: their evaluation is timing-
+  ## independent, so moving the declaration provably changes nothing.
+  for i, s in body:
+    if s.kind in {VarStmt, LetStmt} and
+        (s.init == nil or s.init.kind in {IntExpr, BoolExpr, StrExpr}):
+      var users: seq[int]
+      for j in (i + 1) ..< body.len:
+        if stmtUsesName(body[j], s.name):
+          users.add j
+      if users.len == 1:
+        let msg = narrowTarget(body[users[0]], s.name)
+        if msg != "":
+          err(s.line, msg)
+    checkSmallestScope(s.body)
+    for br in s.elifs:
+      checkSmallestScope(br.body)
+    checkSmallestScope(s.elseBody)
+
 proc checkRoutine(c: var Ctx, r: Routine) =
   c.cur = r
   c.withDepth = 0
@@ -2146,6 +2331,7 @@ proc checkRoutine(c: var Ctx, r: Routine) =
       else:
         err(vline, "'" & vname & "' is never modified; declare it with " &
           "let instead of var")
+  checkSmallestScope(r.body)
   c.checked.incl r.name
 
 ## Generic Instantiation
@@ -2262,6 +2448,32 @@ proc scanNoGlobals(c: Ctx, gname: string, body: seq[Stmt]) =
       scanS(c, st)
   for s in body:
     scanS(c, s)
+
+proc directExpr(e: Expr, globals: Table[string, Typ], rname: string,
+    direct: var Table[string, HashSet[string]]) =
+  if e.isNil:
+    return
+  if e.kind == IdentExpr and e.sval in globals:
+    direct.mgetOrPut(e.sval, initHashSet[string]()).incl rname
+  for k in e.kids:
+    directExpr(k, globals, rname, direct)
+
+proc directStmt(s: Stmt, globals: Table[string, Typ], rname: string,
+    direct: var Table[string, HashSet[string]]) =
+  if s.kind == WithStmt and s.name in globals:
+    direct.mgetOrPut(s.name, initHashSet[string]()).incl rname
+  for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
+    directExpr(e, globals, rname, direct)
+  for a in s.args:
+    directExpr(a, globals, rname, direct)
+  for st in s.body:
+    directStmt(st, globals, rname, direct)
+  for br in s.elifs:
+    directExpr(br.cond, globals, rname, direct)
+    for st in br.body:
+      directStmt(st, globals, rname, direct)
+  for st in s.elseBody:
+    directStmt(st, globals, rname, direct)
 
 proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string =
   ## Bind a generic's $names from the argument types, splice the
@@ -2557,3 +2769,33 @@ proc check*(m: Module) =
     else:
       flat.add r
   m.routines = flat
+
+  # Smallest scope for globals (Power of 10, rule 6): a global is only
+  # honest if its width is needed - by several routines, or by state
+  # that must survive between calls.
+  var direct: Table[string, HashSet[string]]
+  for r in m.routines:
+    for s in r.body:
+      directStmt(s, c.globals, r.name, direct)
+  for gd in m.globals:
+    let users = direct.getOrDefault(gd.name)
+    if users.len == 0:
+      err(gd.line, "global '" & gd.name & "' is never used; remove it")
+    elif users.len == 1:
+      var rn = ""
+      for u in users:
+        rn = u
+      let rr = c.routineTab[rn]
+      if rr.kind == ThreadRoutine:
+        if gd.typ.kind == LockType:
+          err(gd.line, "lock '" & gd.name & "' is only used by thread '" &
+            rn & "'; a lock held by a single thread protects nothing - " &
+            "remove it")
+        err(gd.line, "global '" & gd.name & "' is only used by thread '" &
+          rn & "'; declare it inside the thread")
+      if rr.kind == ProcRoutine and gd.typ.kind != LockType:
+        var w = false
+        if not mayReadFirst(rr.body, gd.name, w):
+          err(gd.line, "global '" & gd.name & "' is only used by '" & rn &
+            "', which always overwrites it before reading; declare it " &
+            "as a local there")

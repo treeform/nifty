@@ -1,0 +1,1 @@
+error_lock_one_thread.nifty:1: lock 'guard' is only used by thread 'main'; a lock held by a single thread protects nothing - remove it

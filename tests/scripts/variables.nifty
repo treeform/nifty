@@ -1,8 +1,7 @@
 const Base = 100
 
-var counter: int
-
 thread main() =
+  var counter: int
   let a = 1
   let b = 2
   var c: int

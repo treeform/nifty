@@ -14,6 +14,9 @@ const K = 4
 
 var g: int
 
+proc setG() =
+  g = 7
+
 # Guard style: the early return proves b != 0 for everything after it.
 func safeDiv(a: 0 .. 100000, b: int): int =
   if b == 0:
@@ -43,10 +46,11 @@ thread main() =
   echo safeDiv(100, 0)
   echo safeDiv(100, 5)
 
-  # g is only accessed by this one thread, so the checker owns it here
-  # and proves it like a local. (A global shared between threads must be
+  # g is only touched from this one thread (here and through setG), so
+  # the checker owns it here and proves it like a local. (A global
+  # shared between threads must be
   # accessed under a lock - reads too - and proves inside the lock block.)
-  g = 7
+  setG()
   if g != 0:
     echo 700 / g
 

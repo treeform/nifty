@@ -1,0 +1,8 @@
+var scratch: int
+
+proc render(v: 0 .. 9) =
+  scratch = v * 2
+  echo scratch
+
+thread main() =
+  render(3)

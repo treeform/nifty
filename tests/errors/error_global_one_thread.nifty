@@ -1,0 +1,5 @@
+var tally: int
+
+thread main() =
+  tally = 3
+  echo tally

@@ -1,0 +1,6 @@
+thread main() =
+  var t = 0
+  echo 1
+  block:
+    t = 5
+    echo t

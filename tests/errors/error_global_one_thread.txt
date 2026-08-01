@@ -1,0 +1,1 @@
+error_global_one_thread.nifty:1: global 'tally' is only used by thread 'main'; declare it inside the thread

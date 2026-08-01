@@ -1,0 +1,1 @@
+error_var_into_loop.nifty:2: 't' is only used inside the loop at line 3 and never carries a value across iterations; declare it inside the loop

@@ -1,0 +1,1 @@
+error_global_unused.nifty:1: global 'ghost' is never used; remove it

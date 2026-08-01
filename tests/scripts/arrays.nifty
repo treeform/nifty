@@ -1,7 +1,6 @@
 const N = 5
 
 var data: array[N, 0 .. 100]
-var grid: array[2, array[3, int]]
 
 proc fill() =
   for i in 0 ..< N:
@@ -14,6 +13,7 @@ func sum(arr: array[N, 0 .. 100]): int =
   return s
 
 thread main() =
+  var grid: array[2, array[3, int]]
   fill()
   echo data[4]
   echo sum(data)

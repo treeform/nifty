@@ -1,0 +1,4 @@
+var ghost: int
+
+thread main() =
+  echo 1

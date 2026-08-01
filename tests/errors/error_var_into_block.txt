@@ -1,0 +1,1 @@
+error_var_into_block.nifty:2: 't' is only used inside the block at line 4; declare it inside the block

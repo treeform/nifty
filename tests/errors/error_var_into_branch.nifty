@@ -1,0 +1,9 @@
+thread main() =
+  var flag = false
+  var x: 0 .. 5
+  x = 3
+  if x > 2:
+    flag = true
+    echo flag
+  else:
+    echo x

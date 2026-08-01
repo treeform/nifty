@@ -1,0 +1,13 @@
+nifty report: block_arena.nifty
+
+globals:
+  total: 0 bytes
+
+stack, worst case per thread (estimate: locals + params + 16 bytes/frame; big locals are on the arena):
+  main: 48 bytes (main -> work)
+
+arena per thread (exact; big locals, allocated up front):
+  main: 3200000 bytes (main -> work)
+
+worst-case abstract ops per thread:
+  main: 24 ops total
