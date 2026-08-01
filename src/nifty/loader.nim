@@ -21,12 +21,14 @@ proc atIdent(toks: seq[Token], i: int, s: string): bool =
 proc processImports(ld: var Loader, toks: seq[Token]): seq[Token]
 
 proc spliceImport(ld: var Loader, name: string, line: int): seq[Token] =
+  # Display names keep the full path as the compiler sees it, so errors
+  # are directly openable from where the compiler ran.
   let path = ld.dir / name & ".nifty"
-  let display = name & ".nifty"
+  let display = path
   let canon =
     try: expandFilename(path)
-    except OSError: err(line, "cannot find import '" & name & "' (no " &
-      display & " next to the importing file)")
+    except OSError: err(line, "cannot find import '" & name & "' (" &
+      path & " does not exist)")
   if canon in ld.stack:
     err(line, "import cycle: " & ld.names.join(" -> ") & " -> " & display)
   if canon in ld.seen:

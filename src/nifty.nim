@@ -65,7 +65,7 @@ options:
     inc i
   if srcPath == "":
     quit(usage, 1)
-  let modName = srcPath.extractFilename
+  let modName = srcPath # complete path: errors are openable as printed
   if cmd == "report":
     try:
       stdout.write reportFor(readFile(srcPath), modName, srcPath.parentDir)

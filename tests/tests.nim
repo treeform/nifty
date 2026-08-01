@@ -43,9 +43,11 @@ proc runTestsInDir(dir, label: string, mode: TestMode, workDir: string) =
     var compileError = ""
     var cCode = ""
     try:
-      cCode = compileToC(readFile(path), path.extractFilename, path.parentDir)
+      cCode = compileToC(readFile(path), path, path.parentDir)
     except NiftyError as e:
-      compileError = e.msg
+      # The compiler prints complete paths; golds keep just the file
+      # names, so strip the directory we are standing in.
+      compileError = e.msg.replace(path.parentDir & "/", "")
 
     case mode
     of tmCompileError:
@@ -116,8 +118,8 @@ proc runReportTests(dir, label: string) =
       continue
     let expected = readFile(expectedPath).replace("\r\n", "\n").strip()
     try:
-      let actual = reportFor(readFile(path), path.extractFilename,
-        path.parentDir).strip()
+      let actual = reportFor(readFile(path), path,
+        path.parentDir).strip().replace(path.parentDir & "/", "")
       if actual == expected:
         echo "  PASS: " & label & "/" & testName
         testsPassed += 1
