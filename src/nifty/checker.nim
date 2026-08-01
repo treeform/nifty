@@ -67,7 +67,7 @@ proc rangeStr(f: Fact): string =
 proc fits(f: Fact, t: Typ): bool =
   t.kind != tyInt or t.opt or (f.lo >= t.rlo and f.hi <= t.rhi)
 
-# --- saturating interval arithmetic ---------------------------------------
+## Saturating Interval Arithmetic
 # Each op reports whether the true result could overflow int64; the checker
 # turns that into a compile error, which is the overflow proof.
 
@@ -152,7 +152,7 @@ proc modF(a, b: Fact): Fact =
     hi = min(hi, a.hi)
   Fact(lo: lo, hi: hi)
 
-# --- symbol handling ------------------------------------------------------
+## Symbol Handling
 
 proc isDeclared(c: Ctx, name: string): bool =
   for sc in c.scopes:
@@ -290,7 +290,7 @@ proc declFactByName(c: Ctx, name: string): Fact =
 proc curFact(c: Ctx, name: string): Fact =
   c.facts.getOrDefault(name, c.declFactByName(name))
 
-# --- facts ----------------------------------------------------------------
+## Facts
 
 proc tryConstEval(c: Ctx, e: Expr): tuple[known: bool, val: int64] =
   ## Evaluate an expression at compile time if possible.
@@ -604,7 +604,7 @@ proc hasLoopBreak(body: seq[Stmt]): bool =
     else:
       discard
 
-# --- accumulator widening -------------------------------------------------
+## Accumulator Widening
 
 proc containsIdent(e: Expr, v: string): bool =
   if e.isNil:
@@ -779,7 +779,7 @@ proc accumWiden(c: Ctx, s: Stmt, assigned: HashSet[string],
       lo: max(satAdd(v0.lo, satMul(trips, dLo).v).v, dt.lo),
       hi: min(satAdd(v0.hi, satMul(trips, dHi).v).v, dt.hi))
 
-# --- termination proof ----------------------------------------------------
+## Termination Proof
 
 proc condZeroExit(c: Ctx, cond: Expr, v: string): bool =
   ## Does the condition guarantee |v| >= 1 while the loop keeps running?
@@ -883,7 +883,7 @@ proc whileBound(c: Ctx, s: Stmt): int64 =
     if bound > 0 and (result == 0 or bound < result):
       result = bound
 
-# --- range compatibility --------------------------------------------------
+## Range Compatibility
 
 proc typRangeEq(a, b: Typ): bool =
   ## Exact range match, required for var parameters (writes flow both ways).
@@ -923,7 +923,7 @@ proc zeroOk(t: Typ): bool =
     true
   else: true
 
-# --- expression checking --------------------------------------------------
+## Expression Checking
 
 proc checkExpr(c: var Ctx, e: Expr): Typ =
   case e.kind
@@ -1525,7 +1525,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       e.setFact typFact(r.ret)
   e.typ
 
-# --- statement checking ---------------------------------------------------
+## Statement Checking
 
 proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool)
 

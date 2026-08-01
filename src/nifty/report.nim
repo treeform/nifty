@@ -21,9 +21,9 @@ proc sadd(a, b: int64): int64 =
 proc smul(a, b: int64): int64 =
   if a != 0 and b > high(int64) div a: high(int64) else: a * b
 
-# --- sizes (C layout: alignment and padding) ------------------------------
+## Sizes (C Layout)
 
-# --- worst-case ops -------------------------------------------------------
+## Worst-Case Ops
 
 proc log2Ceil(n: int64): int64 =
   result = 1
@@ -92,7 +92,7 @@ proc bodyOps(body: seq[Stmt], costs: Table[string, int64]): int64 =
   for s in body:
     result = sadd(result, stmtOps(s, costs))
 
-# --- worst-case stack -----------------------------------------------------
+## Worst-Case Stack
 
 proc paramBytes(p: Param): int64 =
   if p.isVar or p.typ.kind == tyArray:
@@ -153,7 +153,7 @@ proc collectCalls(body: seq[Stmt], globals: Table[string, Typ],
       collectCalls(br.body, globals, into)
     collectCalls(s.elseBody, globals, into)
 
-# --- the report -----------------------------------------------------------
+## The Report
 
 proc buildReport*(m: Module, src: string): string =
   var globals: Table[string, Typ]
