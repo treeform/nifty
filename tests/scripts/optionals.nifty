@@ -1,0 +1,42 @@
+# T? is a flow-typed optional: check r.ok once and r IS its base type -
+# no unwrap, no .value, code after the check reads like the language
+# never had errors. Using an unproven optional is a compile error, the
+# same proof obligation family as division and indexing. none is for a
+# missing value, not a failure.
+
+const Channels = 4
+
+var lastGood: array[Channels, 0 .. 1023]
+var seed: 0 .. 1023
+
+proc readSensor(ch: 0 ..< Channels): 0 .. 1023? =
+  # Fake hardware: deterministic, and sometimes just not ready.
+  seed = (seed + 371) % 1024
+  if seed % 3 == 2:
+    return none
+  return seed
+
+proc sample(ch: 0 ..< Channels): 0 .. 1023 =
+  let r = readSensor(ch)
+  if not r.ok:
+    return lastGood[ch]        # guard style: after this, r is proven
+  lastGood[ch] = r             # r acts as a plain 0 .. 1023
+  return r
+
+thread main() =
+  var got: 0 .. 1023? = none
+  echo got.ok
+  got = 7
+  echo got.ok
+  if got.ok:
+    echo got * 2               # ranges flow: got is 7, proven
+  echo got.or(0)
+  got = none
+  echo got.or(5)
+
+  var total: 0 .. 8192 = 0
+  for i in 0 ..< Channels:
+    let v = sample(i)
+    if total <= 7000:
+      total = total + v
+  echo total

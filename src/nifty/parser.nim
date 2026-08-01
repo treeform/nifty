@@ -54,8 +54,9 @@ proc parseIntLit(t: Token): int64 =
 
 proc parseExpr(p: var Parser): Expr
 proc evalConst(p: Parser, e: Expr): int64
+proc parseType(p: var Parser): Typ
 
-proc parseType(p: var Parser): Typ =
+proc parseTypeCore(p: var Parser): Typ =
   let t = p.peek
   if t.kind == tkIdent and
       (t.text in ["int", "bool", "Lock", "array", "seq", "string", "set",
@@ -85,6 +86,8 @@ proc parseType(p: var Parser): Typ =
       let e = p.parseType()
       if e.kind == tyLock:
         err(lt.line, "Lock cannot be a " & t.text & " element")
+      if e.opt:
+        err(lt.line, "a " & t.text & " element cannot be optional")
       if t.text in ["seq", "queue"] and e.kind == tyArray:
         err(lt.line, "a " & t.text & " element cannot be a plain array; " &
           "wrap it in an object")
@@ -110,7 +113,7 @@ proc parseType(p: var Parser): Typ =
           err(t.line, "map key range is too large (max 16777216 keys)")
         p.expectOp(",")
         let v = p.parseType()
-        if v.kind in {tyLock, tyArray}:
+        if v.kind in {tyLock, tyArray} or v.opt:
           err(t.line, "a map value cannot be a " & $v &
             "; wrap arrays in an object")
         p.expectOp("]")
@@ -120,11 +123,11 @@ proc parseType(p: var Parser): Typ =
           err(t.line, "map capacity must be positive")
         p.expectOp(",")
         let k = p.parseType()
-        if not (k.kind == tyInt or k.kind == tyStr):
+        if not (k.kind == tyInt or k.kind == tyStr) or k.opt:
           err(t.line, "map keys must be ints (or ranges) or string[N], got " & $k)
         p.expectOp(",")
         let v = p.parseType()
-        if v.kind in {tyLock, tyArray}:
+        if v.kind in {tyLock, tyArray} or v.opt:
           err(t.line, "a map value cannot be a " & $v &
             "; wrap arrays in an object")
         p.expectOp("]")
@@ -132,7 +135,7 @@ proc parseType(p: var Parser): Typ =
     of "set":
       p.expectOp("[")
       let e = p.parseType()
-      if e.kind != tyInt or e.isFullRange:
+      if e.kind != tyInt or e.isFullRange or e.opt:
         err(t.line, "set needs a range element type, e.g. set[0 .. 63]")
       if e.rlo < -1_000_000_000 or e.rhi > 1_000_000_000 or
           e.rhi - e.rlo + 1 > 16_777_216:
@@ -173,6 +176,14 @@ proc parseType(p: var Parser): Typ =
       err(t.line, "empty range type: " & $lo & " .. " & $hi)
     intType(lo, hi)
 
+proc parseType(p: var Parser): Typ =
+  result = p.parseTypeCore()
+  if p.atOp("?"):
+    discard p.next
+    if result.kind notin {tyInt, tyObject, tyStr}:
+      err(p.peek.line, "only ints, objects, and strings can be optional")
+    result = optOf(result)
+
 proc parseAtom(p: var Parser): Expr =
   let t = p.peek
   case t.kind
@@ -188,6 +199,8 @@ proc parseAtom(p: var Parser): Expr =
       result = Expr(kind: ekBool, line: t.line, bval: true)
     elif t.text == "false":
       result = Expr(kind: ekBool, line: t.line, bval: false)
+    elif t.text == "none":
+      result = Expr(kind: ekNone, line: t.line)
     else:
       result = Expr(kind: ekIdent, line: t.line, sval: t.text)
   else:
@@ -528,6 +541,9 @@ proc parseModule(p: var Parser): Module =
         let ft = p.parseType()
         if ft.kind == tyLock:
           err(p.peek.line, "Lock cannot be a field; a Lock must be a global")
+        if ft.opt:
+          err(p.peek.line, "object fields cannot be optional; use a bool + " &
+            "value pair to store absence")
         for n in names:
           for f in typ.fields:
             if f.name == n:

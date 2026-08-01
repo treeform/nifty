@@ -15,13 +15,15 @@ type
     fields*: seq[Field]  # tyObject
     val*: Typ            # tyMapD/tyMapS: the value type
     rlo*, rhi*: int64    # tyInt: declared range; full range = plain int
+    opt*: bool           # T?: an optional (value + ok flag)
 
   SymKind* = enum
     syConst, syGlobal, syLocal, syParam
 
   ExprKind* = enum
     ekInt, ekBool, ekStr, ekIdent, ekBin, ekNot, ekNeg, ekIndex, ekCall,
-    ekField, ekMethod # ekMethod: builtin op on a seq/string, kids[0] = base
+    ekField, ekMethod, # ekMethod: builtin op on a container, kids[0] = base
+    ekNone # the absent optional value; typed by its destination
   Expr* = ref object
     kind*: ExprKind
     line*: int
@@ -36,6 +38,9 @@ type
     mut*: bool
     rlo*, rhi*: int64 # proven value range, set by the checker for int exprs
     rnz*: bool        # proven nonzero, set by the checker for int exprs
+    wrapOpt*: bool    # codegen: wrap this value into an optional
+    unwrapOpt*: bool  # codegen: read .m_val (ident proven ok)
+    isOptOk*: bool    # codegen: this ekField reads the optional's ok flag
 
   StmtKind* = enum
     skVar, skLet, skAssign, skIf, skWhile, skFor, skLoop, skWith,
@@ -99,6 +104,18 @@ type
 const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
   "put", "remove"]
 
+proc deOpt*(t: Typ): Typ =
+  ## The base type of an optional (a copy with the flag cleared).
+  if t == nil or not t.opt:
+    return t
+  Typ(kind: t.kind, len: t.len, elem: t.elem, name: t.name,
+    fields: t.fields, val: t.val, rlo: t.rlo, rhi: t.rhi, opt: false)
+
+proc optOf*(t: Typ): Typ =
+  ## The optional flavor of a type (a copy with the flag set).
+  Typ(kind: t.kind, len: t.len, elem: t.elem, name: t.name,
+    fields: t.fields, val: t.val, rlo: t.rlo, rhi: t.rhi, opt: true)
+
 proc intType*(lo = low(int64), hi = high(int64)): Typ =
   ## An int type, optionally restricted to a declared range.
   Typ(kind: tyInt, rlo: lo, rhi: hi)
@@ -113,6 +130,8 @@ proc setSize*(t: Typ): int64 =
 proc typEq*(a, b: Typ): bool =
   if a.isNil or b.isNil:
     return a.isNil and b.isNil
+  if a.opt != b.opt:
+    return false
   if a.kind != b.kind:
     return false
   if a.kind in {tyArray, tySeq, tyQueue}:
@@ -133,6 +152,8 @@ proc typEq*(a, b: Typ): bool =
 proc `$`*(t: Typ): string =
   if t.isNil:
     return "void"
+  if t.opt:
+    return $deOpt(t) & "?"
   case t.kind
   of tyInt:
     if t.isFullRange: "int" else: $t.rlo & " .. " & $t.rhi

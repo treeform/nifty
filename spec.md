@@ -187,6 +187,21 @@ and in `while` conditions, where execution counts cannot be modeled.
 - **One iteration law**: `set`, dense map, and sparse map all iterate
   **ascending by key** — iteration order is a function of contents,
   never of insertion history.
+- `T?` — a flow-typed optional: a value that may be absent. Allowed on
+  ints/ranges, objects, and strings (not on container elements or object
+  fields). `none` is the absent value — for *missing*, not for failure;
+  a plain value converts implicitly (it is self-evidently present).
+  Zero-init is `none`. Reading the value requires a **proven presence**:
+  `if r.ok:` grants it (guard style `if not r.ok: return` grants
+  afterward; assigning a definite value grants; assigning `none`, a
+  `var` argument, a lock release, or a loop that touches `r` kills it) —
+  and then `r` simply *is* its base type: no unwrap, no projection,
+  `lastFix.lat` not `lastFix.value.lat`. `r.or(fallback)` is the total
+  read. Using an unproven optional is a compile error — the same proof
+  obligation family as division, indexing, and map reads. The discard
+  rule forces returned optionals to be consulted. Errors live at the
+  boundary: `func`s and most `proc`s are total; optionals appear where
+  the outside world can say no.
 - `Lock` — a mutex. Only allowed as a global; only usable via `with`.
 - `object` — a static struct, exactly like C:
 
@@ -458,8 +473,8 @@ via interval analysis with zero runtime checks in the generated C, `echo`,
 
 Not yet implemented: `index` types, wildcard generics, a
 `Result`-returning `map.get` (waiting on error values; `get(k, fallback)`
-and proven `m[k]` cover today), tail-call recursion, the per-thread error
-flag,
+and proven `m[k]` cover today), tail-call recursion, absence *reasons* (`T ? codeRange` with a provable
+`.error` — `none` is deliberately mute for now),
 deterministic floats and fixed-point (`fixed[lo .. hi, step]` — a scaled
 ranged int, so the existing proofs apply directly), int width from ranges
 (seq elements are still 8 bytes each; string data is already 1 byte).

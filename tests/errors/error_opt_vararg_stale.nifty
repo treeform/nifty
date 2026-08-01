@@ -1,0 +1,8 @@
+proc wipe(x: var 0 .. 9?) =
+  x = none
+
+thread main() =
+  var r: 0 .. 9? = 3
+  if r.ok:
+    wipe(r)
+    echo r + 1

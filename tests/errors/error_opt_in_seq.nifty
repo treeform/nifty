@@ -1,0 +1,4 @@
+var s: seq[4, 0 .. 9?]
+
+thread main() =
+  echo s.len

@@ -12,7 +12,7 @@ type
     line*: int
 
 const multiOps = ["..<", "..", "==", "!=", "<=", ">="]
-const singleOps = {'+', '-', '*', '/', '%', '(', ')', '[', ']', ':', ',', '=', '<', '>', '.'}
+const singleOps = {'+', '-', '*', '/', '%', '(', ')', '[', ']', ':', ',', '=', '<', '>', '.', '?'}
 
 proc tokenize*(src: string): seq[Token] =
   ## Turn source text into tokens, including indent/dedent tokens.

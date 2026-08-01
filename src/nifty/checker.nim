@@ -160,6 +160,39 @@ proc isDeclared(c: Ctx, name: string): bool =
       return true
   name in c.consts or name in c.globals or name in c.allRoutines
 
+proc exprFact(e: Expr): Fact =
+  Fact(lo: e.rlo, hi: e.rhi, notZero: e.rnz)
+
+proc setFact(e: Expr, f: Fact) =
+  e.rlo = f.lo
+  e.rhi = f.hi
+  e.rnz = f.notZero or f.lo > 0 or f.hi < 0
+
+proc rejectOpt(t: Typ, e: Expr) =
+  ## Optionals must be proven before their value is used.
+  if t != nil and t.opt:
+    let name = if e.kind == ekIdent: e.sval else: "it"
+    err(e.line, "cannot use '" & name & "' before proving it has a value; " &
+      "test with 'if " & name & ".ok:' first (or use ." &
+      "or(fallback))")
+
+proc coerceOpt(c: var Ctx, e: Expr, target: Typ): bool =
+  ## A plain value fits an optional destination (wrapped as ok); `none`
+  ## fits any optional destination.
+  if target == nil or not target.opt:
+    return false
+  if e.kind == ekNone:
+    e.typ = target
+    return true
+  if e.typ != nil and not e.typ.opt and typEq(e.typ, deOpt(target)):
+    if e.typ.kind == tyInt and not exprFact(e).fits(deOpt(target)):
+      err(e.line, "cannot prove value (" & rangeStr(exprFact(e)) &
+        ") fits " & $deOpt(target) & "; guard or clamp first")
+    e.wrapOpt = true
+    e.typ = target
+    return true
+  false
+
 proc coerceStrLit(c: Ctx, e: Expr, target: Typ): bool =
   ## A string literal fits a string[N] destination if its bytes fit.
   if target != nil and target.kind == tyStr and e != nil and e.kind == ekStr:
@@ -412,6 +445,10 @@ proc addCondFacts(c: var Ctx, e: Expr, negated = false) =
   ## Record what is proven when `e` is true (or false, if negated).
   if e.kind == ekNot:
     c.addCondFacts(e.kids[0], not negated)
+    return
+  if e.kind == ekField and e.isOptOk and not negated:
+    if e.kids[0].kind == ekIdent and c.factEligibleIdent(e.kids[0]):
+      c.facts[e.kids[0].sval & "@ok"] = Fact(lo: 1, hi: 1)
     return
   if e.kind == ekMethod and e.sval == "contains" and not negated and
       e.kids.len == 2:
@@ -867,14 +904,6 @@ proc zeroOk(t: Typ): bool =
 
 # --- expression checking --------------------------------------------------
 
-proc exprFact(e: Expr): Fact =
-  Fact(lo: e.rlo, hi: e.rhi, notZero: e.rnz)
-
-proc setFact(e: Expr, f: Fact) =
-  e.rlo = f.lo
-  e.rhi = f.hi
-  e.rnz = f.notZero or f.lo > 0 or f.hi < 0
-
 proc checkExpr(c: var Ctx, e: Expr): Typ =
   case e.kind
   of ekInt:
@@ -882,12 +911,20 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     e.setFact Fact(lo: e.ival, hi: e.ival, notZero: e.ival != 0)
   of ekBool:
     e.typ = Typ(kind: tyBool)
+  of ekNone:
+    err(e.line, "none needs an optional destination " &
+      "(var x: int? = none / x = none / return none)")
   of ekStr:
     if e.typ == nil or e.typ.kind != tyStr:
       e.typ = Typ(kind: tyString)
   of ekIdent:
     c.resolveIdent(e)
-    if e.typ.kind == tyInt:
+    if e.typ != nil and e.typ.opt and c.factEligibleIdent(e) and
+        (e.sval & "@ok") in c.facts:
+      # Proven present: the name acts as its base type from here.
+      e.typ = deOpt(e.typ)
+      e.unwrapOpt = true
+    if e.typ.kind == tyInt and not e.typ.opt:
       if e.symKind == syConst:
         let v = c.consts[e.sval]
         e.setFact Fact(lo: v, hi: v, notZero: v != 0)
@@ -898,7 +935,9 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         # declared range invariant holds.
         e.setFact typFact(e.typ)
   of ekNeg:
-    if c.expectVal(e.kids[0]).kind != tyInt:
+    let nt = c.expectVal(e.kids[0])
+    rejectOpt(nt, e.kids[0])
+    if nt.kind != tyInt:
       err(e.line, "unary '-' needs an int operand")
     let a = exprFact(e.kids[0])
     let l = satNeg(a.hi)
@@ -935,6 +974,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     else:
       let a = c.expectVal(e.kids[0])
       let b = c.expectVal(e.kids[1])
+      rejectOpt(a, e.kids[0])
+      rejectOpt(b, e.kids[1])
       case e.sval
       of "+", "-", "*", "/", "%":
         if a.kind != tyInt or b.kind != tyInt:
@@ -1039,6 +1080,16 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     e.setFact typFact(e.typ)
   of ekField:
     let base = c.expectVal(e.kids[0])
+    if e.sval == "ok" and e.kids[0].kind == ekIdent and
+        (base.opt or e.kids[0].unwrapOpt):
+      # Reading the presence flag never needs a proof; undo any strip so
+      # codegen reads the flag, not the value.
+      if e.kids[0].unwrapOpt:
+        e.kids[0].unwrapOpt = false
+      e.isOptOk = true
+      e.typ = Typ(kind: tyBool)
+      return e.typ
+    rejectOpt(base, e.kids[0])
     if base.kind in {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS}:
       if e.sval != "len":
         err(e.line, $base & " has no property '" & e.sval & "' (only .len)")
@@ -1060,8 +1111,30 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     else:
       err(e.line, "'.' needs an object, seq, or string, got " & $base)
   of ekMethod:
-    let bt = c.expectVal(e.kids[0])
+    var bt = c.expectVal(e.kids[0])
     let nArgs = e.kids.len - 1
+    if e.sval == "or":
+      # Total read of an optional: the value, or the fallback.
+      if nArgs != 1:
+        err(e.line, "or takes one fallback argument")
+      if e.kids[0].kind == ekIdent and e.kids[0].unwrapOpt:
+        # Already proven: undo the strip, or() still works.
+        e.kids[0].unwrapOpt = false
+        bt = c.declTypeOf(e.kids[0])
+        e.kids[0].typ = bt
+      if bt == nil or not bt.opt:
+        err(e.line, "or() needs an optional value")
+      var ft = c.expectVal(e.kids[1])
+      if c.coerceStrLit(e.kids[1], deOpt(bt)):
+        ft = deOpt(bt)
+      if not typEq(ft, deOpt(bt)):
+        err(e.kids[1].line, "fallback must be " & $deOpt(bt) & ", got " & $ft)
+      if deOpt(bt).kind == tyInt and not exprFact(e.kids[1]).fits(deOpt(bt)):
+        err(e.kids[1].line, "cannot prove fallback fits " & $deOpt(bt))
+      e.typ = deOpt(bt)
+      e.setFact typFact(e.typ)
+      return e.typ
+    rejectOpt(bt, e.kids[0])
     if e.sval in mutMethods:
       if c.mutBan > 0:
         err(e.line, "a mutating method cannot appear here: this position " &
@@ -1334,9 +1407,18 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         " argument(s), got " & $e.kids.len)
     for i, arg in e.kids:
       let pt = r.params[i]
-      var at = c.expectVal(arg)
-      if c.coerceStrLit(arg, pt.typ):
+      var at: Typ = nil
+      if arg.kind == ekNone:
+        if not pt.typ.opt:
+          err(arg.line, "none needs an optional parameter")
+        arg.typ = pt.typ
         at = pt.typ
+      else:
+        at = c.expectVal(arg)
+        if c.coerceOpt(arg, pt.typ):
+          at = pt.typ
+        elif c.coerceStrLit(arg, pt.typ):
+          at = pt.typ
       if not typEq(at, pt.typ):
         err(arg.line, "argument " & $(i + 1) & " of '" & name & "': expected " &
           $pt.typ & ", got " & $at)
@@ -1403,9 +1485,16 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       err(s.line, "a Lock must be a global")
     var t = s.typ
     var initFact = Fact(lo: 0, hi: 0, notZero: false)
-    if s.init != nil:
+    if s.init != nil and s.init.kind == ekNone:
+      if t == nil or not t.opt:
+        err(s.line, "none needs an optional destination " &
+          "(e.g. var x: int? = none)")
+      s.init.typ = t
+    elif s.init != nil:
       var it = c.expectVal(s.init)
-      if c.coerceStrLit(s.init, t):
+      if c.coerceOpt(s.init, t):
+        it = t
+      elif c.coerceStrLit(s.init, t):
         it = t
       elif it.kind == tyString:
         err(s.line, "string literals need a string[N] destination " &
@@ -1432,7 +1521,12 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       err(s.line, "'" & s.name & "' is already declared (shadowing is not allowed)")
     s.typ = t
     c.scopes[^1][s.name] = Sym(kind: syLocal, typ: t, mutable: s.kind == skVar)
-    if t.kind == tyInt:
+    if t.opt:
+      if s.init != nil and s.init.kind != ekNone:
+        c.facts[s.name & "@ok"] = Fact(lo: 1, hi: 1)
+        if t.kind == tyInt:
+          c.facts[s.name] = initFact
+    elif t.kind == tyInt:
       c.facts[s.name] = initFact
     elif t.kind in {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS}:
       if s.init == nil:
@@ -1498,7 +1592,15 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           c.facts[pk] = Fact(lo: 1, hi: 1)
         s.lhs.typ = bt.val
         return
-    let lt = c.expectVal(s.lhs)
+    if s.lhs.kind == ekIdent:
+      # An assignment target is a place, not a value: undo any ok-strip.
+      discard c.expectVal(s.lhs)
+      if s.lhs.unwrapOpt:
+        s.lhs.unwrapOpt = false
+        s.lhs.typ = c.declTypeOf(s.lhs)
+    let lt =
+      if s.lhs.kind == ekIdent: s.lhs.typ
+      else: c.expectVal(s.lhs)
     let root = s.lhs.rootIdent
     if root.kind != ekIdent:
       err(s.lhs.line, "cannot assign to this expression")
@@ -1506,9 +1608,18 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       err(s.lhs.line, "cannot assign to immutable '" & root.sval & "'")
     if lt.kind == tyArray:
       err(s.lhs.line, "whole-array assignment is not allowed; copy elements in a loop")
-    var rt = c.expectVal(s.rhs)
-    if c.coerceStrLit(s.rhs, lt):
+    var rt: Typ = nil
+    if s.rhs.kind == ekNone:
+      if lt == nil or not lt.opt:
+        err(s.line, "none needs an optional destination")
+      s.rhs.typ = lt
       rt = lt
+    else:
+      rt = c.expectVal(s.rhs)
+      if c.coerceOpt(s.rhs, lt):
+        rt = lt
+      elif c.coerceStrLit(s.rhs, lt):
+        rt = lt
     if not typEq(lt, rt):
       err(s.line, "type mismatch: cannot assign " & $rt & " to " & $lt)
     # The store proof: the value must fit the declared range invariant.
@@ -1519,7 +1630,13 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           "; guard or clamp first")
     if s.lhs.kind == ekIdent:
       c.delFacts s.lhs.sval
-      if c.factName(s.lhs) != "":
+      if lt != nil and lt.opt and c.factEligibleIdent(s.lhs):
+        # A definite value (wrapped plain or a proven optional) grants ok.
+        if s.rhs.wrapOpt or s.rhs.unwrapOpt:
+          c.facts[s.lhs.sval & "@ok"] = Fact(lo: 1, hi: 1)
+          if lt.kind == tyInt:
+            c.facts[s.lhs.sval] = exprFact(s.rhs)
+      elif c.factName(s.lhs) != "":
         c.facts[s.lhs.sval] = exprFact(s.rhs)
   of skIf:
     var negAcc = c.facts
@@ -1595,7 +1712,11 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     if s.maxTrips == 0 and not hasLoopBreak(s.body):
       c.addCondFacts(s.cond, negated = true)
   of skFor:
-    if c.expectVal(s.lo).kind != tyInt or c.expectVal(s.hi).kind != tyInt:
+    let loT = c.expectVal(s.lo)
+    let hiT = c.expectVal(s.hi)
+    rejectOpt(loT, s.lo)
+    rejectOpt(hiT, s.hi)
+    if loT.kind != tyInt or hiT.kind != tyInt:
       err(s.line, "for loop bounds must be ints")
     if c.isDeclared(s.name):
       err(s.line, "'" & s.name & "' is already declared (shadowing is not allowed)")
@@ -1756,9 +1877,18 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     else:
       if s.value == nil:
         err(s.line, "return needs a value of type " & $c.cur.ret)
-      var t = c.expectVal(s.value)
-      if c.coerceStrLit(s.value, c.cur.ret):
+      var t: Typ = nil
+      if s.value.kind == ekNone:
+        if not c.cur.ret.opt:
+          err(s.line, "none needs an optional return type")
+        s.value.typ = c.cur.ret
         t = c.cur.ret
+      else:
+        t = c.expectVal(s.value)
+        if c.coerceOpt(s.value, c.cur.ret):
+          t = c.cur.ret
+        elif c.coerceStrLit(s.value, c.cur.ret):
+          t = c.cur.ret
       if not typEq(t, c.cur.ret):
         err(s.line, "return type mismatch: got " & $t & ", expected " & $c.cur.ret)
       if c.cur.ret.kind == tyInt:
@@ -1775,7 +1905,9 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     if c.cur.kind == rkFunc:
       err(s.line, "echo is a side effect; not allowed in func")
     for a in s.args:
-      if c.expectVal(a).kind notin {tyInt, tyBool, tyString, tyStr}:
+      let at = c.expectVal(a)
+      rejectOpt(at, a)
+      if at.kind notin {tyInt, tyBool, tyString, tyStr}:
         err(a.line, "cannot echo a " & $a.typ)
   of skDiscard:
     discard c.checkExpr(s.value)

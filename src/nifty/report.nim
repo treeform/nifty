@@ -24,6 +24,8 @@ proc smul(a, b: int64): int64 =
 # --- sizes (C layout: alignment and padding) ------------------------------
 
 proc typeAlign(t: Typ): int64 =
+  if t.opt:
+    return typeAlign(deOpt(t))
   case t.kind
   of tyBool:
     result = 1
@@ -37,6 +39,9 @@ proc typeAlign(t: Typ): int64 =
     result = 8 # int, seq/string (int64 length field first), Lock
 
 proc typeSize(t: Typ): int64 =
+  if t.opt:
+    let a = typeAlign(deOpt(t))
+    return (sadd(typeSize(deOpt(t)), 1) + a - 1) div a * a
   case t.kind
   of tyBool: 1
   of tyInt: 8

@@ -1,0 +1,5 @@
+thread main() =
+  var r: 0 .. 9? = 3
+  if r.ok:
+    r = none
+    echo r + 1

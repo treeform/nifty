@@ -34,6 +34,8 @@ proc mangleNum(n: int64): string =
   if n < 0: "m" & $(-n) else: $n
 
 proc mangle(t: Typ): string =
+  if t.opt:
+    return "p" & mangle(deOpt(t))
   case t.kind
   of tyInt: "i"
   of tyBool: "b"
@@ -49,6 +51,8 @@ proc mangle(t: Typ): string =
   else: "x"
 
 proc cBase(t: Typ): string =
+  if t.opt:
+    return "NS_" & mangle(t)
   case t.kind
   of tyBool: "bool"
   of tyObject: "S_" & t.name
@@ -68,7 +72,18 @@ proc passByPtr(t: Typ): bool =
   t.kind != tyArray
 
 proc genExpr(g: var Gen, e: Expr): string =
+  if e.wrapOpt:
+    # A plain value flowing into an optional destination.
+    let optT = e.typ
+    e.wrapOpt = false
+    e.typ = deOpt(optT)
+    let inner = g.genExpr(e)
+    e.typ = optT
+    e.wrapOpt = true
+    return "((" & cBase(optT) & "){ .m_val = " & inner & ", .m_ok = true })"
   case e.kind
+  of ekNone:
+    "((" & cBase(e.typ) & "){0})"
   of ekInt:
     $e.ival & "LL"
   of ekBool:
@@ -80,15 +95,17 @@ proc genExpr(g: var Gen, e: Expr): string =
     else:
       cQuote(e.sval)
   of ekIdent:
-    case e.symKind
-    of syConst: "C_" & e.sval
-    of syGlobal: "g_" & e.sval
-    of syLocal: "v_" & e.sval
-    of syParam:
-      if e.isVarParam and e.typ.passByPtr:
-        "(*p_" & e.sval & ")"
-      else:
-        "p_" & e.sval
+    let nm =
+      case e.symKind
+      of syConst: "C_" & e.sval
+      of syGlobal: "g_" & e.sval
+      of syLocal: "v_" & e.sval
+      of syParam:
+        if e.isVarParam and e.typ.passByPtr:
+          "(*p_" & e.sval & ")"
+        else:
+          "p_" & e.sval
+    if e.unwrapOpt: nm & ".m_val" else: nm
   of ekNeg:
     "(-" & g.genExpr(e.kids[0]) & ")"
   of ekNot:
@@ -123,13 +140,18 @@ proc genExpr(g: var Gen, e: Expr): string =
         parts.add g.genExpr(a)
     "f_" & e.sval & "(" & parts.join(", ") & ")"
   of ekField:
-    if e.kids[0].typ != nil and
+    if e.isOptOk:
+      g.genExpr(e.kids[0]) & ".m_ok"
+    elif e.kids[0].typ != nil and not e.kids[0].typ.opt and
         e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS}:
       g.genExpr(e.kids[0]) & ".m_len"
     else:
       g.genExpr(e.kids[0]) & ".m_" & e.sval
   of ekMethod:
     let bt = e.kids[0].typ
+    if e.sval == "or" and bt != nil and bt.opt:
+      return cBase(bt) & "_or(" & g.genExpr(e.kids[0]) & ", " &
+        g.genExpr(e.kids[1]) & ")"
     let fn = cBase(bt) & "_" & (if bt.kind == tyStr and e.sval == "add": "adds"
       else: e.sval)
     let basePtr = "&" & g.genExpr(e.kids[0])
@@ -186,6 +208,7 @@ proc tempFor(g: var Gen, e: Expr, val: string): string =
   inc g.tmpN
   let ctype =
     if e.typ == nil: "int64_t"
+    elif e.typ.opt: cBase(e.typ)
     elif e.typ.kind == tyBool: "bool"
     elif e.typ.kind in {tyObject, tySeq, tyStr, tySet, tyQueue,
       tyMapD, tyMapS}: cBase(e.typ)
@@ -198,8 +221,16 @@ proc genOrdered(g: var Gen, e: Expr): string =
   ## included: effectful nodes become their own C statements, and every
   ## read is captured at the moment the program text reaches it, so C's
   ## unspecified subexpression order can never be observed.
+  if e.wrapOpt:
+    let optT = e.typ
+    e.wrapOpt = false
+    e.typ = deOpt(optT)
+    let inner = g.genOrdered(e)
+    e.typ = optT
+    e.wrapOpt = true
+    return "((" & cBase(optT) & "){ .m_val = " & inner & ", .m_ok = true })"
   case e.kind
-  of ekInt, ekBool, ekStr:
+  of ekNone, ekInt, ekBool, ekStr:
     g.genExpr(e)
   of ekIdent:
     if e.typ != nil and e.typ.kind == tyArray:
@@ -270,6 +301,10 @@ proc genOrdered(g: var Gen, e: Expr): string =
       g.tempFor(e, call)
   of ekMethod:
     let bt = e.kids[0].typ
+    if e.sval == "or" and bt != nil and bt.opt:
+      let b = g.genOrdered(e.kids[0])
+      let f = g.genOrdered(e.kids[1])
+      return g.tempFor(e, cBase(bt) & "_or(" & b & ", " & f & ")")
     let base = g.genPathOrdered(e.kids[0])
     let fn = cBase(bt) & "_" &
       (if bt.kind == tyStr and e.sval == "add": "adds" else: e.sval)
@@ -316,6 +351,7 @@ proc genStmt(g: var Gen, s: Stmt) =
     let init =
       if s.init != nil and g.hasEffects(s.init): g.genOrdered(s.init)
       elif s.init != nil: g.genExpr(s.init)
+      elif s.typ.opt: "{0}"
       elif s.typ.kind in {tyArray, tyObject, tySeq, tyStr, tySet, tyQueue,
         tyMapD, tyMapS}: "{0}"
       elif s.typ.kind == tyBool: "false"
@@ -597,6 +633,23 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
   ## Emit typedefs (and the inline ops for seq/string) exactly once each,
   ## dependencies first. Declare-before-use makes this a simple post-order.
   if t.isNil:
+    return
+  if t.opt:
+    let base = deOpt(t)
+    g.emitTypeDefs(base)
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    let n = "NS_" & key
+    let b = cBase(base)
+    g.put ""
+    g.put "typedef struct {"
+    g.put "  " & b & " m_val;"
+    g.put "  bool m_ok;"
+    g.put "} " & n & ";"
+    g.put "static " & b & " " & n & "_or(" & n & " r, " & b &
+      " fb) { return r.m_ok ? r.m_val : fb; }"
     return
   case t.kind
   of tyArray:

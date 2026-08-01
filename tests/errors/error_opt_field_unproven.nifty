@@ -1,0 +1,7 @@
+object V =
+  x: int
+
+var f: V?
+
+thread main() =
+  echo f.x
