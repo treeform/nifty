@@ -2,35 +2,35 @@
 
 type
   TypKind* = enum
-    tyInt, tyBool, tyString, tyLock, tyArray, tyObject, tySeq, tyStr, tySet,
-    tyQueue, tyMapD, tyMapS # dense map[range, V]; sorted sparse map[N, K, V]
+    IntType, BoolType, StringLitType, LockType, ArrayType, ObjectType, SeqType, StringType, SetType,
+    QueueType, DenseMapType, SparseMapType # dense map[range, V]; sorted sparse map[N, K, V]
   Field* = object
     name*: string
     typ*: Typ
   Typ* = ref object
     kind*: TypKind
-    len*: int64          # tyArray/tySeq/tyStr: capacity
-    elem*: Typ           # tyArray/tySeq; tySet: the range element type
-    name*: string        # tyObject
-    fields*: seq[Field]  # tyObject
-    val*: Typ            # tyMapD/tyMapS: the value type
-    rlo*, rhi*: int64    # tyInt: declared range; full range = plain int
+    len*: int64          # ArrayType/SeqType/StringType: capacity
+    elem*: Typ           # ArrayType/SeqType; SetType: the range element type
+    name*: string        # ObjectType
+    fields*: seq[Field]  # ObjectType
+    val*: Typ            # DenseMapType/SparseMapType: the value type
+    rlo*, rhi*: int64    # IntType: declared range; full range = plain int
     opt*: bool           # T?: an optional (value + ok flag)
 
   SymKind* = enum
-    syConst, syGlobal, syLocal, syParam
+    ConstSym, GlobalSym, LocalSym, ParamSym
 
   ExprKind* = enum
-    ekInt, ekBool, ekStr, ekIdent, ekBin, ekNot, ekNeg, ekIndex, ekCall,
-    ekField, ekMethod, # ekMethod: builtin op on a container, kids[0] = base
-    ekNone # the absent optional value; typed by its destination
+    IntExpr, BoolExpr, StrExpr, IdentExpr, BinExpr, NotExpr, NegExpr, IndexExpr, CallExpr,
+    FieldExpr, MethodExpr, # MethodExpr: builtin op on a container, kids[0] = base
+    NoneExpr # the absent optional value; typed by its destination
   Expr* = ref object
     kind*: ExprKind
     line*: int
     ival*: int64
     bval*: bool
-    sval*: string   # ekStr text, ekIdent name, ekBin operator, ekCall name,
-                    # ekField field name
+    sval*: string   # StrExpr text, IdentExpr name, BinExpr operator, CallExpr name,
+                    # FieldExpr field name
     kids*: seq[Expr]
     typ*: Typ       # set by the checker
     symKind*: SymKind
@@ -40,12 +40,12 @@ type
     rnz*: bool        # proven nonzero, set by the checker for int exprs
     wrapOpt*: bool    # codegen: wrap this value into an optional
     unwrapOpt*: bool  # codegen: read .m_val (ident proven ok)
-    isOptOk*: bool    # codegen: this ekField reads the optional's ok flag
+    isOptOk*: bool    # codegen: this FieldExpr reads the optional's ok flag
 
   StmtKind* = enum
-    skVar, skLet, skAssign, skIf, skWhile, skFor, skLoop, skWith,
-    skReturn, skBreak, skEcho, skDiscard, skCall,
-    skForEach # for x in s: over a seq/string; value = s, name = x
+    VarStmt, LetStmt, AssignStmt, IfStmt, WhileStmt, ForStmt, LoopStmt, WithStmt,
+    ReturnStmt, BreakStmt, EchoStmt, DiscardStmt, CallStmt,
+    ForEachStmt # for x in s: over a seq/string; value = s, name = x
   Elif* = object
     cond*: Expr
     body*: seq[Stmt]
@@ -70,7 +70,7 @@ type
     elseBody*: seq[Stmt]
 
   RoutineKind* = enum
-    rkFunc = "func", rkProc = "proc", rkThread = "thread"
+    FuncRoutine = "func", ProcRoutine = "proc", ThreadRoutine = "thread"
   Param* = object
     name*: string
     typ*: Typ
@@ -118,7 +118,7 @@ proc optOf*(t: Typ): Typ =
 
 proc intType*(lo = low(int64), hi = high(int64)): Typ =
   ## An int type, optionally restricted to a declared range.
-  Typ(kind: tyInt, rlo: lo, rhi: hi)
+  Typ(kind: IntType, rlo: lo, rhi: hi)
 
 proc isFullRange*(t: Typ): bool =
   t.rlo == low(int64) and t.rhi == high(int64)
@@ -137,11 +137,11 @@ proc sizeMul(a, b: int64): int64 =
 
 proc typeAlign*(t: Typ): int64 =
   case t.kind
-  of tyBool:
+  of BoolType:
     result = 1
-  of tyArray:
+  of ArrayType:
     result = typeAlign(t.elem)
-  of tyObject:
+  of ObjectType:
     result = 1
     for f in t.fields:
       result = max(result, typeAlign(f.typ))
@@ -154,24 +154,24 @@ proc typeSize*(t: Typ): int64 =
     let a = typeAlign(deOpt(t))
     return (sizeAdd(typeSize(deOpt(t)), 1) + a - 1) div a * a
   case t.kind
-  of tyBool: 1
-  of tyInt: 8
-  of tyArray: sizeMul(t.len, typeSize(t.elem))
-  of tySeq:
+  of BoolType: 1
+  of IntType: 8
+  of ArrayType: sizeMul(t.len, typeSize(t.elem))
+  of SeqType:
     (sizeAdd(8, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
-  of tyStr:
+  of StringType:
     (sizeAdd(8, t.len) + 7) div 8 * 8
-  of tySet:
+  of SetType:
     sizeAdd(8, (t.setSize + 63) div 64 * 8)
-  of tyQueue:
+  of QueueType:
     (sizeAdd(16, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
-  of tyMapD:
+  of DenseMapType:
     (sizeAdd(sizeAdd(8, (t.setSize + 63) div 64 * 8),
       sizeMul(t.setSize, typeSize(t.val))) + 7) div 8 * 8
-  of tyMapS:
+  of SparseMapType:
     (sizeAdd(8, sizeAdd(sizeMul(t.len, typeSize(t.elem)),
       sizeMul(t.len, typeSize(t.val)))) + 7) div 8 * 8
-  of tyObject:
+  of ObjectType:
     var off = 0'i64
     for f in t.fields:
       let a = typeAlign(f.typ)
@@ -188,18 +188,18 @@ proc typEq*(a, b: Typ): bool =
     return false
   if a.kind != b.kind:
     return false
-  if a.kind in {tyArray, tySeq, tyQueue}:
+  if a.kind in {ArrayType, SeqType, QueueType}:
     return a.len == b.len and typEq(a.elem, b.elem)
-  if a.kind == tyStr:
+  if a.kind == StringType:
     return a.len == b.len
-  if a.kind == tySet:
+  if a.kind == SetType:
     return a.elem.rlo == b.elem.rlo and a.elem.rhi == b.elem.rhi
-  if a.kind == tyMapD:
+  if a.kind == DenseMapType:
     return a.elem.rlo == b.elem.rlo and a.elem.rhi == b.elem.rhi and
       typEq(a.val, b.val)
-  if a.kind == tyMapS:
+  if a.kind == SparseMapType:
     return a.len == b.len and typEq(a.elem, b.elem) and typEq(a.val, b.val)
-  if a.kind == tyObject:
+  if a.kind == ObjectType:
     return a.name == b.name
   true
 
@@ -209,16 +209,16 @@ proc `$`*(t: Typ): string =
   if t.opt:
     return $deOpt(t) & "?"
   case t.kind
-  of tyInt:
+  of IntType:
     if t.isFullRange: "int" else: $t.rlo & " .. " & $t.rhi
-  of tyBool: "bool"
-  of tyString: "string"
-  of tyLock: "Lock"
-  of tyArray: "array[" & $t.len & ", " & $t.elem & "]"
-  of tySeq: "seq[" & $t.len & ", " & $t.elem & "]"
-  of tyStr: "string[" & $t.len & "]"
-  of tySet: "set[" & $t.elem & "]"
-  of tyQueue: "queue[" & $t.len & ", " & $t.elem & "]"
-  of tyMapD: "map[" & $t.elem & ", " & $t.val & "]"
-  of tyMapS: "map[" & $t.len & ", " & $t.elem & ", " & $t.val & "]"
-  of tyObject: t.name
+  of BoolType: "bool"
+  of StringLitType: "string"
+  of LockType: "Lock"
+  of ArrayType: "array[" & $t.len & ", " & $t.elem & "]"
+  of SeqType: "seq[" & $t.len & ", " & $t.elem & "]"
+  of StringType: "string[" & $t.len & "]"
+  of SetType: "set[" & $t.elem & "]"
+  of QueueType: "queue[" & $t.len & ", " & $t.elem & "]"
+  of DenseMapType: "map[" & $t.elem & ", " & $t.val & "]"
+  of SparseMapType: "map[" & $t.len & ", " & $t.elem & ", " & $t.val & "]"
+  of ObjectType: t.name

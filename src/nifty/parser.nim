@@ -20,10 +20,10 @@ proc next(p: var Parser): Token =
   inc p.pos
 
 proc atOp(p: Parser, s: string): bool =
-  p.peek.kind == tkOp and p.peek.text == s
+  p.peek.kind == OpToken and p.peek.text == s
 
 proc atIdent(p: Parser, s: string): bool =
-  p.peek.kind == tkIdent and p.peek.text == s
+  p.peek.kind == IdentToken and p.peek.text == s
 
 proc expectOp(p: var Parser, s: string) =
   if not p.atOp(s):
@@ -31,7 +31,7 @@ proc expectOp(p: var Parser, s: string) =
   discard p.next
 
 proc expectIdent(p: var Parser): string =
-  if p.peek.kind != tkIdent:
+  if p.peek.kind != IdentToken:
     err(p.peek.line, "identifier expected")
   p.next.text
 
@@ -41,9 +41,9 @@ proc expectKeyword(p: var Parser, s: string) =
   discard p.next
 
 proc expectNewline(p: var Parser) =
-  if p.peek.kind notin {tkNewline, tkEof}:
+  if p.peek.kind notin {NewlineToken, EofToken}:
     err(p.peek.line, "end of line expected")
-  if p.peek.kind == tkNewline:
+  if p.peek.kind == NewlineToken:
     discard p.next
 
 proc parseIntLit(t: Token): int64 =
@@ -58,7 +58,7 @@ proc parseType(p: var Parser): Typ
 
 proc parseTypeCore(p: var Parser): Typ =
   let t = p.peek
-  if t.kind == tkIdent and
+  if t.kind == IdentToken and
       (t.text in ["int", "bool", "Lock", "array", "seq", "string", "set",
         "queue", "map"] or
        t.text in p.types):
@@ -67,16 +67,16 @@ proc parseTypeCore(p: var Parser): Typ =
     of "int":
       intType()
     of "bool":
-      Typ(kind: tyBool)
+      Typ(kind: BoolType)
     of "Lock":
-      Typ(kind: tyLock)
+      Typ(kind: LockType)
     of "array", "seq", "queue":
       p.expectOp("[")
       let lt = p.next
       var n: int64
-      if lt.kind == tkInt:
+      if lt.kind == IntToken:
         n = parseIntLit(lt)
-      elif lt.kind == tkIdent and lt.text in p.consts:
+      elif lt.kind == IdentToken and lt.text in p.consts:
         n = p.consts[lt.text]
       else:
         err(lt.line, t.text & " capacity must be an integer literal or a const")
@@ -84,16 +84,16 @@ proc parseTypeCore(p: var Parser): Typ =
         err(lt.line, t.text & " capacity must be positive")
       p.expectOp(",")
       let e = p.parseType()
-      if e.kind == tyLock:
+      if e.kind == LockType:
         err(lt.line, "Lock cannot be a " & t.text & " element")
-      if t.text in ["seq", "queue"] and e.kind == tyArray:
+      if t.text in ["seq", "queue"] and e.kind == ArrayType:
         err(lt.line, "a " & t.text & " element cannot be a plain array; " &
           "wrap it in an object")
       p.expectOp("]")
       Typ(kind: (case t.text
-        of "seq": tySeq
-        of "queue": tyQueue
-        else: tyArray), len: n, elem: e)
+        of "seq": SeqType
+        of "queue": QueueType
+        else: ArrayType), len: n, elem: e)
     of "map":
       # map[lo .. hi, V] (dense) or map[N, K, V] (sorted sparse)
       p.expectOp("[")
@@ -111,54 +111,54 @@ proc parseTypeCore(p: var Parser): Typ =
           err(t.line, "map key range is too large (max 16777216 keys)")
         p.expectOp(",")
         let v = p.parseType()
-        if v.kind in {tyLock, tyArray}:
+        if v.kind in {LockType, ArrayType}:
           err(t.line, "a map value cannot be a " & $v &
             "; wrap arrays in an object")
         p.expectOp("]")
-        Typ(kind: tyMapD, elem: intType(n, hi), val: v)
+        Typ(kind: DenseMapType, elem: intType(n, hi), val: v)
       else:
         if n <= 0:
           err(t.line, "map capacity must be positive")
         p.expectOp(",")
         let k = p.parseType()
-        if not (k.kind == tyInt or k.kind == tyStr) or k.opt:
+        if not (k.kind == IntType or k.kind == StringType) or k.opt:
           err(t.line, "map keys must be ints (or ranges) or string[N], got " & $k)
         p.expectOp(",")
         let v = p.parseType()
-        if v.kind in {tyLock, tyArray}:
+        if v.kind in {LockType, ArrayType}:
           err(t.line, "a map value cannot be a " & $v &
             "; wrap arrays in an object")
         p.expectOp("]")
-        Typ(kind: tyMapS, len: n, elem: k, val: v)
+        Typ(kind: SparseMapType, len: n, elem: k, val: v)
     of "set":
       p.expectOp("[")
       let e = p.parseType()
-      if e.kind != tyInt or e.isFullRange or e.opt:
+      if e.kind != IntType or e.isFullRange or e.opt:
         err(t.line, "set needs a range element type, e.g. set[0 .. 63]")
       if e.rlo < -1_000_000_000 or e.rhi > 1_000_000_000 or
           e.rhi - e.rlo + 1 > 16_777_216:
         err(t.line, "set range is too large (max 16777216 values)")
       p.expectOp("]")
-      Typ(kind: tySet, elem: e)
+      Typ(kind: SetType, elem: e)
     of "string":
       p.expectOp("[")
       let lt = p.next
       var n: int64
-      if lt.kind == tkInt:
+      if lt.kind == IntToken:
         n = parseIntLit(lt)
-      elif lt.kind == tkIdent and lt.text in p.consts:
+      elif lt.kind == IdentToken and lt.text in p.consts:
         n = p.consts[lt.text]
       else:
         err(lt.line, "string capacity must be an integer literal or a const")
       if n <= 0:
         err(lt.line, "string capacity must be positive")
       p.expectOp("]")
-      Typ(kind: tyStr, len: n)
+      Typ(kind: StringType, len: n)
     else:
       p.types[t.text]
   else:
     # Range type: constExpr .. constExpr  (or ..< for an exclusive bound).
-    if t.kind == tkIdent and t.text notin p.consts:
+    if t.kind == IdentToken and t.text notin p.consts:
       err(t.line, "unknown type: '" & t.text & "'")
     let lo = p.evalConst(p.parseExpr())
     var inclusive = true
@@ -178,29 +178,29 @@ proc parseType(p: var Parser): Typ =
   result = p.parseTypeCore()
   if p.atOp("?"):
     discard p.next
-    if result.kind notin {tyInt, tyObject, tyStr}:
+    if result.kind notin {IntType, ObjectType, StringType}:
       err(p.peek.line, "only ints, objects, and strings can be optional")
     result = optOf(result)
 
 proc parseAtom(p: var Parser): Expr =
   let t = p.peek
   case t.kind
-  of tkInt:
+  of IntToken:
     discard p.next
-    result = Expr(kind: ekInt, line: t.line, ival: parseIntLit(t))
-  of tkStr:
+    result = Expr(kind: IntExpr, line: t.line, ival: parseIntLit(t))
+  of StrToken:
     discard p.next
-    result = Expr(kind: ekStr, line: t.line, sval: t.text)
-  of tkIdent:
+    result = Expr(kind: StrExpr, line: t.line, sval: t.text)
+  of IdentToken:
     discard p.next
     if t.text == "true":
-      result = Expr(kind: ekBool, line: t.line, bval: true)
+      result = Expr(kind: BoolExpr, line: t.line, bval: true)
     elif t.text == "false":
-      result = Expr(kind: ekBool, line: t.line, bval: false)
+      result = Expr(kind: BoolExpr, line: t.line, bval: false)
     elif t.text == "none":
-      result = Expr(kind: ekNone, line: t.line)
+      result = Expr(kind: NoneExpr, line: t.line)
     else:
-      result = Expr(kind: ekIdent, line: t.line, sval: t.text)
+      result = Expr(kind: IdentExpr, line: t.line, sval: t.text)
   else:
     if p.atOp("("):
       discard p.next
@@ -216,14 +216,14 @@ proc parsePostfix(p: var Parser): Expr =
       discard p.next
       let idx = p.parseExpr()
       p.expectOp("]")
-      result = Expr(kind: ekIndex, line: result.line, kids: @[result, idx])
+      result = Expr(kind: IndexExpr, line: result.line, kids: @[result, idx])
     elif p.atOp("."):
       discard p.next
       let fname = p.expectIdent()
       if p.atOp("("):
         # Builtin method call: s.add(x), s.pop(), s.clear(), s.push(x)
         discard p.next
-        var m = Expr(kind: ekMethod, line: result.line, sval: fname,
+        var m = Expr(kind: MethodExpr, line: result.line, sval: fname,
           kids: @[result])
         if not p.atOp(")"):
           m.kids.add p.parseExpr()
@@ -233,10 +233,10 @@ proc parsePostfix(p: var Parser): Expr =
         p.expectOp(")")
         result = m
       else:
-        result = Expr(kind: ekField, line: result.line, sval: fname,
+        result = Expr(kind: FieldExpr, line: result.line, sval: fname,
           kids: @[result])
     elif p.atOp("("):
-      if result.kind != ekIdent:
+      if result.kind != IdentExpr:
         err(result.line, "only a named func or proc can be called")
       discard p.next
       var args: seq[Expr]
@@ -246,42 +246,42 @@ proc parsePostfix(p: var Parser): Expr =
           discard p.next
           args.add p.parseExpr()
       p.expectOp(")")
-      result = Expr(kind: ekCall, line: result.line, sval: result.sval, kids: args)
+      result = Expr(kind: CallExpr, line: result.line, sval: result.sval, kids: args)
     else:
       break
 
 proc parseUnary(p: var Parser): Expr =
   if p.atOp("-"):
     let line = p.next.line
-    Expr(kind: ekNeg, line: line, kids: @[p.parseUnary()])
+    Expr(kind: NegExpr, line: line, kids: @[p.parseUnary()])
   else:
     p.parsePostfix()
 
 proc parseMul(p: var Parser): Expr =
   result = p.parseUnary()
-  while p.peek.kind == tkOp and p.peek.text in ["*", "/", "%"]:
+  while p.peek.kind == OpToken and p.peek.text in ["*", "/", "%"]:
     let op = p.next.text
-    result = Expr(kind: ekBin, line: result.line, sval: op,
+    result = Expr(kind: BinExpr, line: result.line, sval: op,
       kids: @[result, p.parseUnary()])
 
 proc parseAdd(p: var Parser): Expr =
   result = p.parseMul()
-  while p.peek.kind == tkOp and p.peek.text in ["+", "-"]:
+  while p.peek.kind == OpToken and p.peek.text in ["+", "-"]:
     let op = p.next.text
-    result = Expr(kind: ekBin, line: result.line, sval: op,
+    result = Expr(kind: BinExpr, line: result.line, sval: op,
       kids: @[result, p.parseMul()])
 
 proc parseCmp(p: var Parser): Expr =
   result = p.parseAdd()
-  if p.peek.kind == tkOp and p.peek.text in ["==", "!=", "<", "<=", ">", ">="]:
+  if p.peek.kind == OpToken and p.peek.text in ["==", "!=", "<", "<=", ">", ">="]:
     let op = p.next.text
-    result = Expr(kind: ekBin, line: result.line, sval: op,
+    result = Expr(kind: BinExpr, line: result.line, sval: op,
       kids: @[result, p.parseAdd()])
 
 proc parseNot(p: var Parser): Expr =
   if p.atIdent("not"):
     let line = p.next.line
-    Expr(kind: ekNot, line: line, kids: @[p.parseNot()])
+    Expr(kind: NotExpr, line: line, kids: @[p.parseNot()])
   else:
     p.parseCmp()
 
@@ -289,14 +289,14 @@ proc parseAnd(p: var Parser): Expr =
   result = p.parseNot()
   while p.atIdent("and"):
     discard p.next
-    result = Expr(kind: ekBin, line: result.line, sval: "and",
+    result = Expr(kind: BinExpr, line: result.line, sval: "and",
       kids: @[result, p.parseNot()])
 
 proc parseExpr(p: var Parser): Expr =
   result = p.parseAnd()
   while p.atIdent("or"):
     discard p.next
-    result = Expr(kind: ekBin, line: result.line, sval: "or",
+    result = Expr(kind: BinExpr, line: result.line, sval: "or",
       kids: @[result, p.parseAnd()])
 
 proc parseStmt(p: var Parser): Stmt
@@ -317,52 +317,52 @@ proc parseSimpleStmt(p: var Parser): Stmt =
     if p.atOp("="):
       discard p.next
       init = p.parseExpr()
-    Stmt(kind: (if t.text == "let": skLet else: skVar), line: t.line,
+    Stmt(kind: (if t.text == "let": LetStmt else: VarStmt), line: t.line,
       name: name, typ: typ, init: init)
   of "return":
     discard p.next
     var val: Expr = nil
-    if p.peek.kind notin {tkNewline, tkEof, tkDedent}:
+    if p.peek.kind notin {NewlineToken, EofToken, DedentToken}:
       val = p.parseExpr()
-    Stmt(kind: skReturn, line: t.line, value: val)
+    Stmt(kind: ReturnStmt, line: t.line, value: val)
   of "break":
     discard p.next
-    Stmt(kind: skBreak, line: t.line)
+    Stmt(kind: BreakStmt, line: t.line)
   of "echo":
     discard p.next
     var args = @[p.parseExpr()]
     while p.atOp(","):
       discard p.next
       args.add p.parseExpr()
-    Stmt(kind: skEcho, line: t.line, args: args)
+    Stmt(kind: EchoStmt, line: t.line, args: args)
   of "discard":
     discard p.next
-    Stmt(kind: skDiscard, line: t.line, value: p.parseExpr())
+    Stmt(kind: DiscardStmt, line: t.line, value: p.parseExpr())
   else:
     let e = p.parseExpr()
     if p.atOp("="):
       discard p.next
-      if e.kind notin {ekIdent, ekIndex, ekField}:
+      if e.kind notin {IdentExpr, IndexExpr, FieldExpr}:
         err(e.line, "cannot assign to this expression")
-      Stmt(kind: skAssign, line: t.line, lhs: e, rhs: p.parseExpr())
+      Stmt(kind: AssignStmt, line: t.line, lhs: e, rhs: p.parseExpr())
     else:
-      if e.kind notin {ekCall, ekMethod}:
+      if e.kind notin {CallExpr, MethodExpr}:
         err(e.line, "expression has no effect")
-      Stmt(kind: skCall, line: t.line, value: e)
+      Stmt(kind: CallStmt, line: t.line, value: e)
 
 proc parseBlock(p: var Parser): seq[Stmt] =
   p.expectNewline()
-  if p.peek.kind != tkIndent:
+  if p.peek.kind != IndentToken:
     err(p.peek.line, "indented block expected")
   discard p.next
-  while p.peek.kind notin {tkDedent, tkEof}:
+  while p.peek.kind notin {DedentToken, EofToken}:
     result.add p.parseStmt()
-  if p.peek.kind == tkDedent:
+  if p.peek.kind == DedentToken:
     discard p.next
 
 proc parseBody(p: var Parser): seq[Stmt] =
   ## Either an indented block, or a single simple statement on the same line.
-  if p.peek.kind == tkNewline:
+  if p.peek.kind == NewlineToken:
     p.parseBlock()
   else:
     let s = p.parseSimpleStmt()
@@ -371,12 +371,12 @@ proc parseBody(p: var Parser): seq[Stmt] =
 
 proc parseStmt(p: var Parser): Stmt =
   let t = p.peek
-  if t.kind != tkIdent:
+  if t.kind != IdentToken:
     err(t.line, "statement expected")
   case t.text
   of "if":
     discard p.next
-    result = Stmt(kind: skIf, line: t.line)
+    result = Stmt(kind: IfStmt, line: t.line)
     let cond = p.parseExpr()
     p.expectOp(":")
     result.elifs.add Elif(cond: cond, body: p.parseBody())
@@ -391,7 +391,7 @@ proc parseStmt(p: var Parser): Stmt =
       result.elseBody = p.parseBody()
   of "while":
     discard p.next
-    result = Stmt(kind: skWhile, line: t.line, cond: p.parseExpr())
+    result = Stmt(kind: WhileStmt, line: t.line, cond: p.parseExpr())
     if p.atIdent("max"):
       discard p.next
       let n = p.evalConst(p.parseExpr())
@@ -410,13 +410,13 @@ proc parseStmt(p: var Parser): Stmt =
     p.expectKeyword("in")
     let first = p.parseExpr()
     if p.atOp("..<") or p.atOp(".."):
-      result = Stmt(kind: skFor, line: t.line, name: vname, lo: first)
+      result = Stmt(kind: ForStmt, line: t.line, name: vname, lo: first)
       result.inclusive = p.peek.text == ".."
       discard p.next
       result.hi = p.parseExpr()
     elif p.atOp(":"):
       # for x in s: - iterate a container (for k, v in m: over maps)
-      result = Stmt(kind: skForEach, line: t.line, name: vname,
+      result = Stmt(kind: ForEachStmt, line: t.line, name: vname,
         name2: vname2, value: first)
     else:
       err(p.peek.line, "expected '..', '..<' (a range) or ':' (iterate a " &
@@ -425,14 +425,14 @@ proc parseStmt(p: var Parser): Stmt =
     result.body = p.parseBody()
   of "loop":
     discard p.next
-    result = Stmt(kind: skLoop, line: t.line)
+    result = Stmt(kind: LoopStmt, line: t.line)
     p.expectOp(":")
     result.body = p.parseBody()
   of "with":
     discard p.next
     let target = p.expectIdent()
-    result = Stmt(kind: skWith, line: t.line, name: target,
-      lhs: Expr(kind: ekIdent, line: t.line, sval: target))
+    result = Stmt(kind: WithStmt, line: t.line, name: target,
+      lhs: Expr(kind: IdentExpr, line: t.line, sval: target))
     p.expectOp(":")
     result.body = p.parseBody()
   else:
@@ -441,19 +441,19 @@ proc parseStmt(p: var Parser): Stmt =
 
 proc evalConst(p: Parser, e: Expr): int64 =
   case e.kind
-  of ekInt:
+  of IntExpr:
     e.ival
-  of ekIdent:
+  of IdentExpr:
     if e.sval in p.consts:
       p.consts[e.sval]
     else:
       err(e.line, "unknown const: '" & e.sval & "'")
-  of ekNeg:
+  of NegExpr:
     let v = p.evalConst(e.kids[0])
     if v == low(int64):
       err(e.line, "constant expression overflows int64")
     -v
-  of ekBin:
+  of BinExpr:
     let a = p.evalConst(e.kids[0])
     let b = p.evalConst(e.kids[1])
     case e.sval
@@ -488,12 +488,12 @@ proc evalConst(p: Parser, e: Expr): int64 =
 
 proc parseModule(p: var Parser): Module =
   result = Module()
-  while p.peek.kind != tkEof:
-    if p.peek.kind == tkNewline:
+  while p.peek.kind != EofToken:
+    if p.peek.kind == NewlineToken:
       discard p.next
       continue
     let t = p.peek
-    if t.kind != tkIdent:
+    if t.kind != IdentToken:
       err(t.line, "declaration expected")
     case t.text
     of "const":
@@ -526,18 +526,18 @@ proc parseModule(p: var Parser): Module =
         err(t.line, "duplicate or reserved type name: '" & name & "'")
       p.expectOp("=")
       p.expectNewline()
-      if p.peek.kind != tkIndent:
+      if p.peek.kind != IndentToken:
         err(t.line, "object needs at least one field on an indented line")
       discard p.next
-      var typ = Typ(kind: tyObject, name: name)
-      while p.peek.kind notin {tkDedent, tkEof}:
+      var typ = Typ(kind: ObjectType, name: name)
+      while p.peek.kind notin {DedentToken, EofToken}:
         var names = @[p.expectIdent()]
         while p.atOp(","):
           discard p.next
           names.add p.expectIdent()
         p.expectOp(":")
         let ft = p.parseType()
-        if ft.kind == tyLock:
+        if ft.kind == LockType:
           err(p.peek.line, "Lock cannot be a field; a Lock must be a global")
         for n in names:
           for f in typ.fields:
@@ -545,16 +545,16 @@ proc parseModule(p: var Parser): Module =
               err(p.peek.line, "duplicate field: '" & n & "'")
           typ.fields.add Field(name: n, typ: ft)
         p.expectNewline()
-      if p.peek.kind == tkDedent:
+      if p.peek.kind == DedentToken:
         discard p.next
       p.types[name] = typ
       result.types.add TypeDef(name: name, typ: typ, line: t.line)
     of "func", "proc", "thread":
       discard p.next
       let kind = case t.text
-        of "func": rkFunc
-        of "proc": rkProc
-        else: rkThread
+        of "func": FuncRoutine
+        of "proc": ProcRoutine
+        else: ThreadRoutine
       var r = Routine(kind: kind, name: p.expectIdent(), line: t.line)
       p.expectOp("(")
       if not p.atOp(")"):

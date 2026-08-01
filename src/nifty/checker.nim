@@ -51,7 +51,7 @@ proc fullFact(): Fact =
 
 proc typFact(t: Typ): Fact =
   ## The fact implied by a declared type: its range invariant.
-  if t != nil and t.kind == tyInt:
+  if t != nil and t.kind == IntType:
     Fact(lo: t.rlo, hi: t.rhi, notZero: t.rlo > 0 or t.rhi < 0)
   else:
     fullFact()
@@ -65,7 +65,7 @@ proc rangeStr(f: Fact): string =
   rangeStr(f.lo, f.hi)
 
 proc fits(f: Fact, t: Typ): bool =
-  t.kind != tyInt or t.opt or (f.lo >= t.rlo and f.hi <= t.rhi)
+  t.kind != IntType or t.opt or (f.lo >= t.rlo and f.hi <= t.rhi)
 
 ## Saturating Interval Arithmetic
 # Each op reports whether the true result could overflow int64; the checker
@@ -171,10 +171,10 @@ proc setFact(e: Expr, f: Fact) =
 proc rejectOpt(t: Typ, e: Expr) =
   ## Optionals must be proven before their value is used.
   if t != nil and t.opt:
-    if e.kind in {ekIdent, ekField}:
-      let name = if e.kind == ekIdent: e.sval else: "this optional"
+    if e.kind in {IdentExpr, FieldExpr}:
+      let name = if e.kind == IdentExpr: e.sval else: "this optional"
       err(e.line, "cannot use " &
-        (if e.kind == ekIdent: "'" & name & "'" else: name) &
+        (if e.kind == IdentExpr: "'" & name & "'" else: name) &
         " before proving it has a value; test with '.ok' first " &
         "(or use .or(fallback))")
     else:
@@ -186,11 +186,11 @@ proc coerceOpt(c: var Ctx, e: Expr, target: Typ): bool =
   ## fits any optional destination.
   if target == nil or not target.opt:
     return false
-  if e.kind == ekNone:
+  if e.kind == NoneExpr:
     e.typ = target
     return true
   if e.typ != nil and not e.typ.opt and typEq(e.typ, deOpt(target)):
-    if e.typ.kind == tyInt and not exprFact(e).fits(deOpt(target)):
+    if e.typ.kind == IntType and not exprFact(e).fits(deOpt(target)):
       err(e.line, "cannot prove value (" & rangeStr(exprFact(e)) &
         ") fits " & $deOpt(target) & "; guard or clamp first")
     e.wrapOpt = true
@@ -200,7 +200,7 @@ proc coerceOpt(c: var Ctx, e: Expr, target: Typ): bool =
 
 proc coerceStrLit(c: Ctx, e: Expr, target: Typ): bool =
   ## A string literal fits a string[N] destination if its bytes fit.
-  if target != nil and target.kind == tyStr and e != nil and e.kind == ekStr:
+  if target != nil and target.kind == StringType and e != nil and e.kind == StrExpr:
     if e.sval.len > target.len:
       err(e.line, "string literal (" & $e.sval.len & " bytes) does not fit " &
         $target)
@@ -227,17 +227,17 @@ proc resolveIdent(c: var Ctx, e: Expr) =
       e.typ = s.typ
       return
   if name in c.consts:
-    e.symKind = syConst
+    e.symKind = ConstSym
     e.mut = false
     e.typ = intType()
     return
   if name in c.globals:
-    if c.cur.kind == rkFunc:
+    if c.cur.kind == FuncRoutine:
       err(e.line, "func '" & c.cur.name & "' cannot access global '" & name & "'")
     let t = c.globals[name]
-    if t.kind == tyLock:
+    if t.kind == LockType:
       err(e.line, "'" & name & "' is a Lock; it can only be used in a with statement")
-    e.symKind = syGlobal
+    e.symKind = GlobalSym
     e.mut = true
     e.typ = t
     return
@@ -249,16 +249,16 @@ proc pathHasMapIndex(e: Expr): bool =
   ## Map elements are values, not places: m[k] cannot appear inside an
   ## lvalue path (var arguments, foreach bases, method targets).
   var cur = e
-  while cur.kind in {ekIndex, ekField}:
-    if cur.kind == ekIndex and cur.kids[0].typ != nil and
-        cur.kids[0].typ.kind in {tyMapD, tyMapS}:
+  while cur.kind in {IndexExpr, FieldExpr}:
+    if cur.kind == IndexExpr and cur.kids[0].typ != nil and
+        cur.kids[0].typ.kind in {DenseMapType, SparseMapType}:
       return true
     cur = cur.kids[0]
   false
 
 proc rootIdent(e: Expr): Expr =
   result = e
-  while result.kind in {ekIndex, ekField}:
+  while result.kind in {IndexExpr, FieldExpr}:
     result = result.kids[0]
 
 proc declFactByName(c: Ctx, name: string): Fact =
@@ -267,17 +267,17 @@ proc declFactByName(c: Ctx, name: string): Fact =
     for i in countdown(c.scopes.len - 1, 0):
       if root in c.scopes[i]:
         let t = c.scopes[i][root].typ
-        if t.kind in {tySeq, tyStr, tyQueue, tyMapS}:
+        if t.kind in {SeqType, StringType, QueueType, SparseMapType}:
           return Fact(lo: 0, hi: t.len)
-        if t.kind in {tySet, tyMapD}:
+        if t.kind in {SetType, DenseMapType}:
           return Fact(lo: 0, hi: t.setSize)
         return fullFact()
     if root in c.globals and
-        c.globals[root].kind in {tySeq, tyStr, tyQueue, tyMapS}:
+        c.globals[root].kind in {SeqType, StringType, QueueType, SparseMapType}:
       return Fact(lo: 0, hi: c.globals[root].len)
-    if root in c.globals and c.globals[root].kind == tyMapD:
+    if root in c.globals and c.globals[root].kind == DenseMapType:
       return Fact(lo: 0, hi: c.globals[root].setSize)
-    if root in c.globals and c.globals[root].kind == tySet:
+    if root in c.globals and c.globals[root].kind == SetType:
       return Fact(lo: 0, hi: c.globals[root].setSize)
     return fullFact()
   for i in countdown(c.scopes.len - 1, 0):
@@ -295,17 +295,17 @@ proc curFact(c: Ctx, name: string): Fact =
 proc tryConstEval(c: Ctx, e: Expr): tuple[known: bool, val: int64] =
   ## Evaluate an expression at compile time if possible.
   case e.kind
-  of ekInt:
+  of IntExpr:
     (true, e.ival)
-  of ekIdent:
+  of IdentExpr:
     if e.sval in c.consts:
       (true, c.consts[e.sval])
     else:
       (false, 0'i64)
-  of ekNeg:
+  of NegExpr:
     let r = c.tryConstEval(e.kids[0])
     (r.known, -r.val)
-  of ekBin:
+  of BinExpr:
     let a = c.tryConstEval(e.kids[0])
     let b = c.tryConstEval(e.kids[1])
     if not (a.known and b.known):
@@ -329,14 +329,14 @@ proc factEligibleIdent(c: Ctx, e: Expr): bool =
   ## (accessed by at most one thread) or when the lock that protects it is
   ## currently held — in both cases no other thread can change it between
   ## a test and a use. Var params never qualify (they may alias anything).
-  if e.kind != ekIdent:
+  if e.kind != IdentExpr:
     return false
   case e.symKind
-  of syLocal:
+  of LocalSym:
     true
-  of syParam:
+  of ParamSym:
     not e.isVarParam
-  of syGlobal:
+  of GlobalSym:
     if e.sval notin c.sharedProt:
       true # thread-owned (or never written): sequential here
     else:
@@ -349,16 +349,16 @@ proc factEligibleIdent(c: Ctx, e: Expr): bool =
 
 proc factName(c: Ctx, e: Expr): string =
   ## The name an int flow fact can attach to.
-  if e.typ != nil and e.typ.kind == tyInt and c.factEligibleIdent(e):
+  if e.typ != nil and e.typ.kind == IntType and c.factEligibleIdent(e):
     e.sval
   else:
     ""
 
 proc lenPathName(c: Ctx, e: Expr): string =
   ## "s.len" when e reads the length of a factable seq/string variable.
-  if e.kind == ekField and e.sval == "len" and e.kids[0].kind == ekIdent and
+  if e.kind == FieldExpr and e.sval == "len" and e.kids[0].kind == IdentExpr and
       e.kids[0].typ != nil and
-      e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS} and
+      e.kids[0].typ.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType} and
       c.factEligibleIdent(e.kids[0]):
     e.kids[0].sval & ".len"
   else:
@@ -368,9 +368,9 @@ proc stablePathName(c: Ctx, e: Expr): string =
   ## A provable name: an eligible ident, or a pure field chain on one
   ## ("p.fix"). Indexed paths have no stable name.
   case e.kind
-  of ekIdent:
+  of IdentExpr:
     if c.factEligibleIdent(e): e.sval else: ""
-  of ekField:
+  of FieldExpr:
     let inner = c.stablePathName(e.kids[0])
     if inner != "" and not e.isOptOk: inner & "." & e.sval else: ""
   else:
@@ -379,14 +379,14 @@ proc stablePathName(c: Ctx, e: Expr): string =
 proc mapFactKey(c: Ctx, m: Expr, k: Expr): string =
   ## The containment-predicate key "m@k" for a stable map/key pair, or ""
   ## when either side cannot carry a fact.
-  if m.kind != ekIdent or not c.factEligibleIdent(m):
+  if m.kind != IdentExpr or not c.factEligibleIdent(m):
     return ""
   let kv = c.tryConstEval(k)
   if kv.known:
     return m.sval & "@=" & $kv.val
-  if k.kind == ekStr:
+  if k.kind == StrExpr:
     return m.sval & "@=s" & k.sval
-  if k.kind == ekIdent and c.factEligibleIdent(k):
+  if k.kind == IdentExpr and c.factEligibleIdent(k):
     return m.sval & "@" & k.sval
   ""
 
@@ -429,7 +429,7 @@ proc negateCmp(op: string): string =
 proc cmpFact(c: Ctx, e: Expr): tuple[name: string, op: string, k: int64] =
   ## Normalize a comparison to (localName op constant); name is "" otherwise.
   result = ("", "", 0'i64)
-  if e.kind != ekBin or e.sval notin ["==", "!=", "<", "<=", ">", ">="]:
+  if e.kind != BinExpr or e.sval notin ["==", "!=", "<", "<=", ">", ">="]:
     return
   let lc = c.tryConstEval(e.kids[0])
   let rc = c.tryConstEval(e.kids[1])
@@ -461,21 +461,21 @@ proc applyCmpFact(c: var Ctx, name, op: string, k: int64) =
 
 proc addCondFacts(c: var Ctx, e: Expr, negated = false) =
   ## Record what is proven when `e` is true (or false, if negated).
-  if e.kind == ekNot:
+  if e.kind == NotExpr:
     c.addCondFacts(e.kids[0], not negated)
     return
-  if e.kind == ekField and e.isOptOk and not negated:
+  if e.kind == FieldExpr and e.isOptOk and not negated:
     let pn = c.stablePathName(e.kids[0])
     if pn != "":
       c.facts[pn & "@ok"] = Fact(lo: 1, hi: 1)
     return
-  if e.kind == ekMethod and e.sval == "contains" and not negated and
+  if e.kind == MethodExpr and e.sval == "contains" and not negated and
       e.kids.len == 2:
     let key = c.mapFactKey(e.kids[0], e.kids[1])
     if key != "":
       c.facts[key] = Fact(lo: 1, hi: 1)
     return
-  if e.kind != ekBin:
+  if e.kind != BinExpr:
     return
   if not negated and e.sval == "and":
     c.addCondFacts(e.kids[0])
@@ -520,16 +520,16 @@ proc joinFacts(c: Ctx, tabs: seq[Table[string, Fact]]): Table[string, Fact] =
 proc collectAssignedExpr(c: Ctx, e: Expr, s: var HashSet[string]) =
   if e.isNil:
     return
-  if e.kind == ekMethod and e.sval in mutMethods:
+  if e.kind == MethodExpr and e.sval in mutMethods:
     let root = e.kids[0].rootIdent
-    if root.kind == ekIdent:
+    if root.kind == IdentExpr:
       s.incl root.sval
-  if e.kind == ekCall and e.sval in c.routineTab:
+  if e.kind == CallExpr and e.sval in c.routineTab:
     let r = c.routineTab[e.sval]
     for i, arg in e.kids:
       if i < r.params.len and r.params[i].isVar:
         let root = arg.rootIdent
-        if root.kind == ekIdent:
+        if root.kind == IdentExpr:
           s.incl root.sval
     if e.sval in c.routineWrites:
       for g in c.routineWrites[e.sval]:
@@ -545,11 +545,11 @@ proc collectAssigned(c: Ctx, body: seq[Stmt], s: var HashSet[string]) =
       c.collectAssignedExpr(e, s)
     for a in st.args:
       c.collectAssignedExpr(a, s)
-    if st.kind == skAssign:
+    if st.kind == AssignStmt:
       let root = st.lhs.rootIdent
-      if root.kind == ekIdent:
+      if root.kind == IdentExpr:
         s.incl root.sval
-    if st.kind == skWith:
+    if st.kind == WithStmt:
       s.incl st.name
     c.collectAssigned(st.body, s)
     for br in st.elifs:
@@ -568,9 +568,9 @@ proc alwaysReturns(body: seq[Stmt]): bool =
     return false
   let s = body[^1]
   case s.kind
-  of skReturn:
+  of ReturnStmt:
     true
-  of skIf:
+  of IfStmt:
     if s.elseBody.len == 0:
       return false
     for br in s.elifs:
@@ -582,23 +582,23 @@ proc alwaysReturns(body: seq[Stmt]): bool =
 
 proc alwaysExits(body: seq[Stmt]): bool =
   ## Does this body always leave the enclosing block (return or break)?
-  body.len > 0 and (body[^1].kind in {skReturn, skBreak} or alwaysReturns(body))
+  body.len > 0 and (body[^1].kind in {ReturnStmt, BreakStmt} or alwaysReturns(body))
 
 proc hasLoopBreak(body: seq[Stmt]): bool =
   ## Is there a break that targets the enclosing loop (not a nested one)?
   for st in body:
     case st.kind
-    of skBreak:
+    of BreakStmt:
       return true
-    of skWhile, skFor, skLoop, skForEach:
+    of WhileStmt, ForStmt, LoopStmt, ForEachStmt:
       discard # a break in there targets the inner loop
-    of skIf:
+    of IfStmt:
       for br in st.elifs:
         if hasLoopBreak(br.body):
           return true
       if hasLoopBreak(st.elseBody):
         return true
-    of skWith:
+    of WithStmt:
       if hasLoopBreak(st.body):
         return true
     else:
@@ -609,7 +609,7 @@ proc hasLoopBreak(body: seq[Stmt]): bool =
 proc containsIdent(e: Expr, v: string): bool =
   if e.isNil:
     return false
-  if e.kind == ekIdent and e.sval == v:
+  if e.kind == IdentExpr and e.sval == v:
     return true
   for k in e.kids:
     if containsIdent(k, v):
@@ -618,19 +618,19 @@ proc containsIdent(e: Expr, v: string): bool =
 proc declTypeOf(c: Ctx, e: Expr): Typ =
   ## The type of a value expression from declarations only (no checking).
   case e.kind
-  of ekIdent:
+  of IdentExpr:
     for i in countdown(c.scopes.len - 1, 0):
       if e.sval in c.scopes[i]:
         return c.scopes[i][e.sval].typ
     if e.sval in c.globals:
       return c.globals[e.sval]
     nil
-  of ekIndex:
+  of IndexExpr:
     let b = c.declTypeOf(e.kids[0])
-    if b != nil and b.kind == tyArray: b.elem else: nil
-  of ekField:
+    if b != nil and b.kind == ArrayType: b.elem else: nil
+  of FieldExpr:
     let b = c.declTypeOf(e.kids[0])
-    if b != nil and b.kind == tyObject:
+    if b != nil and b.kind == ObjectType:
       for f in b.fields:
         if f.name == e.sval:
           return f.typ
@@ -644,9 +644,9 @@ proc declFact(c: Ctx, e: Expr, loopVar: string, loopFact: Fact):
   ## variable only — no flow facts, so it is valid on every iteration.
   result = (false, fullFact())
   case e.kind
-  of ekInt:
+  of IntExpr:
     result = (true, Fact(lo: e.ival, hi: e.ival))
-  of ekIdent:
+  of IdentExpr:
     if e.sval == loopVar:
       result = (true, loopFact)
     elif e.sval in c.consts:
@@ -654,16 +654,16 @@ proc declFact(c: Ctx, e: Expr, loopVar: string, loopFact: Fact):
       result = (true, Fact(lo: v, hi: v))
     else:
       let t = c.declTypeOf(e)
-      if t != nil and t.kind == tyInt:
+      if t != nil and t.kind == IntType:
         result = (true, typFact(t))
-  of ekNeg:
+  of NegExpr:
     let a = c.declFact(e.kids[0], loopVar, loopFact)
     if a.ok:
       let l = satNeg(a.f.hi)
       let h = satNeg(a.f.lo)
       if not (l.ov or h.ov):
         result = (true, Fact(lo: l.v, hi: h.v))
-  of ekBin:
+  of BinExpr:
     let a = c.declFact(e.kids[0], loopVar, loopFact)
     let b = c.declFact(e.kids[1], loopVar, loopFact)
     if a.ok and b.ok:
@@ -686,14 +686,14 @@ proc declFact(c: Ctx, e: Expr, loopVar: string, loopFact: Fact):
             result = (true, modF(a.f, b.f))
       else:
         discard
-  of ekIndex, ekField:
+  of IndexExpr, FieldExpr:
     let t = c.declTypeOf(e)
-    if t != nil and t.kind == tyInt:
+    if t != nil and t.kind == IntType:
       result = (true, typFact(t))
-  of ekCall:
+  of CallExpr:
     if e.sval in c.routineTab:
       let rt = c.routineTab[e.sval].ret
-      if rt != nil and rt.kind == tyInt:
+      if rt != nil and rt.kind == IntType:
         result = (true, typFact(rt))
   else:
     discard
@@ -709,10 +709,10 @@ proc accumWiden(c: Ctx, s: Stmt, assigned: HashSet[string],
     var declTyp: Typ = nil
     for i in countdown(c.scopes.len - 1, 0):
       if v in c.scopes[i]:
-        if c.scopes[i][v].kind == syLocal:
+        if c.scopes[i][v].kind == LocalSym:
           declTyp = c.scopes[i][v].typ
         break
-    if declTyp == nil or declTyp.kind != tyInt:
+    if declTyp == nil or declTyp.kind != IntType:
       continue
     var sites: seq[tuple[sign: int, e: Expr]]
     var ok = true
@@ -726,20 +726,20 @@ proc accumWiden(c: Ctx, s: Stmt, assigned: HashSet[string],
           c.collectAssignedExpr(a, touched)
         for br in st.elifs:
           c.collectAssignedExpr(br.cond, touched)
-        if v in touched or (st.kind == skWith and st.name == v):
+        if v in touched or (st.kind == WithStmt and st.name == v):
           ok = false
-        if st.kind == skAssign and st.lhs.kind == ekIdent and st.lhs.sval == v:
+        if st.kind == AssignStmt and st.lhs.kind == IdentExpr and st.lhs.sval == v:
           if nested:
             ok = false
           else:
             let r = st.rhs
-            if r.kind == ekBin and r.sval in ["+", "-"] and
-                r.kids[0].kind == ekIdent and r.kids[0].sval == v and
+            if r.kind == BinExpr and r.sval in ["+", "-"] and
+                r.kids[0].kind == IdentExpr and r.kids[0].sval == v and
                 not containsIdent(r.kids[1], v):
               sites.add (sign: (if r.sval == "+": 1 else: -1), e: r.kids[1])
             else:
               ok = false
-        let deeper = nested or st.kind in {skWhile, skFor, skLoop, skForEach}
+        let deeper = nested or st.kind in {WhileStmt, ForStmt, LoopStmt, ForEachStmt}
         walk(st.body, deeper)
         for br in st.elifs:
           walk(br.body, deeper)
@@ -810,13 +810,13 @@ proc whileBound(c: Ctx, s: Stmt): int64 =
   var cands: Table[string, Cand]
 
   proc classify(st: Stmt, top: bool) =
-    if st.kind == skAssign and st.lhs.kind == ekIdent:
+    if st.kind == AssignStmt and st.lhs.kind == IdentExpr:
       let v = st.lhs.sval
       var cd = cands.getOrDefault(v, Cand())
       var thisDir = 0
       var step = 1'i64
       let r = st.rhs
-      if r.kind == ekBin and r.kids[0].kind == ekIdent and r.kids[0].sval == v:
+      if r.kind == BinExpr and r.kids[0].kind == IdentExpr and r.kids[0].sval == v:
         let kc = c.tryConstEval(r.kids[1])
         if kc.known:
           if r.sval == "+" and kc.val >= 1:
@@ -835,7 +835,7 @@ proc whileBound(c: Ctx, s: Stmt): int64 =
         if top:
           cd.top = true
       cands[v] = cd
-    if st.kind == skWith:
+    if st.kind == WithStmt:
       var cd = cands.getOrDefault(st.name, Cand())
       cd.bad = true
       cands[st.name] = cd
@@ -867,10 +867,10 @@ proc whileBound(c: Ctx, s: Stmt): int64 =
     var t: Typ = nil
     for i in countdown(c.scopes.len - 1, 0):
       if v in c.scopes[i]:
-        if c.scopes[i][v].kind == syLocal:
+        if c.scopes[i][v].kind == LocalSym:
           t = c.scopes[i][v].typ
         break
-    if t == nil or t.kind != tyInt:
+    if t == nil or t.kind != IntType:
       continue
     var bound = 0'i64
     case cd.dir
@@ -890,10 +890,10 @@ proc typRangeEq(a, b: Typ): bool =
   if a.kind != b.kind:
     return false
   case a.kind
-  of tyInt: a.rlo == b.rlo and a.rhi == b.rhi
-  of tyArray, tySeq, tyQueue: a.len == b.len and typRangeEq(a.elem, b.elem)
-  of tyMapD: typRangeEq(a.val, b.val)
-  of tyMapS: a.len == b.len and typRangeEq(a.elem, b.elem) and
+  of IntType: a.rlo == b.rlo and a.rhi == b.rhi
+  of ArrayType, SeqType, QueueType: a.len == b.len and typRangeEq(a.elem, b.elem)
+  of DenseMapType: typRangeEq(a.val, b.val)
+  of SparseMapType: a.len == b.len and typRangeEq(a.elem, b.elem) and
     typRangeEq(a.val, b.val)
   else: true
 
@@ -902,10 +902,10 @@ proc typRangeFits(a, b: Typ): bool =
   if a.kind != b.kind:
     return false
   case a.kind
-  of tyInt: a.rlo >= b.rlo and a.rhi <= b.rhi
-  of tyArray, tySeq, tyQueue: a.len == b.len and typRangeFits(a.elem, b.elem)
-  of tyMapD: typRangeFits(a.val, b.val)
-  of tyMapS: a.len == b.len and typRangeFits(a.elem, b.elem) and
+  of IntType: a.rlo >= b.rlo and a.rhi <= b.rhi
+  of ArrayType, SeqType, QueueType: a.len == b.len and typRangeFits(a.elem, b.elem)
+  of DenseMapType: typRangeFits(a.val, b.val)
+  of SparseMapType: a.len == b.len and typRangeFits(a.elem, b.elem) and
     typRangeFits(a.val, b.val)
   else: true
 
@@ -914,9 +914,9 @@ proc zeroOk(t: Typ): bool =
   if t.opt:
     return true # zero-init means none
   case t.kind
-  of tyInt: t.rlo <= 0 and t.rhi >= 0
-  of tyArray: zeroOk(t.elem)
-  of tyObject:
+  of IntType: t.rlo <= 0 and t.rhi >= 0
+  of ArrayType: zeroOk(t.elem)
+  of ObjectType:
     for f in t.fields:
       if not zeroOk(f.typ):
         return false
@@ -927,26 +927,26 @@ proc zeroOk(t: Typ): bool =
 
 proc checkExpr(c: var Ctx, e: Expr): Typ =
   case e.kind
-  of ekInt:
+  of IntExpr:
     e.typ = intType()
     e.setFact Fact(lo: e.ival, hi: e.ival, notZero: e.ival != 0)
-  of ekBool:
-    e.typ = Typ(kind: tyBool)
-  of ekNone:
+  of BoolExpr:
+    e.typ = Typ(kind: BoolType)
+  of NoneExpr:
     err(e.line, "none needs an optional destination " &
       "(var x: int? = none / x = none / return none)")
-  of ekStr:
-    if e.typ == nil or e.typ.kind != tyStr:
-      e.typ = Typ(kind: tyString)
-  of ekIdent:
+  of StrExpr:
+    if e.typ == nil or e.typ.kind != StringType:
+      e.typ = Typ(kind: StringLitType)
+  of IdentExpr:
     c.resolveIdent(e)
     if e.typ != nil and e.typ.opt and c.factEligibleIdent(e) and
         (e.sval & "@ok") in c.facts:
       # Proven present: the name acts as its base type from here.
       e.typ = deOpt(e.typ)
       e.unwrapOpt = true
-    if e.typ.kind == tyInt and not e.typ.opt:
-      if e.symKind == syConst:
+    if e.typ.kind == IntType and not e.typ.opt:
+      if e.symKind == ConstSym:
         let v = c.consts[e.sval]
         e.setFact Fact(lo: v, hi: v, notZero: v != 0)
       elif c.factName(e) != "":
@@ -955,10 +955,10 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         # Unowned globals outside their lock and var params: only the
         # declared range invariant holds.
         e.setFact typFact(e.typ)
-  of ekNeg:
+  of NegExpr:
     let nt = c.expectVal(e.kids[0])
     rejectOpt(nt, e.kids[0])
-    if nt.kind != tyInt:
+    if nt.kind != IntType:
       err(e.line, "unary '-' needs an int operand")
     let a = exprFact(e.kids[0])
     let l = satNeg(a.hi)
@@ -968,21 +968,21 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         rangeStr(a) & ")")
     e.typ = intType()
     e.setFact Fact(lo: l.v, hi: h.v, notZero: a.notZero)
-  of ekNot:
-    if c.expectVal(e.kids[0]).kind != tyBool:
+  of NotExpr:
+    if c.expectVal(e.kids[0]).kind != BoolType:
       err(e.line, "'not' needs a bool operand")
-    e.typ = Typ(kind: tyBool)
-  of ekBin:
+    e.typ = Typ(kind: BoolType)
+  of BinExpr:
     case e.sval
     of "and", "or":
-      if c.expectVal(e.kids[0]).kind != tyBool:
+      if c.expectVal(e.kids[0]).kind != BoolType:
         err(e.line, "'" & e.sval & "' needs bool operands")
       # Short-circuit: the right side is only evaluated when the left side
       # already held (and) or failed (or) — check it under those facts.
       let saved = c.facts
       c.addCondFacts(e.kids[0], negated = e.sval == "or")
       inc c.mutBan # the right side may be skipped at runtime
-      if c.expectVal(e.kids[1]).kind != tyBool:
+      if c.expectVal(e.kids[1]).kind != BoolType:
         err(e.line, "'" & e.sval & "' needs bool operands")
       dec c.mutBan
       c.facts = saved
@@ -991,7 +991,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       c.collectAssignedExpr(e.kids[1], rhsTouched)
       for n in rhsTouched:
         c.delFacts n
-      e.typ = Typ(kind: tyBool)
+      e.typ = Typ(kind: BoolType)
     else:
       let a = c.expectVal(e.kids[0])
       let b = c.expectVal(e.kids[1])
@@ -999,7 +999,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       rejectOpt(b, e.kids[1])
       case e.sval
       of "+", "-", "*", "/", "%":
-        if a.kind != tyInt or b.kind != tyInt:
+        if a.kind != IntType or b.kind != IntType:
           err(e.line, "'" & e.sval & "' needs int operands, got " & $a & " and " & $b)
         let af = exprFact(e.kids[0])
         let bf = exprFact(e.kids[1])
@@ -1028,7 +1028,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           if not (bf.notZero or bf.lo > 0 or bf.hi < 0):
             if bf.lo == 0 and bf.hi == 0:
               err(e.line, word & " by zero")
-            elif d.kind == ekIdent and c.factName(d) != "":
+            elif d.kind == IdentExpr and c.factName(d) != "":
               err(e.line, "cannot prove '" & d.sval &
                 "' is not zero here; guard the division with 'if " & d.sval &
                 " != 0:'")
@@ -1044,45 +1044,45 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             e.setFact modF(af, bf)
         e.typ = intType()
       of "<", "<=", ">", ">=":
-        if a.kind != tyInt or b.kind != tyInt:
+        if a.kind != IntType or b.kind != IntType:
           err(e.line, "'" & e.sval & "' needs int operands, got " & $a & " and " & $b)
-        e.typ = Typ(kind: tyBool)
+        e.typ = Typ(kind: BoolType)
       of "==", "!=":
-        if not typEq(a, b) or a.kind notin {tyInt, tyBool}:
+        if not typEq(a, b) or a.kind notin {IntType, BoolType}:
           err(e.line, "'" & e.sval & "' needs two ints or two bools, got " &
             $a & " and " & $b)
-        e.typ = Typ(kind: tyBool)
+        e.typ = Typ(kind: BoolType)
       else:
         err(e.line, "internal: unknown operator " & e.sval)
-  of ekIndex:
+  of IndexExpr:
     let base = c.expectVal(e.kids[0])
-    if base.kind in {tyMapD, tyMapS}:
+    if base.kind in {DenseMapType, SparseMapType}:
       # Reading m[k] must be proven present: a contains test, a strict
       # write, or iteration provides the fact.
       var kt = c.expectVal(e.kids[1])
-      if base.kind == tyMapS and c.coerceStrLit(e.kids[1], base.elem):
+      if base.kind == SparseMapType and c.coerceStrLit(e.kids[1], base.elem):
         kt = base.elem
-      let want = if base.kind == tyMapD: intType() else: base.elem
-      if (base.kind == tyMapD and kt.kind != tyInt) or
-          (base.kind == tyMapS and not typEq(kt, base.elem)):
+      let want = if base.kind == DenseMapType: intType() else: base.elem
+      if (base.kind == DenseMapType and kt.kind != IntType) or
+          (base.kind == SparseMapType and not typEq(kt, base.elem)):
         err(e.kids[1].line, "map key must be " & $base.elem & ", got " & $kt)
       let key = c.mapFactKey(e.kids[0], e.kids[1])
       if key == "" or key notin c.facts:
         err(e.line, "cannot prove the key is present; test with 'if " &
-          (if e.kids[0].kind == ekIdent: e.kids[0].sval else: "m") &
+          (if e.kids[0].kind == IdentExpr: e.kids[0].sval else: "m") &
           ".contains(k):' first, or use .get(k, fallback)")
       e.typ = base.val
       e.setFact typFact(base.val)
       return e.typ
-    if base.kind notin {tyArray, tySeq, tyStr}:
+    if base.kind notin {ArrayType, SeqType, StringType}:
       err(e.line, "'[]' needs an array, seq, string, or map, got " & $base)
-    if c.expectVal(e.kids[1]).kind != tyInt:
+    if c.expectVal(e.kids[1]).kind != IntType:
       err(e.line, "index must be an int")
     let f = exprFact(e.kids[1])
     if f.lo > base.len - 1 or f.hi < 0:
       err(e.line, "index " & rangeStr(f) & " is always out of bounds for " &
         $base)
-    if base.kind == tyArray:
+    if base.kind == ArrayType:
       # The index proof: the index interval must fit inside 0 ..< len.
       if f.lo < 0 or f.hi > base.len - 1:
         err(e.line, "cannot prove index is inside 0 ..< " & $base.len &
@@ -1091,40 +1091,40 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     else:
       # Only the live part 0 ..< len of a seq/string is readable/writable.
       var lf = Fact(lo: 0, hi: base.len)
-      if e.kids[0].kind == ekIdent and c.factEligibleIdent(e.kids[0]):
+      if e.kids[0].kind == IdentExpr and c.factEligibleIdent(e.kids[0]):
         lf = c.curFact(e.kids[0].sval & ".len")
       if f.lo < 0 or f.hi > lf.lo - 1:
         err(e.line, "cannot prove index is below the length (index is " &
           rangeStr(f) & ", length is at least " & $lf.lo &
           "); test .len first")
-      e.typ = if base.kind == tySeq: base.elem else: intType(0, 255)
+      e.typ = if base.kind == SeqType: base.elem else: intType(0, 255)
     e.setFact typFact(e.typ)
-  of ekField:
+  of FieldExpr:
     let base = c.expectVal(e.kids[0])
     if e.sval == "ok" and (base.opt or e.kids[0].unwrapOpt):
       # Reading the presence flag never needs a proof; undo any strip so
       # codegen reads the flag, not the value.
       if e.kids[0].unwrapOpt:
         e.kids[0].unwrapOpt = false
-        if e.kids[0].kind == ekIdent:
+        if e.kids[0].kind == IdentExpr:
           e.kids[0].typ = c.declTypeOf(e.kids[0])
         elif e.kids[0].typ != nil:
           e.kids[0].typ = optOf(e.kids[0].typ)
       e.isOptOk = true
-      e.typ = Typ(kind: tyBool)
+      e.typ = Typ(kind: BoolType)
       return e.typ
     rejectOpt(base, e.kids[0])
-    if base.kind in {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS}:
+    if base.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
       if e.sval != "len":
         err(e.line, $base & " has no property '" & e.sval & "' (only .len)")
       e.typ = intType(0,
-        (if base.kind in {tySet, tyMapD}: base.setSize else: base.len))
+        (if base.kind in {SetType, DenseMapType}: base.setSize else: base.len))
       let key = c.lenPathName(e)
       if key != "":
         e.setFact c.curFact(key)
       else:
         e.setFact Fact(lo: 0, hi: base.len)
-    elif base.kind == tyObject:
+    elif base.kind == ObjectType:
       for f in base.fields:
         if f.name == e.sval:
           e.typ = f.typ
@@ -1140,14 +1140,14 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       e.setFact typFact(e.typ)
     else:
       err(e.line, "'.' needs an object, seq, or string, got " & $base)
-  of ekMethod:
+  of MethodExpr:
     var bt = c.expectVal(e.kids[0])
     let nArgs = e.kids.len - 1
     if e.sval == "or":
       # Total read of an optional: the value, or the fallback.
       if nArgs != 1:
         err(e.line, "or takes one fallback argument")
-      if e.kids[0].kind == ekIdent and e.kids[0].unwrapOpt:
+      if e.kids[0].kind == IdentExpr and e.kids[0].unwrapOpt:
         # Already proven: undo the strip, or() still works.
         e.kids[0].unwrapOpt = false
         bt = c.declTypeOf(e.kids[0])
@@ -1159,7 +1159,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         ft = deOpt(bt)
       if not typEq(ft, deOpt(bt)):
         err(e.kids[1].line, "fallback must be " & $deOpt(bt) & ", got " & $ft)
-      if deOpt(bt).kind == tyInt and not exprFact(e.kids[1]).fits(deOpt(bt)):
+      if deOpt(bt).kind == IntType and not exprFact(e.kids[1]).fits(deOpt(bt)):
         err(e.kids[1].line, "cannot prove fallback fits " & $deOpt(bt))
       e.typ = deOpt(bt)
       e.setFact typFact(e.typ)
@@ -1170,7 +1170,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         err(e.line, "a mutating method cannot appear here: this position " &
           "may not run exactly once (loop conditions re-run; elif and " &
           "and/or right sides may be skipped); do it in its own statement")
-      if e.kids[0].kind != ekIdent:
+      if e.kids[0].kind != IdentExpr:
         err(e.line, "mutate a seq/string through a plain variable name")
       if not e.kids[0].mut:
         err(e.line, "cannot mutate immutable '" & e.kids[0].sval & "'")
@@ -1183,22 +1183,22 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       for fk in staleKeys:
         c.facts.del fk
     var key = ""
-    if e.kids[0].kind == ekIdent and c.factEligibleIdent(e.kids[0]):
+    if e.kids[0].kind == IdentExpr and c.factEligibleIdent(e.kids[0]):
       key = e.kids[0].sval & ".len"
     var lf = Fact(lo: 0, hi: (
-      if bt.kind in {tySeq, tyStr, tyQueue, tyMapS}: bt.len
-      elif bt.kind in {tySet, tyMapD}: bt.setSize
+      if bt.kind in {SeqType, StringType, QueueType, SparseMapType}: bt.len
+      elif bt.kind in {SetType, DenseMapType}: bt.setSize
       else: 0))
     if key != "":
       lf = c.curFact(key)
     case bt.kind
-    of tySeq, tyQueue:
+    of SeqType, QueueType:
       case e.sval
       of "add", "push":
         if nArgs != 1:
           err(e.line, e.sval & " takes one argument")
         var at: Typ = nil
-        if e.kids[1].kind == ekNone:
+        if e.kids[1].kind == NoneExpr:
           if not bt.elem.opt:
             err(e.kids[1].line, "none needs an optional destination")
           e.kids[1].typ = bt.elem
@@ -1211,7 +1211,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             at = bt.elem
         if not typEq(at, bt.elem):
           err(e.kids[1].line, "cannot add " & $at & " to " & $bt)
-        if bt.elem.kind == tyInt and not exprFact(e.kids[1]).fits(bt.elem):
+        if bt.elem.kind == IntType and not exprFact(e.kids[1]).fits(bt.elem):
           err(e.kids[1].line, "cannot prove value (" &
             rangeStr(exprFact(e.kids[1])) & ") fits element range " &
             $bt.elem & "; guard or clamp first")
@@ -1228,7 +1228,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         else:
           if key != "":
             c.facts[key] = Fact(lo: lf.lo, hi: min(lf.hi + 1, bt.len))
-          e.typ = Typ(kind: tyBool)
+          e.typ = Typ(kind: BoolType)
       of "pop":
         if nArgs != 0:
           err(e.line, "pop takes no arguments")
@@ -1247,25 +1247,25 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         e.typ = nil
       else:
         err(e.line, $bt & " has no method '" & e.sval & "'")
-    of tyStr:
+    of StringType:
       case e.sval
       of "add":
         if nArgs != 1:
           err(e.line, "add takes one argument")
         let a = e.kids[1]
         var addLo, addHi: int64
-        if a.kind == ekStr:
+        if a.kind == StrExpr:
           discard c.checkExpr(a)
           addLo = a.sval.len
           addHi = a.sval.len
         else:
-          if a.kind notin {ekIdent, ekField, ekIndex}:
+          if a.kind notin {IdentExpr, FieldExpr, IndexExpr}:
             err(a.line, "put the appended string in a variable first")
           let at = c.expectVal(a)
-          if at.kind != tyStr:
+          if at.kind != StringType:
             err(a.line, "can only add a string literal or a string, got " & $at)
           var alf = Fact(lo: 0, hi: at.len)
-          if a.kind == ekIdent and c.factEligibleIdent(a):
+          if a.kind == IdentExpr and c.factEligibleIdent(a):
             alf = c.curFact(a.sval & ".len")
           addLo = alf.lo
           addHi = alf.hi
@@ -1285,12 +1285,12 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         e.typ = nil
       else:
         err(e.line, $bt & " has no method '" & e.sval & "'")
-    of tySet:
+    of SetType:
       case e.sval
       of "incl", "excl":
         if nArgs != 1:
           err(e.line, e.sval & " takes one argument")
-        if c.expectVal(e.kids[1]).kind != tyInt:
+        if c.expectVal(e.kids[1]).kind != IntType:
           err(e.kids[1].line, e.sval & " needs an int value")
         if not exprFact(e.kids[1]).fits(bt.elem):
           err(e.kids[1].line, "cannot prove value (" &
@@ -1305,12 +1305,12 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       of "contains":
         if nArgs != 1:
           err(e.line, "contains takes one argument")
-        if e.kids[0].kind notin {ekIdent, ekField, ekIndex}:
+        if e.kids[0].kind notin {IdentExpr, FieldExpr, IndexExpr}:
           err(e.line, "put the set in a variable first")
-        if c.expectVal(e.kids[1]).kind != tyInt:
+        if c.expectVal(e.kids[1]).kind != IntType:
           err(e.kids[1].line, "contains needs an int value")
         # Total: out-of-range values are simply not in the set.
-        e.typ = Typ(kind: tyBool)
+        e.typ = Typ(kind: BoolType)
       of "clear":
         if nArgs != 0:
           err(e.line, "clear takes no arguments")
@@ -1319,8 +1319,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         e.typ = nil
       else:
         err(e.line, $bt & " has no method '" & e.sval & "'")
-    of tyMapD, tyMapS:
-      let dense = bt.kind == tyMapD
+    of DenseMapType, SparseMapType:
+      let dense = bt.kind == DenseMapType
       case e.sval
       of "put":
         if nArgs != 2:
@@ -1329,7 +1329,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if not dense and c.coerceStrLit(e.kids[1], bt.elem):
           kt = bt.elem
         if dense:
-          if kt.kind != tyInt:
+          if kt.kind != IntType:
             err(e.kids[1].line, "map key must be an int")
           if not exprFact(e.kids[1]).fits(bt.elem):
             err(e.kids[1].line, "cannot prove key (" &
@@ -1338,11 +1338,11 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         else:
           if not typEq(kt, bt.elem):
             err(e.kids[1].line, "map key must be " & $bt.elem & ", got " & $kt)
-          if bt.elem.kind == tyInt and
+          if bt.elem.kind == IntType and
               not exprFact(e.kids[1]).fits(bt.elem):
             err(e.kids[1].line, "cannot prove key fits " & $bt.elem)
         var vt: Typ = nil
-        if e.kids[2].kind == ekNone:
+        if e.kids[2].kind == NoneExpr:
           if not bt.val.opt:
             err(e.kids[2].line, "none needs an optional destination")
           e.kids[2].typ = bt.val
@@ -1355,7 +1355,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             vt = bt.val
         if not typEq(vt, bt.val):
           err(e.kids[2].line, "map value must be " & $bt.val & ", got " & $vt)
-        if bt.val.kind == tyInt and not exprFact(e.kids[2]).fits(bt.val):
+        if bt.val.kind == IntType and not exprFact(e.kids[2]).fits(bt.val):
           err(e.kids[2].line, "cannot prove value (" &
             rangeStr(exprFact(e.kids[2])) & ") fits " & $bt.val)
         let cap = if dense: bt.setSize else: bt.len
@@ -1368,18 +1368,18 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             c.facts[pk] = Fact(lo: 1, hi: 1)
           e.typ = nil
         else:
-          e.typ = Typ(kind: tyBool)
+          e.typ = Typ(kind: BoolType)
       of "get":
         if nArgs != 2:
           err(e.line, "get takes a key and a fallback")
         var kt = c.expectVal(e.kids[1])
         if not dense and c.coerceStrLit(e.kids[1], bt.elem):
           kt = bt.elem
-        if (dense and kt.kind != tyInt) or
+        if (dense and kt.kind != IntType) or
             (not dense and not typEq(kt, bt.elem)):
           err(e.kids[1].line, "map key must be " & $bt.elem & ", got " & $kt)
         var ft: Typ = nil
-        if e.kids[2].kind == ekNone:
+        if e.kids[2].kind == NoneExpr:
           if not bt.val.opt:
             err(e.kids[2].line, "none needs an optional destination")
           e.kids[2].typ = bt.val
@@ -1392,29 +1392,29 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             ft = bt.val
         if not typEq(ft, bt.val):
           err(e.kids[2].line, "fallback must be " & $bt.val & ", got " & $ft)
-        if bt.val.kind == tyInt and not exprFact(e.kids[2]).fits(bt.val):
+        if bt.val.kind == IntType and not exprFact(e.kids[2]).fits(bt.val):
           err(e.kids[2].line, "cannot prove fallback fits " & $bt.val)
         e.typ = bt.val
         e.setFact typFact(bt.val)
       of "contains":
         if nArgs != 1:
           err(e.line, "contains takes one argument")
-        if e.kids[0].kind notin {ekIdent, ekField, ekIndex}:
+        if e.kids[0].kind notin {IdentExpr, FieldExpr, IndexExpr}:
           err(e.line, "put the map in a variable first")
         var kt = c.expectVal(e.kids[1])
         if not dense and c.coerceStrLit(e.kids[1], bt.elem):
           kt = bt.elem
-        if (dense and kt.kind != tyInt) or
+        if (dense and kt.kind != IntType) or
             (not dense and not typEq(kt, bt.elem)):
           err(e.kids[1].line, "map key must be " & $bt.elem & ", got " & $kt)
-        e.typ = Typ(kind: tyBool)
+        e.typ = Typ(kind: BoolType)
       of "remove":
         if nArgs != 1:
           err(e.line, "remove takes one argument")
         var kt = c.expectVal(e.kids[1])
         if not dense and c.coerceStrLit(e.kids[1], bt.elem):
           kt = bt.elem
-        if (dense and kt.kind != tyInt) or
+        if (dense and kt.kind != IntType) or
             (not dense and not typEq(kt, bt.elem)):
           err(e.kids[1].line, "map key must be " & $bt.elem & ", got " & $kt)
         if key != "":
@@ -1444,7 +1444,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     else:
       err(e.line, "'." & e.sval &
         "()' needs a seq, string, set, queue, or map, got " & $bt)
-  of ekCall:
+  of CallExpr:
     let name = e.sval
     if name notin c.allRoutines:
       err(e.line, "unknown func or proc: '" & name & "'")
@@ -1454,9 +1454,9 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       err(e.line, "'" & name & "' is called before its declaration " &
         "(declare-before-use keeps the call graph recursion-free)")
     let r = c.routineTab[name]
-    if r.kind == rkThread:
+    if r.kind == ThreadRoutine:
       err(e.line, "threads start at program start; they cannot be called")
-    if c.cur.kind == rkFunc and r.kind != rkFunc:
+    if c.cur.kind == FuncRoutine and r.kind != FuncRoutine:
       err(e.line, "func '" & c.cur.name & "' can only call other funcs; '" &
         name & "' is a " & $r.kind)
     if e.kids.len != r.params.len:
@@ -1465,7 +1465,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     for i, arg in e.kids:
       let pt = r.params[i]
       var at: Typ = nil
-      if arg.kind == ekNone:
+      if arg.kind == NoneExpr:
         if not pt.typ.opt:
           err(arg.line, "none needs an optional parameter")
         arg.typ = pt.typ
@@ -1480,26 +1480,26 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         err(arg.line, "argument " & $(i + 1) & " of '" & name & "': expected " &
           $pt.typ & ", got " & $at)
       if pt.isVar:
-        if arg.kind notin {ekIdent, ekIndex, ekField}:
+        if arg.kind notin {IdentExpr, IndexExpr, FieldExpr}:
           err(arg.line, "argument for var parameter '" & pt.name &
             "' must be a variable")
         if pathHasMapIndex(arg):
           err(arg.line, "a map element cannot be passed as var; copy it " &
             "out, change it, and put it back")
         let root = arg.rootIdent
-        if root.kind != ekIdent or not root.mut:
+        if root.kind != IdentExpr or not root.mut:
           err(arg.line, "argument for var parameter '" & pt.name &
             "' must be mutable")
         if not typRangeEq(at, pt.typ):
           err(arg.line, "argument for var parameter '" & pt.name &
             "' must have exactly the range " & $pt.typ & " (got " & $at & ")")
         if name in c.routineAccess:
-          if root.symKind == syGlobal and root.sval in c.routineAccess[name]:
+          if root.symKind == GlobalSym and root.sval in c.routineAccess[name]:
             err(arg.line, "cannot pass global '" & root.sval &
               "' as a var argument to '" & name & "': it also accesses '" &
               root.sval & "' directly, and writes through the parameter " &
               "would make its facts lie (aliasing)")
-          if root.symKind == syParam and root.isVarParam:
+          if root.symKind == ParamSym and root.isVarParam:
             for gname in c.routineAccess[name]:
               if gname in c.globals and typEq(c.globals[gname], root.typ):
                 err(arg.line, "cannot forward var parameter '" & root.sval &
@@ -1508,7 +1508,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
                   "' might alias")
         c.delFacts root.sval
       else:
-        if pt.typ.kind == tyInt:
+        if pt.typ.kind == IntType:
           if not exprFact(arg).fits(pt.typ):
             err(arg.line, "cannot prove argument " & $(i + 1) & " of '" &
               name & "' (" & rangeStr(exprFact(arg)) & ") fits parameter '" &
@@ -1521,7 +1521,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       for g in c.routineWrites[name]:
         c.delFacts g
     e.typ = r.ret
-    if r.ret != nil and r.ret.kind == tyInt:
+    if r.ret != nil and r.ret.kind == IntType:
       e.setFact typFact(r.ret)
   e.typ
 
@@ -1537,12 +1537,12 @@ proc checkBody(c: var Ctx, body: seq[Stmt]) =
 
 proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
   case s.kind
-  of skVar, skLet:
-    if s.typ != nil and s.typ.kind == tyLock:
+  of VarStmt, LetStmt:
+    if s.typ != nil and s.typ.kind == LockType:
       err(s.line, "a Lock must be a global")
     var t = s.typ
     var initFact = Fact(lo: 0, hi: 0, notZero: false)
-    if s.init != nil and s.init.kind == ekNone:
+    if s.init != nil and s.init.kind == NoneExpr:
       if t == nil or not t.opt:
         err(s.line, "none needs an optional destination " &
           "(e.g. var x: int? = none)")
@@ -1553,21 +1553,21 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         it = t
       elif c.coerceStrLit(s.init, t):
         it = t
-      elif it.kind == tyString:
+      elif it.kind == StringLitType:
         err(s.line, "string literals need a string[N] destination " &
           "(e.g. var s: string[20] = \"hi\")")
-      if it.kind == tyArray:
+      if it.kind == ArrayType:
         err(s.line, "arrays cannot be copied; copy elements in a loop")
       if t == nil:
         t = it
       elif not typEq(t, it):
         err(s.line, "type mismatch: declared " & $t & ", initializer is " & $it)
       initFact = exprFact(s.init)
-      if t.kind == tyInt and not initFact.fits(t):
+      if t.kind == IntType and not initFact.fits(t):
         err(s.line, "cannot prove initializer (" & rangeStr(initFact) &
           ") fits '" & s.name & "' (" & $t & "); guard or clamp first")
     else:
-      if s.kind == skLet:
+      if s.kind == LetStmt:
         err(s.line, "let requires an initializer")
       if t == nil:
         err(s.line, "variable needs a type or an initializer")
@@ -1577,40 +1577,40 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     if c.isDeclared(s.name):
       err(s.line, "'" & s.name & "' is already declared (shadowing is not allowed)")
     s.typ = t
-    c.scopes[^1][s.name] = Sym(kind: syLocal, typ: t, mutable: s.kind == skVar)
+    c.scopes[^1][s.name] = Sym(kind: LocalSym, typ: t, mutable: s.kind == VarStmt)
     if t.opt:
       # Only a DEFINITE initializer grants ok: a wrapped plain value or a
       # proven optional. An unproven optional (or none) grants nothing.
       if s.init != nil and (s.init.wrapOpt or s.init.unwrapOpt):
         c.facts[s.name & "@ok"] = Fact(lo: 1, hi: 1)
-        if t.kind == tyInt:
+        if t.kind == IntType:
           c.facts[s.name] = initFact
-    elif t.kind == tyInt:
+    elif t.kind == IntType:
       c.facts[s.name] = initFact
-    elif t.kind in {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS}:
+    elif t.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
       if s.init == nil:
         c.facts[s.name & ".len"] = Fact(lo: 0, hi: 0) # zero-init = empty
-      elif s.init.kind == ekStr:
+      elif s.init.kind == StrExpr:
         c.facts[s.name & ".len"] =
           Fact(lo: s.init.sval.len, hi: s.init.sval.len)
-      elif s.init.kind == ekIdent and c.factEligibleIdent(s.init):
+      elif s.init.kind == IdentExpr and c.factEligibleIdent(s.init):
         c.facts[s.name & ".len"] = c.curFact(s.init.sval & ".len")
-  of skAssign:
-    if s.lhs.kind == ekIndex:
+  of AssignStmt:
+    if s.lhs.kind == IndexExpr:
       let bt = c.expectVal(s.lhs.kids[0])
-      if bt.kind in {tyMapD, tyMapS}:
+      if bt.kind in {DenseMapType, SparseMapType}:
         # m[k] = v: strict insert-or-update. Dense: the key must fit the
         # range (there is a slot for every key). Sparse: prove presence
         # (update) or room (insert). Either way the key is present after.
-        if s.lhs.kids[0].kind != ekIdent:
+        if s.lhs.kids[0].kind != IdentExpr:
           err(s.lhs.line, "write a map through a plain variable name")
         if not s.lhs.kids[0].mut:
           err(s.lhs.line, "cannot mutate immutable '" & s.lhs.kids[0].sval & "'")
         var kt = c.expectVal(s.lhs.kids[1])
-        if bt.kind == tyMapS and c.coerceStrLit(s.lhs.kids[1], bt.elem):
+        if bt.kind == SparseMapType and c.coerceStrLit(s.lhs.kids[1], bt.elem):
           kt = bt.elem
-        if bt.kind == tyMapD:
-          if kt.kind != tyInt:
+        if bt.kind == DenseMapType:
+          if kt.kind != IntType:
             err(s.lhs.kids[1].line, "map key must be an int")
           if not exprFact(s.lhs.kids[1]).fits(bt.elem):
             err(s.lhs.kids[1].line, "cannot prove key (" &
@@ -1620,11 +1620,11 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           if not typEq(kt, bt.elem):
             err(s.lhs.kids[1].line, "map key must be " & $bt.elem &
               ", got " & $kt)
-          if bt.elem.kind == tyInt and
+          if bt.elem.kind == IntType and
               not exprFact(s.lhs.kids[1]).fits(bt.elem):
             err(s.lhs.kids[1].line, "cannot prove key fits " & $bt.elem)
         var vt: Typ = nil
-        if s.rhs.kind == ekNone:
+        if s.rhs.kind == NoneExpr:
           if not bt.val.opt:
             err(s.line, "none needs an optional destination")
           s.rhs.typ = bt.val
@@ -1637,7 +1637,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
             vt = bt.val
         if not typEq(vt, bt.val):
           err(s.line, "map value must be " & $bt.val & ", got " & $vt)
-        if bt.val.kind == tyInt and not exprFact(s.rhs).fits(bt.val):
+        if bt.val.kind == IntType and not exprFact(s.rhs).fits(bt.val):
           err(s.line, "cannot prove value (" & rangeStr(exprFact(s.rhs)) &
             ") fits " & $bt.val)
         let mname = s.lhs.kids[0].sval
@@ -1645,11 +1645,11 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         var lkey = ""
         if c.factEligibleIdent(s.lhs.kids[0]):
           lkey = mname & ".len"
-        let cap = if bt.kind == tyMapD: bt.setSize else: bt.len
+        let cap = if bt.kind == DenseMapType: bt.setSize else: bt.len
         var lf = Fact(lo: 0, hi: cap)
         if lkey != "":
           lf = c.curFact(lkey)
-        if bt.kind == tyMapS:
+        if bt.kind == SparseMapType:
           if not ((pk != "" and pk in c.facts) or lf.hi < bt.len):
             err(s.line, "cannot prove this write fits: prove '" & mname &
               ".contains(k)' (update) or '" & mname & ".len < " & $bt.len &
@@ -1660,24 +1660,24 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           c.facts[pk] = Fact(lo: 1, hi: 1)
         s.lhs.typ = bt.val
         return
-    if s.lhs.kind == ekIdent:
+    if s.lhs.kind == IdentExpr:
       # An assignment target is a place, not a value: undo any ok-strip.
       discard c.expectVal(s.lhs)
       if s.lhs.unwrapOpt:
         s.lhs.unwrapOpt = false
         s.lhs.typ = c.declTypeOf(s.lhs)
     let lt =
-      if s.lhs.kind == ekIdent: s.lhs.typ
+      if s.lhs.kind == IdentExpr: s.lhs.typ
       else: c.expectVal(s.lhs)
     let root = s.lhs.rootIdent
-    if root.kind != ekIdent:
+    if root.kind != IdentExpr:
       err(s.lhs.line, "cannot assign to this expression")
     if not root.mut:
       err(s.lhs.line, "cannot assign to immutable '" & root.sval & "'")
-    if lt.kind == tyArray:
+    if lt.kind == ArrayType:
       err(s.lhs.line, "whole-array assignment is not allowed; copy elements in a loop")
     var rt: Typ = nil
-    if s.rhs.kind == ekNone:
+    if s.rhs.kind == NoneExpr:
       if lt == nil or not lt.opt:
         err(s.line, "none needs an optional destination")
       s.rhs.typ = lt
@@ -1691,18 +1691,18 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     if not typEq(lt, rt):
       err(s.line, "type mismatch: cannot assign " & $rt & " to " & $lt)
     # The store proof: the value must fit the declared range invariant.
-    if lt.kind == tyInt:
+    if lt.kind == IntType:
       let rf = exprFact(s.rhs)
       if not rf.fits(lt):
         err(s.line, "cannot prove value (" & rangeStr(rf) & ") fits " & $lt &
           "; guard or clamp first")
-    if s.lhs.kind == ekIdent:
+    if s.lhs.kind == IdentExpr:
       c.delFacts s.lhs.sval
       if lt != nil and lt.opt and c.factEligibleIdent(s.lhs):
         # A definite value (wrapped plain or a proven optional) grants ok.
         if s.rhs.wrapOpt or s.rhs.unwrapOpt:
           c.facts[s.lhs.sval & "@ok"] = Fact(lo: 1, hi: 1)
-          if lt.kind == tyInt:
+          if lt.kind == IntType:
             c.facts[s.lhs.sval] = exprFact(s.rhs)
       elif c.factName(s.lhs) != "":
         c.facts[s.lhs.sval] = exprFact(s.rhs)
@@ -1712,25 +1712,25 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       # changes no lengths and carries no facts, so nothing dies.
       var hasField = false
       var cur = s.lhs
-      while cur.kind in {ekIndex, ekField}:
-        if cur.kind == ekField:
+      while cur.kind in {IndexExpr, FieldExpr}:
+        if cur.kind == FieldExpr:
           hasField = true
         cur = cur.kids[0]
       if hasField:
         c.delFacts root.sval
-        if lt != nil and lt.opt and s.lhs.kind == ekField:
+        if lt != nil and lt.opt and s.lhs.kind == FieldExpr:
           # A definite store into an optional field grants its path.
           let pn = c.stablePathName(s.lhs)
           if pn != "" and (s.rhs.wrapOpt or s.rhs.unwrapOpt):
             c.facts[pn & "@ok"] = Fact(lo: 1, hi: 1)
-  of skIf:
+  of IfStmt:
     var negAcc = c.facts
     var branchFacts: seq[Table[string, Fact]]
     for i, br in s.elifs:
       c.facts = negAcc
       if i > 0:
         inc c.mutBan # elif conditions may be skipped at runtime
-      if c.expectVal(br.cond).kind != tyBool:
+      if c.expectVal(br.cond).kind != BoolType:
         err(br.cond.line, "condition must be a bool")
       if i > 0:
         dec c.mutBan
@@ -1758,7 +1758,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       c.facts = branchFacts[0]
     else:
       c.facts = c.joinFacts(branchFacts)
-  of skWhile:
+  of WhileStmt:
     # Facts about anything the body can change do not survive an iteration
     # (except widened accumulators); facts from the condition are
     # re-established on every entry.
@@ -1768,7 +1768,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     for n in assigned:
       c.delFacts n
     inc c.mutBan # the condition re-runs every iteration
-    if c.expectVal(s.cond).kind != tyBool:
+    if c.expectVal(s.cond).kind != BoolType:
       err(s.cond.line, "condition must be a bool")
     dec c.mutBan
     # The termination proof: strict induction progress, or an explicit
@@ -1796,12 +1796,12 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     # leave any other way (break, or the max cap).
     if s.maxTrips == 0 and not hasLoopBreak(s.body):
       c.addCondFacts(s.cond, negated = true)
-  of skFor:
+  of ForStmt:
     let loT = c.expectVal(s.lo)
     let hiT = c.expectVal(s.hi)
     rejectOpt(loT, s.lo)
     rejectOpt(hiT, s.hi)
-    if loT.kind != tyInt or hiT.kind != tyInt:
+    if loT.kind != IntType or hiT.kind != IntType:
       err(s.line, "for loop bounds must be ints")
     if c.isDeclared(s.name):
       err(s.line, "'" & s.name & "' is already declared (shadowing is not allowed)")
@@ -1826,7 +1826,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       c.facts[n] = f
     let dropped = c.facts
     c.scopes.add initTable[string, Sym]()
-    c.scopes[^1][s.name] = Sym(kind: syLocal, typ: intType(), mutable: false)
+    c.scopes[^1][s.name] = Sym(kind: LocalSym, typ: intType(), mutable: false)
     c.facts[s.name] = loopFact
     c.loopWiths.add c.withDepth
     for st in s.body:
@@ -1835,8 +1835,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     discard c.scopes.pop
     c.facts = dropped
     c.facts.del s.name
-  of skLoop:
-    if c.cur.kind != rkThread or not topLevel:
+  of LoopStmt:
+    if c.cur.kind != ThreadRoutine or not topLevel:
       err(s.line, "loop is only allowed at the top level of a thread body")
     c.dropAssigned(s.body)
     let dropped = c.facts
@@ -1844,15 +1844,15 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     c.checkBody(s.body)
     discard c.loopWiths.pop
     c.facts = dropped
-  of skForEach:
+  of ForEachStmt:
     let t = c.expectVal(s.value)
-    if t.kind notin {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS}:
+    if t.kind notin {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
       err(s.line, "for-in needs a seq, string, set, queue, or map to " &
         "iterate, got " & $t)
-    if s.name2.len > 0 and t.kind notin {tyMapD, tyMapS}:
+    if s.name2.len > 0 and t.kind notin {DenseMapType, SparseMapType}:
       err(s.line, "only maps iterate with two variables (for k, v in m:)")
     let root = s.value.rootIdent
-    if root.kind != ekIdent:
+    if root.kind != IdentExpr:
       err(s.line, "iterate a container through a variable path")
     if pathHasMapIndex(s.value):
       err(s.line, "a map element cannot be iterated in place; copy it out")
@@ -1862,13 +1862,13 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     c.collectAssigned(s.body, assigned)
     if root.sval in assigned:
       err(s.line, "cannot modify '" & root.sval & "' while iterating it")
-    s.tripBound = if t.kind == tySet: t.setSize else: t.len
+    s.tripBound = if t.kind == SetType: t.setSize else: t.len
     let elemT =
-      if t.kind in {tySeq, tyQueue}: t.elem
-      elif t.kind in {tySet, tyMapD, tyMapS}: t.elem
+      if t.kind in {SeqType, QueueType}: t.elem
+      elif t.kind in {SetType, DenseMapType, SparseMapType}: t.elem
       else: intType(0, 255)
     s.typ = elemT # recorded for codegen
-    if t.kind in {tyMapD, tyMapS}:
+    if t.kind in {DenseMapType, SparseMapType}:
       s.typ2 = t.val
     # Accumulators widen here too: the element variable is the loop
     # variable, bounded by the element type.
@@ -1879,12 +1879,12 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       c.facts[n] = f
     let dropped = c.facts
     c.scopes.add initTable[string, Sym]()
-    c.scopes[^1][s.name] = Sym(kind: syLocal, typ: elemT, mutable: false)
+    c.scopes[^1][s.name] = Sym(kind: LocalSym, typ: elemT, mutable: false)
     if s.name2.len > 0:
       if c.isDeclared(s.name2):
         err(s.line, "'" & s.name2 & "' is already declared")
-      c.scopes[^1][s.name2] = Sym(kind: syLocal, typ: t.val, mutable: false)
-    if t.kind in {tyMapD, tyMapS} and s.value.kind == ekIdent and
+      c.scopes[^1][s.name2] = Sym(kind: LocalSym, typ: t.val, mutable: false)
+    if t.kind in {DenseMapType, SparseMapType} and s.value.kind == IdentExpr and
         c.factEligibleIdent(s.value):
       # The loop key is contained by construction, and the map cannot
       # change during iteration.
@@ -1896,11 +1896,11 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     discard c.scopes.pop
     c.facts = dropped
     c.facts.del s.name
-  of skWith:
-    if c.cur.kind == rkFunc:
+  of WithStmt:
+    if c.cur.kind == FuncRoutine:
       err(s.line, "with is not allowed in func (start/end are side effects)")
     c.delFacts s.name
-    if s.name in c.globals and c.globals[s.name].kind == tyLock:
+    if s.name in c.globals and c.globals[s.name].kind == LockType:
       # Builtin protocol: start = acquire the mutex, end = release it.
       s.typ = c.globals[s.name]
     else:
@@ -1915,7 +1915,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         if pn notin c.checked:
           err(s.line, "'" & pn & "' must be declared before this with statement")
         let r = c.routineTab[pn]
-        if r.kind != rkProc or r.params.len != 1 or not r.params[0].isVar or
+        if r.kind != ProcRoutine or r.params.len != 1 or not r.params[0].isVar or
             not typEq(r.params[0].typ, t) or not typRangeEq(r.params[0].typ, t) or
             not r.ret.isNil:
           err(s.line, "with on a " & $t & " needs '" & pn & "' to be: " & want)
@@ -1924,7 +1924,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           for gw in c.routineWrites[pn]:
             c.delFacts gw
       s.typ = t
-    let isLock = s.typ != nil and s.typ.kind == tyLock
+    let isLock = s.typ != nil and s.typ.kind == LockType
     if isLock:
       c.heldLocks.add s.name
     inc c.withDepth
@@ -1953,10 +1953,10 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           stale.add k
       for k in stale:
         c.facts.del k
-  of skReturn:
+  of ReturnStmt:
     if c.withDepth > 0:
       err(s.line, "cannot return inside a with block (its end would never run)")
-    if c.cur.kind == rkThread:
+    if c.cur.kind == ThreadRoutine:
       err(s.line, "threads do not return; let the body end instead")
     if c.cur.ret.isNil:
       if s.value != nil:
@@ -1965,7 +1965,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       if s.value == nil:
         err(s.line, "return needs a value of type " & $c.cur.ret)
       var t: Typ = nil
-      if s.value.kind == ekNone:
+      if s.value.kind == NoneExpr:
         if not c.cur.ret.opt:
           err(s.line, "none needs an optional return type")
         s.value.typ = c.cur.ret
@@ -1978,27 +1978,27 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           t = c.cur.ret
       if not typEq(t, c.cur.ret):
         err(s.line, "return type mismatch: got " & $t & ", expected " & $c.cur.ret)
-      if c.cur.ret.kind == tyInt:
+      if c.cur.ret.kind == IntType:
         let rf = exprFact(s.value)
         if not rf.fits(c.cur.ret):
           err(s.line, "cannot prove return value (" & rangeStr(rf) &
             ") fits " & $c.cur.ret & "; guard or clamp first")
-  of skBreak:
+  of BreakStmt:
     if c.loopWiths.len == 0:
       err(s.line, "break outside a loop")
     if c.withDepth != c.loopWiths[^1]:
       err(s.line, "cannot break out of a with block (its end would never run)")
-  of skEcho:
-    if c.cur.kind == rkFunc:
+  of EchoStmt:
+    if c.cur.kind == FuncRoutine:
       err(s.line, "echo is a side effect; not allowed in func")
     for a in s.args:
       let at = c.expectVal(a)
       rejectOpt(at, a)
-      if at.kind notin {tyInt, tyBool, tyString, tyStr}:
+      if at.kind notin {IntType, BoolType, StringLitType, StringType}:
         err(a.line, "cannot echo a " & $a.typ)
-  of skDiscard:
+  of DiscardStmt:
     discard c.checkExpr(s.value)
-  of skCall:
+  of CallStmt:
     let t = c.checkExpr(s.value)
     if not t.isNil:
       err(s.line, "return value of '" & s.value.sval &
@@ -2035,7 +2035,7 @@ proc check*(m: Module) =
     used.incl r.name
     c.allRoutines.incl r.name
     c.routineTab[r.name] = r
-    if r.kind == rkThread:
+    if r.kind == ThreadRoutine:
       anyThread = true
   if not anyThread:
     err(1, "a nifty program needs at least one thread (thread name() = ...)")
@@ -2055,7 +2055,7 @@ proc check*(m: Module) =
   var wr: HashSet[string]
 
   proc isPlainGlobal(name: string): bool =
-    name in c.globals and c.globals[name].kind != tyLock
+    name in c.globals and c.globals[name].kind != LockType
 
   proc note(g: string, held: HashSet[string]) =
     if g in acc:
@@ -2073,20 +2073,20 @@ proc check*(m: Module) =
   proc scanE(e: Expr, held: HashSet[string]) =
     if e.isNil:
       return
-    if e.kind == ekIdent and isPlainGlobal(e.sval):
+    if e.kind == IdentExpr and isPlainGlobal(e.sval):
       note(e.sval, held)
-    if e.kind == ekMethod and e.sval in mutMethods:
+    if e.kind == MethodExpr and e.sval in mutMethods:
       let root = e.kids[0].rootIdent
-      if root.kind == ekIdent and isPlainGlobal(root.sval):
+      if root.kind == IdentExpr and isPlainGlobal(root.sval):
         note(root.sval, held)
         wr.incl root.sval
-    if e.kind == ekCall and e.sval in c.routineTab:
+    if e.kind == CallExpr and e.sval in c.routineTab:
       mergeCallee(e.sval, held)
       let r2 = c.routineTab[e.sval]
       for i, arg in e.kids:
         if i < r2.params.len and r2.params[i].isVar:
           let root = arg.rootIdent
-          if root.kind == ekIdent and isPlainGlobal(root.sval):
+          if root.kind == IdentExpr and isPlainGlobal(root.sval):
             note(root.sval, held)
             wr.incl root.sval
     for k in e.kids:
@@ -2099,13 +2099,13 @@ proc check*(m: Module) =
       scanE(a, held)
     var bodyHeld = held
     case s.kind
-    of skAssign:
+    of AssignStmt:
       let root = s.lhs.rootIdent
-      if root.kind == ekIdent and isPlainGlobal(root.sval):
+      if root.kind == IdentExpr and isPlainGlobal(root.sval):
         note(root.sval, held)
         wr.incl root.sval
-    of skWith:
-      if s.name in c.globals and c.globals[s.name].kind == tyLock:
+    of WithStmt:
+      if s.name in c.globals and c.globals[s.name].kind == LockType:
         bodyHeld = held + [s.name].toHashSet
       else:
         if isPlainGlobal(s.name):
@@ -2142,7 +2142,7 @@ proc check*(m: Module) =
   var lockProt: Table[string, HashSet[string]]
   var writeThreads: Table[string, HashSet[string]]
   for r in m.routines:
-    if r.kind != rkThread:
+    if r.kind != ThreadRoutine:
       continue
     for g, ls in access[r.name]:
       if g notin accThreads:
@@ -2156,7 +2156,7 @@ proc check*(m: Module) =
         writeThreads[g] = initHashSet[string]()
       writeThreads[g].incl r.name
   for gd in m.globals:
-    if gd.typ.kind == tyLock:
+    if gd.typ.kind == LockType:
       continue
     let g = gd.name
     if g in accThreads and accThreads[g].len >= 2 and g in writeThreads:
@@ -2174,25 +2174,25 @@ proc check*(m: Module) =
     c.facts = initTable[string, Fact]()
     c.heldLocks = @[]
     case r.kind
-    of rkThread:
+    of ThreadRoutine:
       if r.params.len > 0:
         err(r.line, "threads take no parameters")
       if not r.ret.isNil:
         err(r.line, "threads do not return a value")
-    of rkFunc:
+    of FuncRoutine:
       if r.ret.isNil:
         err(r.line, "func must have a return type (use proc for side effects)")
-    of rkProc:
+    of ProcRoutine:
       discard
     var paramScope = initTable[string, Sym]()
     for pm in r.params:
-      if pm.typ.kind == tyLock:
+      if pm.typ.kind == LockType:
         err(r.line, "a Lock cannot be a parameter")
-      if pm.isVar and r.kind == rkFunc:
+      if pm.isVar and r.kind == FuncRoutine:
         err(r.line, "func parameters are read-only; var parameters are not allowed")
       if pm.name in paramScope or pm.name in used:
         err(r.line, "duplicate or shadowing parameter name: '" & pm.name & "'")
-      paramScope[pm.name] = Sym(kind: syParam, typ: pm.typ,
+      paramScope[pm.name] = Sym(kind: ParamSym, typ: pm.typ,
         mutable: pm.isVar, isVarParam: pm.isVar)
     c.scopes = @[paramScope, initTable[string, Sym]()]
     for s in r.body:

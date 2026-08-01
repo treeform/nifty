@@ -42,39 +42,39 @@ proc mangle(t: Typ): string =
   if t.opt:
     return "p" & mangle(deOpt(t))
   case t.kind
-  of tyInt: "i"
-  of tyBool: "b"
-  of tyArray: "a" & $t.len & "_" & mangle(t.elem)
-  of tySeq: "q" & $t.len & "_" & mangle(t.elem)
-  of tyStr: "s" & $t.len
-  of tySet: "t" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi)
-  of tyQueue: "u" & $t.len & "_" & mangle(t.elem)
-  of tyMapD: "d" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi) &
+  of IntType: "i"
+  of BoolType: "b"
+  of ArrayType: "a" & $t.len & "_" & mangle(t.elem)
+  of SeqType: "q" & $t.len & "_" & mangle(t.elem)
+  of StringType: "s" & $t.len
+  of SetType: "t" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi)
+  of QueueType: "u" & $t.len & "_" & mangle(t.elem)
+  of DenseMapType: "d" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi) &
     "_" & mangle(t.val)
-  of tyMapS: "m" & $t.len & "_" & mangle(t.elem) & "_" & mangle(t.val)
-  of tyObject: "o" & t.name
+  of SparseMapType: "m" & $t.len & "_" & mangle(t.elem) & "_" & mangle(t.val)
+  of ObjectType: "o" & t.name
   else: "x"
 
 proc cBase(t: Typ): string =
   if t.opt:
     return "NS_" & mangle(t)
   case t.kind
-  of tyBool: "bool"
-  of tyObject: "S_" & t.name
-  of tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS: "NS_" & mangle(t)
+  of BoolType: "bool"
+  of ObjectType: "S_" & t.name
+  of SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType: "NS_" & mangle(t)
   else: "int64_t"
 
 proc cDecl(name: string, t: Typ): string =
   var base = t
   var dims = ""
-  while base.kind == tyArray:
+  while base.kind == ArrayType:
     dims.add "[" & $base.len & "]"
     base = base.elem
   cBase(base) & " " & name & dims
 
 proc passByPtr(t: Typ): bool =
   ## var parameters pass by pointer, except arrays which already decay.
-  t.kind != tyArray
+  t.kind != ArrayType
 
 proc genExpr(g: var Gen, e: Expr): string =
   if e.wrapOpt:
@@ -87,39 +87,39 @@ proc genExpr(g: var Gen, e: Expr): string =
     e.wrapOpt = true
     return "((" & cBase(optT) & "){ .m_val = " & inner & ", .m_ok = true })"
   case e.kind
-  of ekNone:
+  of NoneExpr:
     "((" & cBase(e.typ) & "){0})"
-  of ekInt:
+  of IntExpr:
     $e.ival & "LL"
-  of ekBool:
+  of BoolExpr:
     if e.bval: "true" else: "false"
-  of ekStr:
-    if e.typ != nil and e.typ.kind == tyStr:
+  of StrExpr:
+    if e.typ != nil and e.typ.kind == StringType:
       "(" & cBase(e.typ) & "){ .m_len = " & $e.sval.len & "LL, .m_data = " &
         cQuote(e.sval) & " }"
     else:
       cQuote(e.sval)
-  of ekIdent:
+  of IdentExpr:
     let nm =
       case e.symKind
-      of syConst: "C_" & e.sval
-      of syGlobal: "g_" & e.sval
-      of syLocal:
+      of ConstSym: "C_" & e.sval
+      of GlobalSym: "g_" & e.sval
+      of LocalSym:
         if e.sval in g.curArena:
           "(*v_" & e.sval & ")" # big local: lives on the thread's arena
         else:
           "v_" & e.sval
-      of syParam:
+      of ParamSym:
         if e.isVarParam and e.typ.passByPtr:
           "(*p_" & e.sval & ")"
         else:
           "p_" & e.sval
     if e.unwrapOpt: nm & ".m_val" else: nm
-  of ekNeg:
+  of NegExpr:
     "(-" & g.genExpr(e.kids[0]) & ")"
-  of ekNot:
+  of NotExpr:
     "(!" & g.genExpr(e.kids[0]) & ")"
-  of ekBin:
+  of BinExpr:
     let a = g.genExpr(e.kids[0])
     let b = g.genExpr(e.kids[1])
     case e.sval
@@ -127,19 +127,19 @@ proc genExpr(g: var Gen, e: Expr): string =
     of "and": "(" & a & " && " & b & ")"
     of "or": "(" & a & " || " & b & ")"
     else: "(" & a & " " & e.sval & " " & b & ")"
-  of ekIndex:
+  of IndexExpr:
     # The checker proved the index is in bounds; no runtime check needed.
-    if e.kids[0].typ != nil and e.kids[0].typ.kind == tyMapD:
+    if e.kids[0].typ != nil and e.kids[0].typ.kind == DenseMapType:
       g.genExpr(e.kids[0]) & ".m_vals[(" & g.genExpr(e.kids[1]) & ") - " &
         $e.kids[0].typ.elem.rlo & "LL]"
-    elif e.kids[0].typ != nil and e.kids[0].typ.kind == tyMapS:
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind == SparseMapType:
       cBase(e.kids[0].typ) & "_at(&" & g.genExpr(e.kids[0]) & ", " &
         g.genExpr(e.kids[1]) & ")"
-    elif e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr}:
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind in {SeqType, StringType}:
       g.genExpr(e.kids[0]) & ".m_data[" & g.genExpr(e.kids[1]) & "]"
     else:
       g.genExpr(e.kids[0]) & "[" & g.genExpr(e.kids[1]) & "]"
-  of ekCall:
+  of CallExpr:
     let r = g.routines[e.sval]
     var parts: seq[string]
     for i, a in e.kids:
@@ -148,27 +148,27 @@ proc genExpr(g: var Gen, e: Expr): string =
       else:
         parts.add g.genExpr(a)
     "f_" & e.sval & "(" & parts.join(", ") & ")"
-  of ekField:
+  of FieldExpr:
     if e.isOptOk:
       g.genExpr(e.kids[0]) & ".m_ok"
     elif e.kids[0].typ != nil and not e.kids[0].typ.opt and
-        e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS}:
+        e.kids[0].typ.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
       g.genExpr(e.kids[0]) & ".m_len"
     elif e.unwrapOpt:
       g.genExpr(e.kids[0]) & ".m_" & e.sval & ".m_val"
     else:
       g.genExpr(e.kids[0]) & ".m_" & e.sval
-  of ekMethod:
+  of MethodExpr:
     let bt = e.kids[0].typ
     if e.sval == "or" and bt != nil and bt.opt:
       return cBase(bt) & "_or(" & g.genExpr(e.kids[0]) & ", " &
         g.genExpr(e.kids[1]) & ")"
-    let fn = cBase(bt) & "_" & (if bt.kind == tyStr and e.sval == "add": "adds"
+    let fn = cBase(bt) & "_" & (if bt.kind == StringType and e.sval == "add": "adds"
       else: e.sval)
     let basePtr = "&" & g.genExpr(e.kids[0])
-    if bt.kind == tyStr and e.sval == "add":
+    if bt.kind == StringType and e.sval == "add":
       let a = e.kids[1]
-      if a.kind == ekStr and (a.typ == nil or a.typ.kind != tyStr):
+      if a.kind == StrExpr and (a.typ == nil or a.typ.kind != StringType):
         fn & "(" & basePtr & ", (const uint8_t *)" & cQuote(a.sval) & ", " &
           $a.sval.len & "LL)"
       else:
@@ -188,10 +188,10 @@ proc hasEffects(g: Gen, e: Expr): bool =
   ## (func calls are pure and echo-free by construction.)
   if e.isNil:
     return false
-  if e.kind == ekCall and e.sval in g.routines and
-      g.routines[e.sval].kind == rkProc:
+  if e.kind == CallExpr and e.sval in g.routines and
+      g.routines[e.sval].kind == ProcRoutine:
     return true
-  if e.kind == ekMethod and e.sval in mutMethods:
+  if e.kind == MethodExpr and e.sval in mutMethods:
     return true
   for k in e.kids:
     if g.hasEffects(k):
@@ -202,12 +202,12 @@ proc genOrdered(g: var Gen, e: Expr): string
 proc genPathOrdered(g: var Gen, e: Expr): string =
   ## An lvalue path with its index expressions hoisted in source order.
   case e.kind
-  of ekField:
+  of FieldExpr:
     g.genPathOrdered(e.kids[0]) & ".m_" & e.sval
-  of ekIndex:
+  of IndexExpr:
     let base = g.genPathOrdered(e.kids[0])
     let idx = g.genOrdered(e.kids[1])
-    if e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr}:
+    if e.kids[0].typ != nil and e.kids[0].typ.kind in {SeqType, StringType}:
       base & ".m_data[" & idx & "]"
     else:
       base & "[" & idx & "]"
@@ -220,9 +220,9 @@ proc tempFor(g: var Gen, e: Expr, val: string): string =
   let ctype =
     if e.typ == nil: "int64_t"
     elif e.typ.opt: cBase(e.typ)
-    elif e.typ.kind == tyBool: "bool"
-    elif e.typ.kind in {tyObject, tySeq, tyStr, tySet, tyQueue,
-      tyMapD, tyMapS}: cBase(e.typ)
+    elif e.typ.kind == BoolType: "bool"
+    elif e.typ.kind in {ObjectType, SeqType, StringType, SetType, QueueType,
+      DenseMapType, SparseMapType}: cBase(e.typ)
     else: "int64_t"
   g.put ctype & " " & t & " = " & val & ";"
   t
@@ -241,40 +241,40 @@ proc genOrdered(g: var Gen, e: Expr): string =
     e.wrapOpt = true
     return "((" & cBase(optT) & "){ .m_val = " & inner & ", .m_ok = true })"
   case e.kind
-  of ekNone, ekInt, ekBool, ekStr:
+  of NoneExpr, IntExpr, BoolExpr, StrExpr:
     g.genExpr(e)
-  of ekIdent:
-    if e.typ != nil and e.typ.kind == tyArray:
+  of IdentExpr:
+    if e.typ != nil and e.typ.kind == ArrayType:
       g.genExpr(e) # arrays are reference-like; the path is the value
     else:
       g.tempFor(e, g.genExpr(e))
-  of ekField:
-    if e.typ != nil and e.typ.kind == tyArray:
+  of FieldExpr:
+    if e.typ != nil and e.typ.kind == ArrayType:
       g.genPathOrdered(e)
     elif e.kids[0].typ != nil and
-        e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS}:
+        e.kids[0].typ.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
       g.tempFor(e, g.genPathOrdered(e.kids[0]) & ".m_len")
     else:
       g.tempFor(e, g.genPathOrdered(e))
-  of ekIndex:
-    if e.kids[0].typ != nil and e.kids[0].typ.kind == tyMapD:
+  of IndexExpr:
+    if e.kids[0].typ != nil and e.kids[0].typ.kind == DenseMapType:
       let base = g.genPathOrdered(e.kids[0])
       let k = g.genOrdered(e.kids[1])
       g.tempFor(e, base & ".m_vals[(" & k & ") - " &
         $e.kids[0].typ.elem.rlo & "LL]")
-    elif e.kids[0].typ != nil and e.kids[0].typ.kind == tyMapS:
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind == SparseMapType:
       let base = g.genPathOrdered(e.kids[0])
       let k = g.genOrdered(e.kids[1])
       g.tempFor(e, cBase(e.kids[0].typ) & "_at(&" & base & ", " & k & ")")
-    elif e.typ != nil and e.typ.kind == tyArray:
+    elif e.typ != nil and e.typ.kind == ArrayType:
       g.genPathOrdered(e)
     else:
       g.tempFor(e, g.genPathOrdered(e))
-  of ekNeg:
+  of NegExpr:
     "(-" & g.genOrdered(e.kids[0]) & ")"
-  of ekNot:
+  of NotExpr:
     "(!" & g.genOrdered(e.kids[0]) & ")"
-  of ekBin:
+  of BinExpr:
     if e.sval in ["and", "or"]:
       # Short-circuit preserved: the right side runs only when needed.
       let t = "ni_t" & $g.tmpN
@@ -292,25 +292,25 @@ proc genOrdered(g: var Gen, e: Expr): string =
       let a = g.genOrdered(e.kids[0])
       let b = g.genOrdered(e.kids[1])
       "(" & a & " " & e.sval & " " & b & ")"
-  of ekCall:
+  of CallExpr:
     let r = g.routines[e.sval]
     var parts: seq[string]
     for i, a in e.kids:
       if r.params[i].isVar and r.params[i].typ.passByPtr:
         parts.add "&" & g.genPathOrdered(a)
-      elif a.typ != nil and a.typ.kind == tyArray:
+      elif a.typ != nil and a.typ.kind == ArrayType:
         parts.add g.genPathOrdered(a)
       else:
         parts.add g.genOrdered(a)
     let call = "f_" & e.sval & "(" & parts.join(", ") & ")"
-    if r.kind == rkFunc:
+    if r.kind == FuncRoutine:
       call # pure: args are already ordered, the call itself has no effects
     elif r.ret.isNil:
       g.put call & ";"
       ""
     else:
       g.tempFor(e, call)
-  of ekMethod:
+  of MethodExpr:
     let bt = e.kids[0].typ
     if e.sval == "or" and bt != nil and bt.opt:
       let b = g.genOrdered(e.kids[0])
@@ -318,11 +318,11 @@ proc genOrdered(g: var Gen, e: Expr): string =
       return g.tempFor(e, cBase(bt) & "_or(" & b & ", " & f & ")")
     let base = g.genPathOrdered(e.kids[0])
     let fn = cBase(bt) & "_" &
-      (if bt.kind == tyStr and e.sval == "add": "adds" else: e.sval)
+      (if bt.kind == StringType and e.sval == "add": "adds" else: e.sval)
     var call: string
-    if bt.kind == tyStr and e.sval == "add":
+    if bt.kind == StringType and e.sval == "add":
       let a = e.kids[1]
-      if a.kind == ekStr and (a.typ == nil or a.typ.kind != tyStr):
+      if a.kind == StrExpr and (a.typ == nil or a.typ.kind != StringType):
         call = fn & "(&" & base & ", (const uint8_t *)" & cQuote(a.sval) &
           ", " & $a.sval.len & "LL)"
       else:
@@ -346,7 +346,7 @@ proc collectBig(body: seq[Stmt], offs: var Table[string, int64],
     off: var int64) =
   ## Assign arena offsets (8-aligned) to every big local in a routine.
   for s in body:
-    if s.kind in {skVar, skLet} and s.typ != nil and
+    if s.kind in {VarStmt, LetStmt} and s.typ != nil and
         typeSize(s.typ) > arenaThreshold:
       off = (off + 7) div 8 * 8
       offs[s.name] = off
@@ -359,7 +359,7 @@ proc collectBig(body: seq[Stmt], offs: var Table[string, int64],
 proc walkCalleeExpr(e: Expr, into: var HashSet[string]) =
   if e.isNil:
     return
-  if e.kind == ekCall:
+  if e.kind == CallExpr:
     into.incl e.sval
   for k in e.kids:
     walkCalleeExpr(k, into)
@@ -370,7 +370,7 @@ proc collectCallees(body: seq[Stmt], into: var HashSet[string]) =
       walkCalleeExpr(e, into)
     for a in s.args:
       walkCalleeExpr(a, into)
-    if s.kind == skWith and s.typ != nil and s.typ.kind != tyLock:
+    if s.kind == WithStmt and s.typ != nil and s.typ.kind != LockType:
       into.incl "start"
       into.incl "end"
     collectCallees(s.body, into)
@@ -382,7 +382,7 @@ proc collectCallees(body: seq[Stmt], into: var HashSet[string]) =
 proc genCond(g: var Gen, e: Expr): string =
   ## A condition wrapped in exactly one set of parentheses.
   let s = g.genExpr(e)
-  if e.kind in {ekBin, ekNot, ekNeg}: s
+  if e.kind in {BinExpr, NotExpr, NegExpr}: s
   else: "(" & s & ")"
 
 proc genStmt(g: var Gen, s: Stmt)
@@ -395,13 +395,13 @@ proc genBlock(g: var Gen, body: seq[Stmt]) =
 
 proc genStmt(g: var Gen, s: Stmt) =
   case s.kind
-  of skVar, skLet:
+  of VarStmt, LetStmt:
     if s.name in g.curArena:
       # A big local: a typed pointer into this thread's arena.
       let off = $g.curArena[s.name] & "LL"
       var base = s.typ
       var dims = ""
-      while base.kind == tyArray:
+      while base.kind == ArrayType:
         dims.add "[" & $base.len & "]"
         base = base.elem
       if dims.len > 0:
@@ -422,14 +422,14 @@ proc genStmt(g: var Gen, s: Stmt) =
       if s.init != nil and g.hasEffects(s.init): g.genOrdered(s.init)
       elif s.init != nil: g.genExpr(s.init)
       elif s.typ.opt: "{0}"
-      elif s.typ.kind in {tyArray, tyObject, tySeq, tyStr, tySet, tyQueue,
-        tyMapD, tyMapS}: "{0}"
-      elif s.typ.kind == tyBool: "false"
+      elif s.typ.kind in {ArrayType, ObjectType, SeqType, StringType, SetType, QueueType,
+        DenseMapType, SparseMapType}: "{0}"
+      elif s.typ.kind == BoolType: "false"
       else: "0"
     g.put cDecl("v_" & s.name, s.typ) & " = " & init & ";"
-  of skAssign:
-    if s.lhs.kind == ekIndex and s.lhs.kids[0].typ != nil and
-        s.lhs.kids[0].typ.kind in {tyMapD, tyMapS}:
+  of AssignStmt:
+    if s.lhs.kind == IndexExpr and s.lhs.kids[0].typ != nil and
+        s.lhs.kids[0].typ.kind in {DenseMapType, SparseMapType}:
       let mt = s.lhs.kids[0].typ
       var base, k, v: string
       if g.hasEffects(s.lhs) or g.hasEffects(s.rhs):
@@ -440,7 +440,7 @@ proc genStmt(g: var Gen, s: Stmt) =
         base = g.genExpr(s.lhs.kids[0])
         k = g.genExpr(s.lhs.kids[1])
         v = g.genExpr(s.rhs)
-      if mt.kind == tyMapD:
+      if mt.kind == DenseMapType:
         g.put cBase(mt) & "_put(&" & base & ", " & k & ", " & v & ");"
       else:
         g.put "(void)" & cBase(mt) & "_put(&" & base & ", " & k & ", " &
@@ -452,7 +452,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put lhs & " = " & rhs & ";"
     else:
       g.put g.genExpr(s.lhs) & " = " & g.genExpr(s.rhs) & ";"
-  of skIf:
+  of IfStmt:
     var anyEff = false
     for br in s.elifs:
       if g.hasEffects(br.cond):
@@ -487,7 +487,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       for _ in 0 ..< closes:
         dec g.ind
         g.put "}"
-  of skWhile:
+  of WhileStmt:
     if g.hasEffects(s.cond):
       # The condition re-runs every iteration with defined order:
       # evaluate it inside the loop, then decide.
@@ -533,7 +533,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "while " & g.genCond(s.cond) & " {"
       g.genBlock(s.body)
       g.put "}"
-  of skFor:
+  of ForStmt:
     let tmp = "ni_end" & $g.tmpN
     inc g.tmpN
     g.put "{"
@@ -550,12 +550,12 @@ proc genStmt(g: var Gen, s: Stmt) =
     g.put "}"
     dec g.ind
     g.put "}"
-  of skLoop:
+  of LoopStmt:
     g.put "for (;;) {"
     g.genBlock(s.body)
     g.put "}"
-  of skWith:
-    if s.typ.kind == tyLock:
+  of WithStmt:
+    if s.typ.kind == LockType:
       g.put "pthread_mutex_lock(&g_" & s.name & ");"
       g.put "{"
       g.genBlock(s.body)
@@ -568,7 +568,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.genBlock(s.body)
       g.put "}"
       g.put "f_end(" & arg & ");"
-  of skReturn:
+  of ReturnStmt:
     if s.value.isNil:
       if g.curFrame > 0:
         g.put "ni_sp = ni_base;"
@@ -583,14 +583,14 @@ proc genStmt(g: var Gen, s: Stmt) =
       if g.curFrame > 0:
         g.put "ni_sp = ni_base;"
       g.put "return " & v & ";"
-  of skBreak:
+  of BreakStmt:
     g.put "break;"
-  of skEcho:
+  of EchoStmt:
     # Every value argument is hoisted to a temp, in order: C leaves printf
     # argument evaluation order unspecified, nifty does not.
     var temps: Table[int, string]
     for i, a in s.args:
-      if a.typ.kind != tyString:
+      if a.typ.kind != StringLitType:
         temps[i] = "ni_e" & $g.tmpN
         inc g.tmpN
     if temps.len > 0:
@@ -600,8 +600,8 @@ proc genStmt(g: var Gen, s: Stmt) =
         if i in temps:
           let ctype =
             case a.typ.kind
-            of tyBool: "bool"
-            of tyStr: cBase(a.typ)
+            of BoolType: "bool"
+            of StringType: cBase(a.typ)
             else: "int64_t"
           let v =
             if g.hasEffects(a): g.genOrdered(a) else: g.genExpr(a)
@@ -610,16 +610,16 @@ proc genStmt(g: var Gen, s: Stmt) =
     var cargs: seq[string]
     for i, a in s.args:
       case a.typ.kind
-      of tyString:
+      of StringLitType:
         fmt.add a.sval.replace("%", "%%")
-      of tyStr:
+      of StringType:
         fmt.add "%.*s"
         cargs.add "(int)(" & temps[i] & ".m_len)"
         cargs.add "(const char *)" & temps[i] & ".m_data"
-      of tyInt:
+      of IntType:
         fmt.add "%lld"
         cargs.add "(long long)(" & temps[i] & ")"
-      of tyBool:
+      of BoolType:
         fmt.add "%s"
         cargs.add "((" & temps[i] & ") ? \"true\" : \"false\")"
       else:
@@ -633,7 +633,7 @@ proc genStmt(g: var Gen, s: Stmt) =
     if temps.len > 0:
       dec g.ind
       g.put "}"
-  of skForEach:
+  of ForEachStmt:
     let it = "ni_it" & $g.tmpN
     let ix = "ni_ix" & $g.tmpN
     let nn = "ni_n" & $g.tmpN
@@ -644,7 +644,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       if g.hasEffects(s.value): g.genPathOrdered(s.value)
       else: g.genExpr(s.value)
     g.put cBase(s.value.typ) & " *" & it & " = &" & basePath & ";"
-    if s.value.typ.kind in {tySet, tyMapD}:
+    if s.value.typ.kind in {SetType, DenseMapType}:
       let lo = $s.value.typ.elem.rlo & "LL"
       let hi = $s.value.typ.elem.rhi & "LL"
       g.put "for (int64_t " & ix & " = " & lo & "; " & ix & " <= " & hi &
@@ -656,7 +656,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       if s.name2.len > 0:
         g.put cBase(s.typ2) & " v_" & s.name2 & " = " & it & "->m_vals[" &
           ix & " - " & lo & "];"
-    elif s.value.typ.kind == tyMapS:
+    elif s.value.typ.kind == SparseMapType:
       g.put "const int64_t " & nn & " = " & it & "->m_len;"
       g.put "for (int64_t " & ix & " = 0; " & ix & " < " & nn & "; ++" & ix &
         ") {"
@@ -665,7 +665,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       if s.name2.len > 0:
         g.put cBase(s.typ2) & " v_" & s.name2 & " = " & it & "->m_vals[" &
           ix & "];"
-    elif s.value.typ.kind == tyQueue:
+    elif s.value.typ.kind == QueueType:
       g.put "const int64_t " & nn & " = " & it & "->m_len;"
       g.put "for (int64_t " & ix & " = 0; " & ix & " < " & nn & "; ++" & ix &
         ") {"
@@ -684,14 +684,14 @@ proc genStmt(g: var Gen, s: Stmt) =
     g.put "}"
     dec g.ind
     g.put "}"
-  of skDiscard:
+  of DiscardStmt:
     if g.hasEffects(s.value):
       let v = g.genOrdered(s.value)
       if v.len > 0:
         g.put "(void)(" & v & ");"
     else:
       g.put "(void)(" & g.genExpr(s.value) & ");"
-  of skCall:
+  of CallStmt:
     if g.hasEffects(s.value):
       let v = g.genOrdered(s.value)
       if v.len > 0:
@@ -730,9 +730,9 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       " fb) { return r.m_ok ? r.m_val : fb; }"
     return
   case t.kind
-  of tyArray:
+  of ArrayType:
     g.emitTypeDefs(t.elem)
-  of tyObject:
+  of ObjectType:
     let key = mangle(t)
     if key in g.emitted:
       return
@@ -744,7 +744,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     for f in t.fields:
       g.put "  " & cDecl("m_" & f.name, f.typ) & ";"
     g.put "} S_" & t.name & ";"
-  of tySeq:
+  of SeqType:
     g.emitTypeDefs(t.elem)
     let key = mangle(t)
     if key in g.emitted:
@@ -765,7 +765,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     g.put "static " & e & " " & n & "_pop(" & n &
       " *s) { s->m_len -= 1; return s->m_data[s->m_len]; }"
     g.put "static void " & n & "_clear(" & n & " *s) { s->m_len = 0; }"
-  of tyStr:
+  of StringType:
     let key = mangle(t)
     if key in g.emitted:
       return
@@ -780,7 +780,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       " *s, const uint8_t *d, int64_t k) { " &
       "memcpy(&s->m_data[s->m_len], d, (size_t)k); s->m_len += k; }"
     g.put "static void " & n & "_clear(" & n & " *s) { s->m_len = 0; }"
-  of tyQueue:
+  of QueueType:
     g.emitTypeDefs(t.elem)
     let key = mangle(t)
     if key in g.emitted:
@@ -807,7 +807,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       "s->m_head = (s->m_head + 1) % " & cap & "; s->m_len -= 1; return v; }"
     g.put "static void " & n & "_clear(" & n &
       " *s) { s->m_len = 0; s->m_head = 0; }"
-  of tyMapD:
+  of DenseMapType:
     g.emitTypeDefs(t.val)
     let key = mangle(t)
     if key in g.emitted:
@@ -845,7 +845,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       "memset(&s->m_vals[k - " & lo & "], 0, sizeof(" & v & ")); } }"
     g.put "static void " & n & "_clear(" & n &
       " *s) { memset(s, 0, sizeof(*s)); }"
-  of tyMapS:
+  of SparseMapType:
     g.emitTypeDefs(t.elem)
     g.emitTypeDefs(t.val)
     let key = mangle(t)
@@ -862,7 +862,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     g.put "  " & kt & " m_keys[" & $t.len & "];"
     g.put "  " & v & " m_vals[" & $t.len & "];"
     g.put "} " & n & ";"
-    if t.elem.kind == tyStr:
+    if t.elem.kind == StringType:
       g.put "static int " & n & "_cmp(" & kt & " a, " & kt & " b) { " &
         "size_t na = (size_t)a.m_len, nb = (size_t)b.m_len; " &
         "int c = memcmp(a.m_data, b.m_data, na < nb ? na : nb); " &
@@ -904,7 +904,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       ")); memset(&s->m_vals[s->m_len], 0, sizeof(" & v & ")); }"
     g.put "static void " & n & "_clear(" & n &
       " *s) { memset(s, 0, sizeof(*s)); }"
-  of tySet:
+  of SetType:
     let key = mangle(t)
     if key in g.emitted:
       return
@@ -937,7 +937,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
 
 proc emitBodyTypeDefs(g: var Gen, body: seq[Stmt]) =
   for s in body:
-    if s.kind in {skVar, skLet, skForEach}:
+    if s.kind in {VarStmt, LetStmt, ForEachStmt}:
       g.emitTypeDefs(s.typ)
     g.emitBodyTypeDefs(s.body)
     for br in s.elifs:
@@ -967,7 +967,7 @@ proc generate*(m: Module, src: string): string =
     g.needOf[r.name] = g.frameOf[r.name] + worst
   var anyArena = false
   for r in m.routines:
-    if r.kind == rkThread and g.needOf[r.name] > 0:
+    if r.kind == ThreadRoutine and g.needOf[r.name] > 0:
       anyArena = true
   g.put "// Generated by nifty from " & src & ". Do not edit."
   g.o.add cPrelude
@@ -989,21 +989,21 @@ proc generate*(m: Module, src: string): string =
   if m.globals.len > 0:
     g.put ""
     for gd in m.globals:
-      if gd.typ.kind == tyLock:
+      if gd.typ.kind == LockType:
         g.put "static pthread_mutex_t g_" & gd.name & " = PTHREAD_MUTEX_INITIALIZER;"
       else:
         g.put "static " & cDecl("g_" & gd.name, gd.typ) & ";"
   if anyArena:
     g.put ""
     for r in m.routines:
-      if r.kind == rkThread and g.needOf[r.name] > 0:
+      if r.kind == ThreadRoutine and g.needOf[r.name] > 0:
         g.put "static _Alignas(16) uint8_t ni_arena_" & r.name & "[" &
           $g.needOf[r.name] & "];"
   for r in m.routines:
     g.curArena = g.bigOffs[r.name]
     g.curFrame = g.frameOf[r.name]
     g.put ""
-    if r.kind == rkThread:
+    if r.kind == ThreadRoutine:
       g.put "static void *t_" & r.name & "(void *ni_arg) {"
       inc g.ind
       g.put "(void)ni_arg;"
@@ -1024,7 +1024,7 @@ proc generate*(m: Module, src: string): string =
       for pm in r.params:
         if pm.isVar and pm.typ.passByPtr:
           ps.add cBase(pm.typ) & " *p_" & pm.name
-        elif pm.typ.kind == tyArray:
+        elif pm.typ.kind == ArrayType:
           # Non-var arrays decay to pointers in C; const makes the C
           # compiler enforce read-only as a second line of defense.
           ps.add "const " & cDecl("p_" & pm.name, pm.typ)
@@ -1043,7 +1043,7 @@ proc generate*(m: Module, src: string): string =
         g.put "ni_sp = ni_base;" # fall-off-the-end exit for void procs
       dec g.ind
       g.put "}"
-  let threads = m.routines.filterIt(it.kind == rkThread)
+  let threads = m.routines.filterIt(it.kind == ThreadRoutine)
   g.put ""
   g.put "int main(void) {"
   inc g.ind

@@ -5,7 +5,7 @@ import common
 
 type
   TokKind* = enum
-    tkIdent, tkInt, tkStr, tkOp, tkNewline, tkIndent, tkDedent, tkEof
+    IdentToken, IntToken, StrToken, OpToken, NewlineToken, IndentToken, DedentToken, EofToken
   Token* = object
     kind*: TokKind
     text*: string
@@ -45,11 +45,11 @@ proc tokenize*(src: string): seq[Token] =
       err(lineNo, "tabs are not allowed; indent with spaces")
     if ind > indents[^1]:
       indents.add ind
-      result.add Token(kind: tkIndent, line: lineNo)
+      result.add Token(kind: IndentToken, line: lineNo)
     else:
       while ind < indents[^1]:
         discard indents.pop
-        result.add Token(kind: tkDedent, line: lineNo)
+        result.add Token(kind: DedentToken, line: lineNo)
       if ind != indents[^1]:
         err(lineNo, "inconsistent indentation")
     # Tokens on the line.
@@ -62,12 +62,12 @@ proc tokenize*(src: string): seq[Token] =
         let s = p
         while p < line.len and (line[p].isDigit or line[p] == '_'):
           inc p
-        result.add Token(kind: tkInt, text: line[s ..< p].replace("_", ""), line: lineNo)
+        result.add Token(kind: IntToken, text: line[s ..< p].replace("_", ""), line: lineNo)
       elif c.isAlphaAscii or c == '_':
         let s = p
         while p < line.len and (line[p].isAlphaNumeric or line[p] == '_'):
           inc p
-        result.add Token(kind: tkIdent, text: line[s ..< p], line: lineNo)
+        result.add Token(kind: IdentToken, text: line[s ..< p], line: lineNo)
       elif c == '"':
         inc p
         var s = ""
@@ -88,7 +88,7 @@ proc tokenize*(src: string): seq[Token] =
         if p >= line.len:
           err(lineNo, "unterminated string")
         inc p
-        result.add Token(kind: tkStr, text: s, line: lineNo)
+        result.add Token(kind: StrToken, text: s, line: lineNo)
       else:
         var op = ""
         for m in multiOps:
@@ -100,10 +100,10 @@ proc tokenize*(src: string): seq[Token] =
             op = $c
           else:
             err(lineNo, "unexpected character: '" & $c & "'")
-        result.add Token(kind: tkOp, text: op, line: lineNo)
+        result.add Token(kind: OpToken, text: op, line: lineNo)
         p += op.len
-    result.add Token(kind: tkNewline, line: lineNo)
+    result.add Token(kind: NewlineToken, line: lineNo)
   while indents.len > 1:
     discard indents.pop
-    result.add Token(kind: tkDedent, line: lineNo)
-  result.add Token(kind: tkEof, line: lineNo)
+    result.add Token(kind: DedentToken, line: lineNo)
+  result.add Token(kind: EofToken, line: lineNo)
