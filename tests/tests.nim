@@ -49,13 +49,14 @@ proc runTestsInDir(dir, label: string, mode: TestMode, workDir: string) =
 
     case mode
     of tmCompileError:
-      if compileError.len > 0 and expected in compileError:
+      # Exact match, including file:line - a wrong location is a bug.
+      if compileError.len > 0 and compileError.strip() == expected:
         echo "  PASS: " & label & "/" & testName
         testsPassed += 1
       elif compileError.len > 0:
         echo "  FAIL: " & label & "/" & testName
-        echo "    Expected error containing: " & expected
-        echo "    Actual error: " & compileError
+        echo "    Expected error: " & expected
+        echo "    Actual error:   " & compileError
         testsFailed += 1
       else:
         echo "  FAIL: " & label & "/" & testName

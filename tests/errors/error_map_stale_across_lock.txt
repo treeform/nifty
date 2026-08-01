@@ -1,1 +1,1 @@
-cannot prove the key is present
+error_map_stale_across_lock.nifty:14: cannot prove the key is present; test with 'if m.contains(k):' first, or use .get(k, fallback)

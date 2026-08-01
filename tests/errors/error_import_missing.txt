@@ -1,1 +1,1 @@
-cannot find import
+error_import_missing.nifty:1: cannot find import '_nosuchmodule' (no _nosuchmodule.nifty next to the importing file)

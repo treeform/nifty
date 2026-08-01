@@ -1,1 +1,1 @@
-cannot prove 'items' is not empty
+error_seq_pop_empty.nifty:5: cannot prove 'items' is not empty; guard with 'if items.len > 0:'

@@ -1,1 +1,1 @@
-whole-array assignment is not allowed
+error_array_assign.nifty:5: whole-array assignment is not allowed; copy elements in a loop

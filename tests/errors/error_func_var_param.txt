@@ -1,1 +1,1 @@
-var parameters are not allowed
+error_func_var_param.nifty:1: func parameters are read-only; var parameters are not allowed

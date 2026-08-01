@@ -1,1 +1,1 @@
-is discarded
+error_discard_value.nifty:5: return value of 'f' is discarded (use discard or assign it)

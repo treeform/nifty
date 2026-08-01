@@ -1,1 +1,1 @@
-aliasing
+error_alias_var_global.nifty:10: cannot pass global 'g' as a var argument to 'sneaky': it also accesses 'g' directly, and writes through the parameter would make its facts lie (aliasing)

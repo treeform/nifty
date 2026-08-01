@@ -1,1 +1,1 @@
-modulo by zero
+error_mod_by_zero.nifty:2: modulo by zero

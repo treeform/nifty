@@ -1,1 +1,1 @@
-before proving it has a value
+error_opt_vararg_stale.nifty:8: cannot use 'r' before proving it has a value; test with '.ok' first (or use .or(fallback))

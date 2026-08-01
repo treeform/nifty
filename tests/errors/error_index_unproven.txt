@@ -1,1 +1,1 @@
-cannot prove index
+error_index_unproven.nifty:4: cannot prove index is inside 0 ..< 4 (index is int); test it first

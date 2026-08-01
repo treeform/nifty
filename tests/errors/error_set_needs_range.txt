@@ -1,1 +1,1 @@
-set needs a range element
+error_set_needs_range.nifty:1: set needs a range element type, e.g. set[0 .. 63]

@@ -1,1 +1,1 @@
-can only call other funcs
+error_func_calls_proc.nifty:5: func 'f' can only call other funcs; 'p' is a proc

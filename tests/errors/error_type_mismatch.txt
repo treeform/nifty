@@ -1,1 +1,1 @@
-cannot assign bool to int
+error_type_mismatch.nifty:3: type mismatch: cannot assign bool to int

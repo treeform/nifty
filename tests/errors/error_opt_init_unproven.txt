@@ -1,1 +1,1 @@
-before proving it has a value
+error_opt_init_unproven.nifty:4: cannot use 'a' before proving it has a value; test with '.ok' first (or use .or(fallback))

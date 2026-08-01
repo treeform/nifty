@@ -1,1 +1,1 @@
-does not overflow
+error_overflow.nifty:2: cannot prove '+' does not overflow: int + int; narrow the ranges or guard first

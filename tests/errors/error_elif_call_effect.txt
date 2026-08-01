@@ -1,1 +1,1 @@
-cannot prove 'g' is not zero
+error_elif_call_effect.nifty:14: cannot prove 'g' is not zero here; guard the division with 'if g != 0:'

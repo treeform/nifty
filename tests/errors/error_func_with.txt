@@ -1,1 +1,1 @@
-with is not allowed in func
+error_func_with.nifty:4: with is not allowed in func (start/end are side effects)

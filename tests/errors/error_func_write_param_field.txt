@@ -1,1 +1,1 @@
-cannot assign to immutable
+error_func_write_param_field.nifty:6: cannot assign to immutable 'v'

@@ -1,1 +1,1 @@
-zero-initialized
+global_initializer.nifty:1: globals are zero-initialized; initializers are not allowed

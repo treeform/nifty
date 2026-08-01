@@ -1,1 +1,1 @@
-cannot prove 's' is not empty
+error_if_cond_pop.nifty:7: cannot prove 's' is not empty; guard with 'if s.len > 0:'

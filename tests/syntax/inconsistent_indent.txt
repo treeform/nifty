@@ -1,1 +1,1 @@
-inconsistent indentation
+inconsistent_indent.nifty:3: inconsistent indentation

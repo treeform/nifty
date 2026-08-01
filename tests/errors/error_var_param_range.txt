@@ -1,1 +1,1 @@
-exactly the range
+error_var_param_range.nifty:9: argument for var parameter 'x' must have exactly the range 0 .. 5 (got 0 .. 10)

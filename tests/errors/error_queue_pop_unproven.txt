@@ -1,1 +1,1 @@
-cannot prove 'q' is not empty
+error_queue_pop_unproven.nifty:4: cannot prove 'q' is not empty; guard with 'if q.len > 0:'

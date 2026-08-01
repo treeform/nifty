@@ -1,1 +1,1 @@
-needs a 'start' proc
+error_with_no_protocol.nifty:4: with on a int needs a 'start' proc: proc name(x: var int)

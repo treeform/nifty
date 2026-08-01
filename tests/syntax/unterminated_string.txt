@@ -1,1 +1,1 @@
-unterminated string
+unterminated_string.nifty:2: unterminated string

@@ -1,1 +1,1 @@
-expected '..', '..<'
+bad_for.nifty:2: expected '..', '..<' (a range) or ':' (iterate a seq/string) in for loop

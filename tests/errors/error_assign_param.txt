@@ -1,1 +1,1 @@
-cannot assign to immutable
+error_assign_param.nifty:2: cannot assign to immutable 'x'

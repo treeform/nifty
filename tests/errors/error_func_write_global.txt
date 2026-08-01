@@ -1,1 +1,1 @@
-cannot access global
+error_func_write_global.nifty:4: func 'f' cannot access global 'g'

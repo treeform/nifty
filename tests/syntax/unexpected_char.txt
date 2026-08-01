@@ -1,1 +1,1 @@
-unexpected character
+unexpected_char.nifty:2: unexpected character: '~'

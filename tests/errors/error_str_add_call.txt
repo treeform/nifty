@@ -1,1 +1,1 @@
-put the appended string in a variable
+error_str_add_call.nifty:8: put the appended string in a variable first

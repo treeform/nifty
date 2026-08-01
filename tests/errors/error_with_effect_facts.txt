@@ -1,1 +1,1 @@
-cannot prove 'g' is not zero
+error_with_effect_facts.nifty:13: cannot prove 'g' is not zero here; guard the division with 'if g != 0:'

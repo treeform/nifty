@@ -1,1 +1,1 @@
-threads take no parameters
+error_thread_params.nifty:1: threads take no parameters

@@ -1,1 +1,1 @@
-recursion is not allowed
+error_recursion.nifty:2: recursion is not allowed: 'f' calls itself

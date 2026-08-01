@@ -1,1 +1,1 @@
-does not fit string[4]
+error_str_literal_too_long.nifty:2: string literal (17 bytes) does not fit string[4]

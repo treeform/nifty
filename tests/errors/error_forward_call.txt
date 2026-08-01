@@ -1,1 +1,1 @@
-before its declaration
+error_forward_call.nifty:2: 'b' is called before its declaration (declare-before-use keeps the call graph recursion-free)

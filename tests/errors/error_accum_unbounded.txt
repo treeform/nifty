@@ -1,1 +1,1 @@
-does not overflow
+error_accum_unbounded.nifty:6: cannot prove '+' does not overflow: int + int; narrow the ranges or guard first

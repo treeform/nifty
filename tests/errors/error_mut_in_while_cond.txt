@@ -1,1 +1,1 @@
-may not run exactly once
+error_mut_in_while_cond.nifty:4: a mutating method cannot appear here: this position may not run exactly once (loop conditions re-run; elif and and/or right sides may be skipped); do it in its own statement

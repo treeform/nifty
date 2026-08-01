@@ -1,1 +1,1 @@
-at least one thread
+error_no_thread.nifty:1: a nifty program needs at least one thread (thread name() = ...)

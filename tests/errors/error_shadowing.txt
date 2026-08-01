@@ -1,1 +1,1 @@
-already declared
+error_shadowing.nifty:4: 'g' is already declared (shadowing is not allowed)

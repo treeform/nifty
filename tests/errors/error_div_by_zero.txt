@@ -1,1 +1,1 @@
-division by zero
+error_div_by_zero.nifty:2: division by zero

@@ -1,1 +1,1 @@
-shared global
+error_shared_partial_lock.nifty:1: shared global 'counter' is accessed by threads a, b but not consistently protected; every access (reads too) must be inside a with block holding one common lock

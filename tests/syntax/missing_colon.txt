@@ -1,1 +1,1 @@
-expected ':'
+missing_colon.nifty:2: expected ':'

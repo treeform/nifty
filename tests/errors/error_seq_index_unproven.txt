@@ -1,1 +1,1 @@
-cannot prove index is below the length
+error_seq_index_unproven.nifty:4: cannot prove index is below the length (index is 0 .. 7, length is at least 0); test .len first

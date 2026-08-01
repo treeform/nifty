@@ -1,1 +1,1 @@
-too large
+huge_literal.nifty:2: integer literal is too large for int64

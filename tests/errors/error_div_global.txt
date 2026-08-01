@@ -1,1 +1,1 @@
-shared global
+error_div_global.nifty:1: shared global 'zero' is accessed by threads writer, main but not consistently protected; every access (reads too) must be inside a with block holding one common lock

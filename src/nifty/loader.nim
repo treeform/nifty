@@ -12,7 +12,8 @@ type
   Loader = object
     dir: string              # imports resolve next to the importing file
     seen: HashSet[string]    # canonical paths already spliced
-    stack: seq[string]       # import chain, for cycle reporting
+    stack: seq[string]       # canonical import chain, for cycle detection
+    names: seq[string]       # display names matching the stack
 
 proc atIdent(toks: seq[Token], i: int, s: string): bool =
   i < toks.len and toks[i].kind == IdentToken and toks[i].text == s
@@ -21,16 +22,18 @@ proc processImports(ld: var Loader, toks: seq[Token]): seq[Token]
 
 proc spliceImport(ld: var Loader, name: string, line: int): seq[Token] =
   let path = ld.dir / name & ".nifty"
+  let display = name & ".nifty"
   let canon =
     try: expandFilename(path)
-    except OSError: err(line, "cannot find import '" & name & "' (" & path & ")")
+    except OSError: err(line, "cannot find import '" & name & "' (no " &
+      display & " next to the importing file)")
   if canon in ld.stack:
-    err(line, "import cycle: " & ld.stack.join(" -> ") & " -> " & canon)
+    err(line, "import cycle: " & ld.names.join(" -> ") & " -> " & display)
   if canon in ld.seen:
     return @[] # already spliced once; that is all a program needs
   ld.seen.incl canon
   ld.stack.add canon
-  let display = name & ".nifty"
+  ld.names.add display
   srcFiles.add display
   let base = (srcFiles.len - 1) * fileLineBase
   var sub = tokenize(readFile(canon), base)
@@ -38,6 +41,7 @@ proc spliceImport(ld: var Loader, name: string, line: int): seq[Token] =
     sub.setLen(sub.len - 1)
   result = ld.processImports(sub)
   discard ld.stack.pop
+  discard ld.names.pop
 
 proc processImports(ld: var Loader, toks: seq[Token]): seq[Token] =
   ## Handle the leading `import name` lines, splicing each target in

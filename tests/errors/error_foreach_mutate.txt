@@ -1,1 +1,1 @@
-cannot modify 'items' while iterating
+error_foreach_mutate.nifty:4: cannot modify 'items' while iterating it

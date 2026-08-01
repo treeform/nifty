@@ -1,1 +1,1 @@
-has no field
+error_unknown_field.nifty:8: type Vec2 has no field 'z'

@@ -1,1 +1,1 @@
-top level of a thread
+error_loop_nested.nifty:3: loop is only allowed at the top level of a thread body

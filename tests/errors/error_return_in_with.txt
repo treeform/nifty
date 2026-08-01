@@ -1,1 +1,1 @@
-cannot return inside a with block
+error_return_in_with.nifty:5: cannot return inside a with block (its end would never run)

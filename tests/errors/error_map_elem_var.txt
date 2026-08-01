@@ -1,1 +1,1 @@
-cannot be passed as var
+error_map_elem_var.nifty:11: a map element cannot be passed as var; copy it out, change it, and put it back

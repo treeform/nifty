@@ -1,1 +1,1 @@
-cannot assign to immutable
+error_func_write_param.nifty:2: cannot assign to immutable 'x'

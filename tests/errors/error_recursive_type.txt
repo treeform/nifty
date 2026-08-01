@@ -1,1 +1,1 @@
-unknown type
+error_recursive_type.nifty:2: unknown type: 'Node'

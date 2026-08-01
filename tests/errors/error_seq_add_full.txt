@@ -1,1 +1,1 @@
-cannot prove 'items' has room
+error_seq_add_full.nifty:4: cannot prove 'items' has room (length is up to 4 of 4); guard with 'if items.len < 4:' or use push (returns false when full)

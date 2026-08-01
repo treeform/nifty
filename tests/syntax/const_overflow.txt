@@ -1,1 +1,1 @@
-constant expression overflows
+const_overflow.nifty:1: constant expression overflows int64

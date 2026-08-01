@@ -1,1 +1,1 @@
-is inside set[0 .. 63]
+error_set_incl_unproven.nifty:4: cannot prove value (int) is inside set[0 .. 63]; guard or clamp first

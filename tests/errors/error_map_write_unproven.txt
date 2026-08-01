@@ -1,1 +1,1 @@
-cannot prove this write fits
+error_map_write_unproven.nifty:4: cannot prove this write fits: prove 'm.contains(k)' (update) or 'm.len < 4' (insert) first, or use put (returns false when full)

@@ -1,1 +1,1 @@
-tabs are not allowed
+tabs.nifty:2: tabs are not allowed; indent with spaces

@@ -1,1 +1,1 @@
-none needs an optional destination
+error_opt_none_untyped.nifty:2: none needs an optional destination (e.g. var x: int? = none)

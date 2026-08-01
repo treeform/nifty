@@ -1,1 +1,1 @@
-fits 0 .. 10
+error_range_store.nifty:4: cannot prove value (11) fits 0 .. 10; guard or clamp first

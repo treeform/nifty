@@ -1,1 +1,1 @@
-echo is a side effect
+error_echo_in_func.nifty:2: echo is a side effect; not allowed in func
