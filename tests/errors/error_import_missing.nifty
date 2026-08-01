@@ -1,0 +1,4 @@
+import _nosuchmodule
+
+thread main() =
+  echo 1

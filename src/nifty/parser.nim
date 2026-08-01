@@ -584,7 +584,8 @@ proc parseModule(p: var Parser): Module =
       result.routines.add r
     else:
       err(t.line, "unknown declaration: '" & t.text &
-        "' (expected const, var, object, func, proc, or thread)")
+        "' (expected const, var, object, func, proc, or thread; " &
+        "import must be at the top of the file)")
 
 proc parse*(toks: seq[Token]): Module =
   ## Parse a token stream into a Module AST.

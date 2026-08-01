@@ -4,20 +4,20 @@
 ##
 ## Pipeline: lexer -> parser -> checker -> codegen.
 
-import nifty/[common, lexer, parser, checker, codegen, report]
+import nifty/[common, lexer, parser, checker, codegen, report, loader]
 
 export common
 
-proc compileToC*(src: string, moduleName: string): string =
-  ## Compile nifty source text to a C translation unit.
-  let m = parse(tokenize(src))
+proc compileToC*(src: string, moduleName: string, dir = ""): string =
+  ## Compile nifty source text (plus its imports) to a C translation unit.
+  let m = parse(loadTokens(src, moduleName, dir))
   check(m)
   generate(m, moduleName)
 
-proc reportFor*(src: string, moduleName: string): string =
+proc reportFor*(src: string, moduleName: string, dir = ""): string =
   ## Check the program and produce the static resource report:
-  ## exact RAM, worst-case stack, worst-case ops per thread pass.
-  let m = parse(tokenize(src))
+  ## exact RAM, worst-case stack and arena, worst-case ops per pass.
+  let m = parse(loadTokens(src, moduleName, dir))
   check(m)
   buildReport(m, moduleName)
 
@@ -68,15 +68,15 @@ options:
   let modName = srcPath.extractFilename
   if cmd == "report":
     try:
-      stdout.write reportFor(readFile(srcPath), modName)
+      stdout.write reportFor(readFile(srcPath), modName, srcPath.parentDir)
     except NiftyError as e:
-      quit("nifty: " & srcPath & ": " & e.msg, 1)
+      quit("nifty: " & e.msg, 1)
     quit(0)
   var cCode = ""
   try:
-    cCode = compileToC(readFile(srcPath), modName)
+    cCode = compileToC(readFile(srcPath), modName, srcPath.parentDir)
   except NiftyError as e:
-    quit("nifty: " & srcPath & ": " & e.msg, 1)
+    quit("nifty: " & e.msg, 1)
   let base = srcPath.changeFileExt("")
   let cPath = base & ".c"
   writeFile(cPath, cCode)

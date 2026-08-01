@@ -14,10 +14,11 @@ type
 const multiOps = ["..<", "..", "==", "!=", "<=", ">="]
 const singleOps = {'+', '-', '*', '/', '%', '(', ')', '[', ']', ':', ',', '=', '<', '>', '.', '?'}
 
-proc tokenize*(src: string): seq[Token] =
+proc tokenize*(src: string, baseLine = 0): seq[Token] =
   ## Turn source text into tokens, including indent/dedent tokens.
+  ## baseLine is the file-id encoding offset (see common.fileLineBase).
   var indents = @[0]
-  var lineNo = 0
+  var lineNo = baseLine
   for rawLine in src.splitLines:
     inc lineNo
     # Cut off comments (a '#' outside a string literal).

@@ -1,0 +1,6 @@
+import _mathmod
+
+var reading: 0 .. 3000
+
+proc record(x: 0 .. 1000) =
+  reading = triple(x)

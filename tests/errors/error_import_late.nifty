@@ -1,0 +1,6 @@
+const X = 1
+
+import _mathmod
+
+thread main() =
+  echo X

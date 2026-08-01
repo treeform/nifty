@@ -1,0 +1,4 @@
+const Scale = 3
+
+func triple(x: 0 .. 1000): 0 .. 3000 =
+  return x * Scale

@@ -1,0 +1,12 @@
+# import splices the target file once (splice-once, diamond-safe),
+# in import order, into one whole-program compilation. One namespace,
+# no visibility - the proofs are the encapsulation.
+
+import _mathmod
+import _sensormod
+
+thread main() =
+  echo triple(7)
+  record(100)
+  echo reading
+  echo Scale

@@ -1,0 +1,4 @@
+import _cyca
+
+thread main() =
+  echo 1

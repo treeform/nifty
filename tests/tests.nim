@@ -32,6 +32,8 @@ proc runTestsInDir(dir, label: string, mode: TestMode, workDir: string) =
       paths.add path
   paths.sort()
   for path in paths:
+    if path.extractFilename().startsWith("_"):
+      continue # helper module for an import test, not a test itself
     let testName = path.extractFilename().changeFileExt("")
     let expectedPath = path.changeFileExt(".txt")
     if not fileExists(expectedPath):
@@ -41,7 +43,7 @@ proc runTestsInDir(dir, label: string, mode: TestMode, workDir: string) =
     var compileError = ""
     var cCode = ""
     try:
-      cCode = compileToC(readFile(path), path.extractFilename)
+      cCode = compileToC(readFile(path), path.extractFilename, path.parentDir)
     except NiftyError as e:
       compileError = e.msg
 
@@ -104,6 +106,8 @@ proc runReportTests(dir, label: string) =
       paths.add path
   paths.sort()
   for path in paths:
+    if path.extractFilename().startsWith("_"):
+      continue
     let testName = path.extractFilename().changeFileExt("")
     let expectedPath = path.changeFileExt(".txt")
     if not fileExists(expectedPath):
@@ -111,7 +115,8 @@ proc runReportTests(dir, label: string) =
       continue
     let expected = readFile(expectedPath).replace("\r\n", "\n").strip()
     try:
-      let actual = reportFor(readFile(path), path.extractFilename).strip()
+      let actual = reportFor(readFile(path), path.extractFilename,
+        path.parentDir).strip()
       if actual == expected:
         echo "  PASS: " & label & "/" & testName
         testsPassed += 1

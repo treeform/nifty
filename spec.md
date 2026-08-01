@@ -42,6 +42,25 @@ proven does not compile; what compiles cannot trap.
   references are array indices. (Planned: `index arr` types — indices
   bound to a specific global array, born in-range and never dangling.)
 
+## Imports
+
+`import name` at the top of a file splices `name.nifty` (resolved next
+to the importing file) into the program — once, no matter how many
+files import it. Whole-program, fresh, every time: the SQLite-
+amalgamation model, and in nifty it is not even a trade-off, because
+every proof (thread ownership, lock inference, arenas, WCET) is a
+whole-program analysis — separate compilation was never possible.
+
+- Imports come before any declaration; the import graph must be a DAG
+  (a cycle is a compile error — the no-recursion principle, one level
+  up). Splice order is import order, so declare-before-use holds across
+  files and all proofs work unchanged.
+- One namespace, no visibility modifiers. A cross-file name collision is
+  the ordinary duplicate-name error. Encapsulation as *safety* is the
+  checker's job (races, ranges, container internals are already
+  unbreakable); encapsulation as *communication* is a naming convention.
+- Errors report `file.nifty:line` across splices.
+
 ## Program structure
 
 A module is a sequence of declarations. There is no top-level executable
@@ -455,6 +474,8 @@ from properties the checker proves:
 ## Grammar (v0, informal)
 
 ```
+program     = { importDecl } module
+importDecl  = "import" ident NL
 module      = { constDecl | globalDecl | objectDecl | routineDecl }
 constDecl   = "const" ident "=" constExpr NL
 globalDecl  = "var" ident ":" type NL
@@ -502,7 +523,8 @@ and-predicate engine; thread ownership and lock inference (data-race
 freedom); defined left-to-right evaluation with effects; accumulator
 induction; per-thread arenas for big locals; `echo`/`discard`; C output
 with zero runtime checks; generated `main` with thread spawn/join;
-`nifty report` (globals / stack / arena / ops); gold-master test suite.
+`nifty report` (globals / stack / arena / ops); splice-once imports with
+cycle rejection and file-tagged errors; gold-master test suite.
 
 Not yet implemented: wildcard generics, `index` types, absence reasons
 (`T ? codeRange` with a provable `.error` — `none` is deliberately mute),
