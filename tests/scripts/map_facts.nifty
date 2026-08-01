@@ -1,0 +1,19 @@
+var m: map[0 .. 7, 1 .. 99]
+
+func pick(m2: int): int =
+  return m2
+
+proc show(k: 0 .. 7) =
+  if not m.contains(k):
+    return
+  echo m[k]
+
+thread main() =
+  m.put(2, 20)
+  m.put(4, 40)
+  show(2)
+  show(3)
+  if m.contains(2) and m.contains(4):
+    echo m[2] + m[4]
+  if m.contains(4) and m[4] > 30:
+    echo "big"

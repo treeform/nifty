@@ -1071,6 +1071,14 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         err(e.line, "mutate a seq/string through a plain variable name")
       if not e.kids[0].mut:
         err(e.line, "cannot mutate immutable '" & e.kids[0].sval & "'")
+      # The mutated variable may be serving as a map KEY in a containment
+      # fact ("m@base"): that predicate is about its old value.
+      var staleKeys: seq[string]
+      for fk in c.facts.keys:
+        if fk.endsWith("@" & e.kids[0].sval):
+          staleKeys.add fk
+      for fk in staleKeys:
+        c.facts.del fk
     var key = ""
     if e.kids[0].kind == ekIdent and c.factEligibleIdent(e.kids[0]):
       key = e.kids[0].sval & ".len"

@@ -1,0 +1,7 @@
+thread main() =
+  var m: map[4, string[8], int]
+  m["a"] = 1
+  var k: string[8] = "a"
+  if m.contains(k):
+    k.add("x")
+    echo m[k]

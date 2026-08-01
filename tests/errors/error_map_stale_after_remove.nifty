@@ -1,0 +1,7 @@
+var m: map[0 .. 7, int]
+
+thread main() =
+  m.put(3, 30)
+  if m.contains(3):
+    m.remove(3)
+    echo m[3]

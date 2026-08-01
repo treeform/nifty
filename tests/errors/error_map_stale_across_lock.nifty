@@ -1,0 +1,14 @@
+var m: map[4, int, int]
+var l: Lock
+
+thread writer() =
+  with l:
+    m.remove(3)
+
+thread main() =
+  var ok = false
+  with l:
+    ok = m.contains(3)
+  with l:
+    if ok:
+      echo m[3]
