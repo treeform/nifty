@@ -1,0 +1,9 @@
+var board: array[40, int]
+
+proc shuffled(): array[40, int] =
+  var out: array[40, int]
+  out[0] = board[0]
+  return out
+
+thread main() =
+  board = shuffled()

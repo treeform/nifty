@@ -1,0 +1,6 @@
+thread main() =
+  var wide: seq[4, int]
+  wide.add(1000)
+  var narrow: seq[4, 0 .. 9]
+  narrow = wide
+  echo narrow[0]

@@ -1,1 +1,1 @@
-error_func_write_param_field.nifty:6: cannot assign to immutable 'v'
+error_func_write_param_field.nifty:6: cannot assign to parameter 'v' (func params are read-only; use a proc with a var parameter)

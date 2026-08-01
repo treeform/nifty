@@ -1,0 +1,1 @@
+error_var_never_modified.nifty:2: 'x' is never modified; declare it with let instead of var

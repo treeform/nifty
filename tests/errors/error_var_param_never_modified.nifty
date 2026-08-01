@@ -1,0 +1,7 @@
+proc show(x: var int) =
+  echo x
+
+var g: int
+
+thread main() =
+  show(g)

@@ -1,0 +1,1 @@
+error_big_return_alias.nifty:9: cannot assign 'shuffled(...)' straight into global 'board': 'shuffled' also accesses 'board'; store to a local first

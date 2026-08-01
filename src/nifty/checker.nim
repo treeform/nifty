@@ -38,7 +38,10 @@ type
     facts: Table[string, Fact] # names with refined ranges at this point
     mutBan: int                # >0 where mutating methods may not appear
     routineAccess: Table[string, HashSet[string]] # routine -> globals it touches
+    allowBigRet: bool        # true only for a call that IS a store target
     heldLocks: seq[string]     # Lock names currently held (lexical with-stack)
+    varDecls: Table[string, int]   # var locals/params -> declaration line
+    modified: HashSet[string]      # names actually modified this routine
     sharedProt: Table[string, HashSet[string]] # shared global -> its lock(s)
     routineWrites: Table[string, HashSet[string]] # routine -> globals it may write
 
@@ -49,7 +52,7 @@ const
 proc fullFact(): Fact =
   Fact(lo: IntLow, hi: IntHigh, notZero: false)
 
-proc typFact(t: Typ): Fact =
+proc typeFact(t: Typ): Fact =
   ## The fact implied by a declared type: its range invariant.
   if t != nil and t.kind == IntType:
     Fact(lo: t.rlo, hi: t.rhi, notZero: t.rlo > 0 or t.rhi < 0)
@@ -189,7 +192,7 @@ proc coerceOpt(c: var Ctx, e: Expr, target: Typ): bool =
   if e.kind == NoneExpr:
     e.typ = target
     return true
-  if e.typ != nil and not e.typ.opt and typEq(e.typ, deOpt(target)):
+  if e.typ != nil and not e.typ.opt and typeEq(e.typ, deOpt(target)):
     if e.typ.kind == IntType and not exprFact(e).fits(deOpt(target)):
       err(e.line, "cannot prove value (" & rangeStr(exprFact(e)) &
         ") fits " & $deOpt(target) & "; guard or clamp first")
@@ -256,6 +259,9 @@ proc pathHasMapIndex(e: Expr): bool =
     cur = cur.kids[0]
   false
 
+proc markModified(c: var Ctx, name: string) =
+  c.modified.incl name
+
 proc rootIdent(e: Expr): Expr =
   result = e
   while result.kind in {IndexExpr, FieldExpr}:
@@ -282,9 +288,9 @@ proc declFactByName(c: Ctx, name: string): Fact =
     return fullFact()
   for i in countdown(c.scopes.len - 1, 0):
     if name in c.scopes[i]:
-      return typFact(c.scopes[i][name].typ)
+      return typeFact(c.scopes[i][name].typ)
   if name in c.globals:
-    return typFact(c.globals[name])
+    return typeFact(c.globals[name])
   fullFact()
 
 proc curFact(c: Ctx, name: string): Fact =
@@ -655,7 +661,7 @@ proc declFact(c: Ctx, e: Expr, loopVar: string, loopFact: Fact):
     else:
       let t = c.declTypeOf(e)
       if t != nil and t.kind == IntType:
-        result = (true, typFact(t))
+        result = (true, typeFact(t))
   of NegExpr:
     let a = c.declFact(e.kids[0], loopVar, loopFact)
     if a.ok:
@@ -689,12 +695,12 @@ proc declFact(c: Ctx, e: Expr, loopVar: string, loopFact: Fact):
   of IndexExpr, FieldExpr:
     let t = c.declTypeOf(e)
     if t != nil and t.kind == IntType:
-      result = (true, typFact(t))
+      result = (true, typeFact(t))
   of CallExpr:
     if e.sval in c.routineTab:
       let rt = c.routineTab[e.sval].ret
       if rt != nil and rt.kind == IntType:
-        result = (true, typFact(rt))
+        result = (true, typeFact(rt))
   else:
     discard
 
@@ -774,7 +780,7 @@ proc accumWiden(c: Ctx, s: Stmt, assigned: HashSet[string],
     # Saturation only widens the interval, which stays sound; the declared
     # range is an invariant, so the intersection is sound and tighter.
     let v0 = entry.getOrDefault(v, c.declFactByName(v))
-    let dt = typFact(declTyp)
+    let dt = typeFact(declTyp)
     result[v] = Fact(
       lo: max(satAdd(v0.lo, satMul(trips, dLo).v).v, dt.lo),
       hi: min(satAdd(v0.hi, satMul(trips, dHi).v).v, dt.hi))
@@ -885,28 +891,28 @@ proc whileBound(c: Ctx, s: Stmt): int64 =
 
 ## Range Compatibility
 
-proc typRangeEq(a, b: Typ): bool =
+proc typeRangeEq(a, b: Typ): bool =
   ## Exact range match, required for var parameters (writes flow both ways).
   if a.kind != b.kind:
     return false
   case a.kind
   of IntType: a.rlo == b.rlo and a.rhi == b.rhi
-  of ArrayType, SeqType, QueueType: a.len == b.len and typRangeEq(a.elem, b.elem)
-  of DenseMapType: typRangeEq(a.val, b.val)
-  of SparseMapType: a.len == b.len and typRangeEq(a.elem, b.elem) and
-    typRangeEq(a.val, b.val)
+  of ArrayType, SeqType, QueueType: a.len == b.len and typeRangeEq(a.elem, b.elem)
+  of DenseMapType: typeRangeEq(a.val, b.val)
+  of SparseMapType: a.len == b.len and typeRangeEq(a.elem, b.elem) and
+    typeRangeEq(a.val, b.val)
   else: true
 
-proc typRangeFits(a, b: Typ): bool =
+proc typeRangeFits(a, b: Typ): bool =
   ## a is usable where b is expected read-only (a's ranges inside b's).
   if a.kind != b.kind:
     return false
   case a.kind
   of IntType: a.rlo >= b.rlo and a.rhi <= b.rhi
-  of ArrayType, SeqType, QueueType: a.len == b.len and typRangeFits(a.elem, b.elem)
-  of DenseMapType: typRangeFits(a.val, b.val)
-  of SparseMapType: a.len == b.len and typRangeFits(a.elem, b.elem) and
-    typRangeFits(a.val, b.val)
+  of ArrayType, SeqType, QueueType: a.len == b.len and typeRangeFits(a.elem, b.elem)
+  of DenseMapType: typeRangeFits(a.val, b.val)
+  of SparseMapType: a.len == b.len and typeRangeFits(a.elem, b.elem) and
+    typeRangeFits(a.val, b.val)
   else: true
 
 proc zeroOk(t: Typ): bool =
@@ -954,7 +960,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       else:
         # Unowned globals outside their lock and var params: only the
         # declared range invariant holds.
-        e.setFact typFact(e.typ)
+        e.setFact typeFact(e.typ)
   of NegExpr:
     let nt = c.expectVal(e.kids[0])
     rejectOpt(nt, e.kids[0])
@@ -1048,7 +1054,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           err(e.line, "'" & e.sval & "' needs int operands, got " & $a & " and " & $b)
         e.typ = Typ(kind: BoolType)
       of "==", "!=":
-        if not typEq(a, b) or a.kind notin {IntType, BoolType}:
+        if not typeEq(a, b) or a.kind notin {IntType, BoolType}:
           err(e.line, "'" & e.sval & "' needs two ints or two bools, got " &
             $a & " and " & $b)
         e.typ = Typ(kind: BoolType)
@@ -1064,7 +1070,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         kt = base.elem
       let want = if base.kind == DenseMapType: intType() else: base.elem
       if (base.kind == DenseMapType and kt.kind != IntType) or
-          (base.kind == SparseMapType and not typEq(kt, base.elem)):
+          (base.kind == SparseMapType and not typeEq(kt, base.elem)):
         err(e.kids[1].line, "map key must be " & $base.elem & ", got " & $kt)
       let key = c.mapFactKey(e.kids[0], e.kids[1])
       if key == "" or key notin c.facts:
@@ -1072,7 +1078,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           (if e.kids[0].kind == IdentExpr: e.kids[0].sval else: "m") &
           ".contains(k):' first, or use .get(k, fallback)")
       e.typ = base.val
-      e.setFact typFact(base.val)
+      e.setFact typeFact(base.val)
       return e.typ
     if base.kind notin {ArrayType, SeqType, StringType}:
       err(e.line, "'[]' needs an array, seq, string, or map, got " & $base)
@@ -1098,7 +1104,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           rangeStr(f) & ", length is at least " & $lf.lo &
           "); test .len first")
       e.typ = if base.kind == SeqType: base.elem else: intType(0, 255)
-    e.setFact typFact(e.typ)
+    e.setFact typeFact(e.typ)
   of FieldExpr:
     let base = c.expectVal(e.kids[0])
     if e.sval == "ok" and (base.opt or e.kids[0].unwrapOpt):
@@ -1137,7 +1143,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if pn != "" and (pn & "@ok") in c.facts:
           e.typ = deOpt(e.typ)
           e.unwrapOpt = true
-      e.setFact typFact(e.typ)
+      e.setFact typeFact(e.typ)
     else:
       err(e.line, "'.' needs an object, seq, or string, got " & $base)
   of MethodExpr:
@@ -1157,12 +1163,12 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       var ft = c.expectVal(e.kids[1])
       if c.coerceStrLit(e.kids[1], deOpt(bt)):
         ft = deOpt(bt)
-      if not typEq(ft, deOpt(bt)):
+      if not typeEq(ft, deOpt(bt)):
         err(e.kids[1].line, "fallback must be " & $deOpt(bt) & ", got " & $ft)
       if deOpt(bt).kind == IntType and not exprFact(e.kids[1]).fits(deOpt(bt)):
         err(e.kids[1].line, "cannot prove fallback fits " & $deOpt(bt))
       e.typ = deOpt(bt)
-      e.setFact typFact(e.typ)
+      e.setFact typeFact(e.typ)
       return e.typ
     rejectOpt(bt, e.kids[0])
     if e.sval in mutMethods:
@@ -1173,7 +1179,9 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       if e.kids[0].kind != IdentExpr:
         err(e.line, "mutate a seq/string through a plain variable name")
       if not e.kids[0].mut:
-        err(e.line, "cannot mutate immutable '" & e.kids[0].sval & "'")
+        err(e.line, "cannot mutate immutable '" & e.kids[0].sval &
+          "' (declared with let; make it var if it must change)")
+      c.markModified(e.kids[0].sval)
       # The mutated variable may be serving as a map KEY in a containment
       # fact ("m@base"): that predicate is about its old value.
       var staleKeys: seq[string]
@@ -1209,7 +1217,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             at = bt.elem
           elif c.coerceStrLit(e.kids[1], bt.elem):
             at = bt.elem
-        if not typEq(at, bt.elem):
+        if not typeEq(at, bt.elem):
           err(e.kids[1].line, "cannot add " & $at & " to " & $bt)
         if bt.elem.kind == IntType and not exprFact(e.kids[1]).fits(bt.elem):
           err(e.kids[1].line, "cannot prove value (" &
@@ -1238,7 +1246,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if key != "":
           c.facts[key] = Fact(lo: lf.lo - 1, hi: max(lf.hi - 1, 0'i64))
         e.typ = bt.elem
-        e.setFact typFact(bt.elem)
+        e.setFact typeFact(bt.elem)
       of "clear":
         if nArgs != 0:
           err(e.line, "clear takes no arguments")
@@ -1336,7 +1344,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
               rangeStr(exprFact(e.kids[1])) & ") is inside " & $bt.elem &
               "; guard or clamp first")
         else:
-          if not typEq(kt, bt.elem):
+          if not typeEq(kt, bt.elem):
             err(e.kids[1].line, "map key must be " & $bt.elem & ", got " & $kt)
           if bt.elem.kind == IntType and
               not exprFact(e.kids[1]).fits(bt.elem):
@@ -1353,7 +1361,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             vt = bt.val
           elif c.coerceStrLit(e.kids[2], bt.val):
             vt = bt.val
-        if not typEq(vt, bt.val):
+        if not typeEq(vt, bt.val):
           err(e.kids[2].line, "map value must be " & $bt.val & ", got " & $vt)
         if bt.val.kind == IntType and not exprFact(e.kids[2]).fits(bt.val):
           err(e.kids[2].line, "cannot prove value (" &
@@ -1376,7 +1384,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if not dense and c.coerceStrLit(e.kids[1], bt.elem):
           kt = bt.elem
         if (dense and kt.kind != IntType) or
-            (not dense and not typEq(kt, bt.elem)):
+            (not dense and not typeEq(kt, bt.elem)):
           err(e.kids[1].line, "map key must be " & $bt.elem & ", got " & $kt)
         var ft: Typ = nil
         if e.kids[2].kind == NoneExpr:
@@ -1390,12 +1398,12 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             ft = bt.val
           elif c.coerceStrLit(e.kids[2], bt.val):
             ft = bt.val
-        if not typEq(ft, bt.val):
+        if not typeEq(ft, bt.val):
           err(e.kids[2].line, "fallback must be " & $bt.val & ", got " & $ft)
         if bt.val.kind == IntType and not exprFact(e.kids[2]).fits(bt.val):
           err(e.kids[2].line, "cannot prove fallback fits " & $bt.val)
         e.typ = bt.val
-        e.setFact typFact(bt.val)
+        e.setFact typeFact(bt.val)
       of "contains":
         if nArgs != 1:
           err(e.line, "contains takes one argument")
@@ -1405,7 +1413,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if not dense and c.coerceStrLit(e.kids[1], bt.elem):
           kt = bt.elem
         if (dense and kt.kind != IntType) or
-            (not dense and not typEq(kt, bt.elem)):
+            (not dense and not typeEq(kt, bt.elem)):
           err(e.kids[1].line, "map key must be " & $bt.elem & ", got " & $kt)
         e.typ = Typ(kind: BoolType)
       of "remove":
@@ -1415,7 +1423,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if not dense and c.coerceStrLit(e.kids[1], bt.elem):
           kt = bt.elem
         if (dense and kt.kind != IntType) or
-            (not dense and not typEq(kt, bt.elem)):
+            (not dense and not typeEq(kt, bt.elem)):
           err(e.kids[1].line, "map key must be " & $bt.elem & ", got " & $kt)
         if key != "":
           c.facts[key] = Fact(lo: max(lf.lo - 1, 0'i64), hi: lf.hi)
@@ -1445,6 +1453,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       err(e.line, "'." & e.sval &
         "()' needs a seq, string, set, queue, or map, got " & $bt)
   of CallExpr:
+    let bigOk = c.allowBigRet
+    c.allowBigRet = false # arguments are not store targets
     let name = e.sval
     if name notin c.allRoutines:
       err(e.line, "unknown func or proc: '" & name & "'")
@@ -1476,7 +1486,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           at = pt.typ
         elif c.coerceStrLit(arg, pt.typ):
           at = pt.typ
-      if not typEq(at, pt.typ):
+      if not typeEq(at, pt.typ):
         err(arg.line, "argument " & $(i + 1) & " of '" & name & "': expected " &
           $pt.typ & ", got " & $at)
       if pt.isVar:
@@ -1487,10 +1497,12 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           err(arg.line, "a map element cannot be passed as var; copy it " &
             "out, change it, and put it back")
         let root = arg.rootIdent
+        if root.kind == IdentExpr:
+          c.markModified(root.sval)
         if root.kind != IdentExpr or not root.mut:
           err(arg.line, "argument for var parameter '" & pt.name &
             "' must be mutable")
-        if not typRangeEq(at, pt.typ):
+        if not typeRangeEq(at, pt.typ):
           err(arg.line, "argument for var parameter '" & pt.name &
             "' must have exactly the range " & $pt.typ & " (got " & $at & ")")
         if name in c.routineAccess:
@@ -1501,28 +1513,36 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
               "would make its facts lie (aliasing)")
           if root.symKind == ParamSym and root.isVarParam:
             for gname in c.routineAccess[name]:
-              if gname in c.globals and typEq(c.globals[gname], root.typ):
+              if gname in c.globals and typeEq(c.globals[gname], root.typ):
                 err(arg.line, "cannot forward var parameter '" & root.sval &
                   "' to '" & name & "': it accesses global '" & gname &
                   "' of the same type, which '" & root.sval &
                   "' might alias")
         c.delFacts root.sval
       else:
-        if pt.typ.kind == IntType:
+        if pt.typ.opt and at != nil and at.opt and
+            not typeRangeFits(at, pt.typ):
+          err(arg.line, "argument " & $(i + 1) & " of '" & name & "': " &
+            $at & " does not fit " & $pt.typ)
+        if pt.typ.kind == IntType and not pt.typ.opt:
           if not exprFact(arg).fits(pt.typ):
             err(arg.line, "cannot prove argument " & $(i + 1) & " of '" &
               name & "' (" & rangeStr(exprFact(arg)) & ") fits parameter '" &
               pt.name & "' (" & $pt.typ & "); guard or clamp first")
-        elif not typRangeFits(at, pt.typ):
+        elif not typeRangeFits(at, pt.typ):
           err(arg.line, "argument " & $(i + 1) & " of '" & name &
             "': element ranges of " & $at & " do not fit " & $pt.typ)
     # The callee may write globals; facts about them are now stale.
     if name in c.routineWrites:
       for g in c.routineWrites[name]:
         c.delFacts g
+    if bigRet(r.ret) and not bigOk:
+      err(e.line, "'" & name & "' returns " & $r.ret & " (" &
+        $typeSize(r.ret) & " bytes); a value this big must be stored " &
+        "straight into a variable: var x = " & name & "(...)")
     e.typ = r.ret
     if r.ret != nil and r.ret.kind == IntType:
-      e.setFact typFact(r.ret)
+      e.setFact typeFact(r.ret)
   e.typ
 
 ## Statement Checking
@@ -1548,6 +1568,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           "(e.g. var x: int? = none)")
       s.init.typ = t
     elif s.init != nil:
+      if s.init.kind == CallExpr:
+        c.allowBigRet = true
       var it = c.expectVal(s.init)
       if c.coerceOpt(s.init, t):
         it = t
@@ -1556,12 +1578,14 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       elif it.kind == StringLitType:
         err(s.line, "string literals need a string[N] destination " &
           "(e.g. var s: string[20] = \"hi\")")
-      if it.kind == ArrayType:
-        err(s.line, "arrays cannot be copied; copy elements in a loop")
       if t == nil:
         t = it
-      elif not typEq(t, it):
+      elif not typeEq(t, it):
         err(s.line, "type mismatch: declared " & $t & ", initializer is " & $it)
+      if t.kind in {ArrayType, SeqType, QueueType, DenseMapType,
+          SparseMapType} and not typeRangeFits(it, t):
+        err(s.line, "cannot copy: element ranges of " & $it &
+          " do not fit " & $t)
       initFact = exprFact(s.init)
       if t.kind == IntType and not initFact.fits(t):
         err(s.line, "cannot prove initializer (" & rangeStr(initFact) &
@@ -1578,6 +1602,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       err(s.line, "'" & s.name & "' is already declared (shadowing is not allowed)")
     s.typ = t
     c.scopes[^1][s.name] = Sym(kind: LocalSym, typ: t, mutable: s.kind == VarStmt)
+    if s.kind == VarStmt:
+      c.varDecls[s.name] = s.line
     if t.opt:
       # Only a DEFINITE initializer grants ok: a wrapped plain value or a
       # proven optional. An unproven optional (or none) grants nothing.
@@ -1617,7 +1643,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
               rangeStr(exprFact(s.lhs.kids[1])) & ") is inside " &
               $bt.elem & "; guard or clamp first")
         else:
-          if not typEq(kt, bt.elem):
+          if not typeEq(kt, bt.elem):
             err(s.lhs.kids[1].line, "map key must be " & $bt.elem &
               ", got " & $kt)
           if bt.elem.kind == IntType and
@@ -1635,12 +1661,13 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
             vt = bt.val
           elif c.coerceStrLit(s.rhs, bt.val):
             vt = bt.val
-        if not typEq(vt, bt.val):
+        if not typeEq(vt, bt.val):
           err(s.line, "map value must be " & $bt.val & ", got " & $vt)
         if bt.val.kind == IntType and not exprFact(s.rhs).fits(bt.val):
           err(s.line, "cannot prove value (" & rangeStr(exprFact(s.rhs)) &
             ") fits " & $bt.val)
         let mname = s.lhs.kids[0].sval
+        c.markModified(mname)
         let pk = c.mapFactKey(s.lhs.kids[0], s.lhs.kids[1])
         var lkey = ""
         if c.factEligibleIdent(s.lhs.kids[0]):
@@ -1673,9 +1700,15 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     if root.kind != IdentExpr:
       err(s.lhs.line, "cannot assign to this expression")
     if not root.mut:
-      err(s.lhs.line, "cannot assign to immutable '" & root.sval & "'")
-    if lt.kind == ArrayType:
-      err(s.lhs.line, "whole-array assignment is not allowed; copy elements in a loop")
+      if root.symKind == ParamSym:
+        if c.cur.kind == FuncRoutine:
+          err(s.lhs.line, "cannot assign to parameter '" & root.sval &
+            "' (func params are read-only; use a proc with a var parameter)")
+        err(s.lhs.line, "cannot assign to parameter '" & root.sval &
+          "' (make it a var parameter if it must change)")
+      err(s.lhs.line, "cannot assign to immutable '" & root.sval &
+        "' (declared with let or a loop variable; make it var)")
+
     var rt: Typ = nil
     if s.rhs.kind == NoneExpr:
       if lt == nil or not lt.opt:
@@ -1683,19 +1716,44 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       s.rhs.typ = lt
       rt = lt
     else:
+      if s.rhs.kind == CallExpr:
+        c.allowBigRet = true
       rt = c.expectVal(s.rhs)
       if c.coerceOpt(s.rhs, lt):
         rt = lt
       elif c.coerceStrLit(s.rhs, lt):
         rt = lt
-    if not typEq(lt, rt):
+    if s.rhs.kind == CallExpr and bigRet(rt):
+      # The callee fills the destination directly; it must not also be
+      # reading that destination as a global, or its facts would lie.
+      let callee = s.rhs.sval
+      if callee in c.routineAccess:
+        if root.symKind == GlobalSym and root.sval in c.routineAccess[callee]:
+          err(s.line, "cannot assign '" & callee & "(...)' straight into " &
+            "global '" & root.sval & "': '" & callee & "' also accesses '" &
+            root.sval & "'; store to a local first")
+        if root.symKind == ParamSym and root.isVarParam:
+          for gname in c.routineAccess[callee]:
+            if gname in c.globals and typeEq(c.globals[gname], root.typ):
+              err(s.line, "cannot assign '" & callee & "(...)' straight " &
+                "into var parameter '" & root.sval & "': '" & callee &
+                "' accesses global '" & gname & "' of the same type, " &
+                "which '" & root.sval & "' might alias; store to a local first")
+    if not typeEq(lt, rt):
       err(s.line, "type mismatch: cannot assign " & $rt & " to " & $lt)
+    if lt.kind in {ArrayType, SeqType, QueueType, DenseMapType,
+        SparseMapType} and not typeRangeFits(rt, lt):
+      err(s.line, "cannot copy: element ranges of " & $rt &
+        " do not fit " & $lt)
+    if lt.opt and rt != nil and rt.opt and not typeRangeFits(rt, lt):
+      err(s.line, "cannot assign: " & $rt & " does not fit " & $lt)
     # The store proof: the value must fit the declared range invariant.
     if lt.kind == IntType:
       let rf = exprFact(s.rhs)
       if not rf.fits(lt):
         err(s.line, "cannot prove value (" & rangeStr(rf) & ") fits " & $lt &
           "; guard or clamp first")
+    c.markModified(root.sval)
     if s.lhs.kind == IdentExpr:
       c.delFacts s.lhs.sval
       if lt != nil and lt.opt and c.factEligibleIdent(s.lhs):
@@ -1872,7 +1930,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       s.typ2 = t.val
     # Accumulators widen here too: the element variable is the loop
     # variable, bounded by the element type.
-    let widened = c.accumWiden(s, assigned, typFact(elemT), c.facts)
+    let widened = c.accumWiden(s, assigned, typeFact(elemT), c.facts)
     for n in assigned:
       c.delFacts n
     for n, f in widened:
@@ -1916,7 +1974,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           err(s.line, "'" & pn & "' must be declared before this with statement")
         let r = c.routineTab[pn]
         if r.kind != ProcRoutine or r.params.len != 1 or not r.params[0].isVar or
-            not typEq(r.params[0].typ, t) or not typRangeEq(r.params[0].typ, t) or
+            not typeEq(r.params[0].typ, t) or not typeRangeEq(r.params[0].typ, t) or
             not r.ret.isNil:
           err(s.line, "with on a " & $t & " needs '" & pn & "' to be: " & want)
       for pn in ["start", "end"]:
@@ -1971,12 +2029,14 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         s.value.typ = c.cur.ret
         t = c.cur.ret
       else:
+        if s.value.kind == CallExpr:
+          c.allowBigRet = true
         t = c.expectVal(s.value)
         if c.coerceOpt(s.value, c.cur.ret):
           t = c.cur.ret
         elif c.coerceStrLit(s.value, c.cur.ret):
           t = c.cur.ret
-      if not typEq(t, c.cur.ret):
+      if not typeEq(t, c.cur.ret):
         err(s.line, "return type mismatch: got " & $t & ", expected " & $c.cur.ret)
       if c.cur.ret.kind == IntType:
         let rf = exprFact(s.value)
@@ -2173,6 +2233,8 @@ proc check*(m: Module) =
     c.loopWiths = @[]
     c.facts = initTable[string, Fact]()
     c.heldLocks = @[]
+    c.varDecls = initTable[string, int]()
+    c.modified = initHashSet[string]()
     case r.kind
     of ThreadRoutine:
       if r.params.len > 0:
@@ -2192,6 +2254,8 @@ proc check*(m: Module) =
         err(r.line, "func parameters are read-only; var parameters are not allowed")
       if pm.name in paramScope or pm.name in used:
         err(r.line, "duplicate or shadowing parameter name: '" & pm.name & "'")
+      if pm.isVar:
+        c.varDecls[pm.name] = r.line
       paramScope[pm.name] = Sym(kind: ParamSym, typ: pm.typ,
         mutable: pm.isVar, isVarParam: pm.isVar)
     c.scopes = @[paramScope, initTable[string, Sym]()]
@@ -2199,4 +2263,20 @@ proc check*(m: Module) =
       c.checkStmt(s, true)
     if not r.ret.isNil and not alwaysReturns(r.body):
       err(r.line, "'" & r.name & "': not all code paths return a value")
+    # Mutability is strategic: var means it changes. A var that never
+    # changes must be a let (or a plain parameter).
+    for vname, vline in c.varDecls:
+      if vname notin c.modified:
+        var isParam = false
+        for pm in r.params:
+          if pm.name == vname:
+            isParam = true
+        if isParam:
+          if r.name in ["start", "end"]:
+            continue # the with protocol imposes the var signature
+          err(vline, "var parameter '" & vname & "' is never modified in '" &
+            r.name & "'; remove var")
+        else:
+          err(vline, "'" & vname & "' is never modified; declare it with " &
+            "let instead of var")
     c.checked.incl r.name

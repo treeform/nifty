@@ -23,18 +23,18 @@ func safeDiv(a: 0 .. 100000, b: int): int =
 thread main() =
   # Constants and nonzero initializers are proven by value.
   echo 100 / K
-  var q = 4
+  let q = 4
   echo 100 / q
 
   # A test proves a local for exactly the branch where it holds.
-  var b = 0
+  let b = 0
   if b != 0:
     echo 1 / b
   else:
     echo -1
 
   # The else branch of == 0 is a proof too.
-  var m = 3
+  let m = 3
   if m == 0:
     echo -3
   else:

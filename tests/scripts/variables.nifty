@@ -3,11 +3,11 @@ const Base = 100
 var counter: int
 
 thread main() =
-  var a = 1
+  let a = 1
   let b = 2
   var c: int
   c = a + b + Base
-  var flag = c > 100
+  let flag = c > 100
   counter = c
   echo a, " ", b, " ", c, " ", flag
   echo counter

@@ -1,0 +1,42 @@
+object Grid =
+  cells: array[100, array[10, int]]
+  count: int
+
+func ramp(step: 1 .. 3): array[6, int] =
+  var out: array[6, int]
+  for i in 0 ..< 6:
+    out[i] = i * step
+  return out
+
+func rampTwice(step: 1 .. 3): array[6, int] =
+  # Forwarding: the destination is handed straight to the inner call.
+  return ramp(step)
+
+func banner(ch: 65 .. 90): string[300] =
+  var s: string[300]
+  for i in 0 ..< 5:
+    if s.len <= 296:
+      s.add("row ")
+  return s
+
+func blank(mark: 0 .. 9): Grid =
+  var g: Grid
+  g.cells[99][9] = mark
+  g.count = 1
+  return g
+
+thread main() =
+  let r = ramp(2)
+  echo r[0], " ", r[5]
+
+  var again: array[6, int]
+  again = rampTwice(3)
+  echo again[5]
+
+  let s = banner(65)
+  echo s.len
+
+  var g = blank(7)
+  echo g.cells[99][9], " ", g.count
+  g = blank(3)
+  echo g.cells[99][9]

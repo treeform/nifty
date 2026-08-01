@@ -1,1 +1,1 @@
-error_func_write_param.nifty:2: cannot assign to immutable 'x'
+error_func_write_param.nifty:2: cannot assign to parameter 'x' (func params are read-only; use a proc with a var parameter)

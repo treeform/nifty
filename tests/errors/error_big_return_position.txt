@@ -1,0 +1,1 @@
+error_big_return_position.nifty:7: 'ramp' returns array[6, int] (48 bytes); a value this big must be stored straight into a variable: var x = ramp(...)

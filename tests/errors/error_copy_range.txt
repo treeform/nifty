@@ -1,0 +1,1 @@
+error_copy_range.nifty:5: cannot copy: element ranges of seq[4, int] do not fit seq[4, 0 .. 9]

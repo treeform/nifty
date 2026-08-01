@@ -1,0 +1,25 @@
+object Pair =
+  a: int
+  b: int
+
+thread main() =
+  # Whole-array copies: assignment and initialization both copy.
+  var src: array[4, int]
+  src[0] = 10
+  src[3] = 40
+  var dst: array[4, int]
+  dst = src
+  dst[0] = 11
+  echo src[0], " ", dst[0], " ", dst[3]
+
+  # A let array is an immutable copy of its initializer.
+  let frozen = src
+  src[0] = 99
+  echo frozen[0], " ", src[0]
+
+  # Arrays of objects copy too, and arrays inside objects always did.
+  var pairs: array[2, Pair]
+  pairs[1].a = 7
+  var mirror = pairs
+  mirror[1].a = 8
+  echo pairs[1].a, " ", mirror[1].a

@@ -1,7 +1,7 @@
 var log: string[80]
 
 proc tag(): string[8] =
-  var t: string[8] = "x"
+  let t: string[8] = "x"
   return t
 
 thread main() =

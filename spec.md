@@ -115,6 +115,21 @@ Its body is the life of one OS thread.
 Recursion is rejected in all three: routines must be declared before use,
 there are no forward declarations, and a routine may not call itself.
 
+Routines can return values of any size — arrays, big strings, big
+objects. C cannot return arrays (and returning a big struct by value
+would land a copy on the C stack), so any return of an array or of a
+value over the arena threshold compiles to **destination passing**: the
+signature becomes `void f(params..., T *ret)` and the caller passes
+where the result goes; the callee fills it in place. `return inner(x)`
+forwards the destination straight through — a call chain builds the
+result exactly once, with zero copies. The one rule: a big-returning
+call must be stored straight into a variable (`var x = f(...)`,
+`let x = f(...)`, or `x = f(...)`) — it cannot sit inside a larger
+expression, because there would be nowhere for the result to live.
+Assigning one straight into a global the callee itself accesses is
+rejected (the callee would be writing its own input); store to a local
+first.
+
 ## Types
 
 - `int` — 64-bit signed integer (the full range).
@@ -129,7 +144,9 @@ there are no forward declarations, and a routine may not call itself.
 - `bool` — `true` / `false`.
 - `array[N, T]` — fixed length `N` (an integer literal or `const`),
   element type `T`. Indexing `a[i]` is proven in bounds at compile time.
-  Whole-array assignment/copy is not allowed; copy elements in a loop.
+  Arrays are values like everything else: whole-array assignment and
+  initialization copy (a `memcpy` in the generated C), and a copy from a
+  differently-ranged source must prove the element ranges fit.
 - `object` — a static struct, exactly like C:
 
   ```nim
@@ -233,7 +250,12 @@ wildcard generics over builtins (`proc sort(arr: var array)`, implicit
 ## Statements
 
 - `var name: T` / `var name = expr` / `let name = expr` — locals. `let`
-  is immutable. Shadowing is not allowed.
+  is immutable. Shadowing is not allowed. Mutability is strategic, not
+  cosmetic: a `var` that is never modified is a compile error ("declare
+  it with let instead of var"), and so is a `var` parameter the routine
+  never writes. Reading a declaration tells you the truth: `let` never
+  changes, `var` definitely does. (`start`/`end` are exempt from the
+  `var`-parameter rule — the `with` protocol imposes their signature.)
 - `name = expr`, `a[i] = expr`, `o.f = expr`, `m[k] = expr` — assignment.
 - `if cond: ... elif cond: ... else: ...`
 - `for i in lo ..< hi:` / `for i in lo .. hi:` — bounded by construction;
@@ -421,9 +443,11 @@ allocation is a pointer bump, deallocation is the return; successive
 calls reuse the same bytes (different types in the same place is fine —
 zero-init at declaration means stale bytes are never observable, and
 there are no pointers to alias them); untouched arena pages cost address
-space, not RAM. Big *by-value object parameters* and big foreach element
-copies still use the C stack — keep those small or pass by `var`. The
-report prints both numbers.
+space, not RAM. Returns of big values never touch the C stack either —
+they compile to destination passing (see Routines). Big *by-value
+object parameters* and big foreach element copies still use the C
+stack — keep those small or pass by `var`. The report prints both
+numbers.
 
 ## Compilation model
 
@@ -521,7 +545,10 @@ start/end protocol); the five proof-obligation families (division,
 indexing, overflow, termination, containment/presence) on one interval-
 and-predicate engine; thread ownership and lock inference (data-race
 freedom); defined left-to-right evaluation with effects; accumulator
-induction; per-thread arenas for big locals; `echo`/`discard`; C output
+induction; per-thread arenas for big locals; whole-array/container
+copies with element-range fit proofs; strategic `var`/`let` (unmodified
+`var` is an error); any-size returns via destination passing;
+`echo`/`discard`; C output
 with zero runtime checks; generated `main` with thread spawn/join;
 `nifty report` (globals / stack / arena / ops); splice-once imports with
 cycle rejection and file-tagged errors; gold-master test suite.

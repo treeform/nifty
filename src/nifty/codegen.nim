@@ -17,6 +17,7 @@ type
     needOf: Table[string, int64]   # routine -> worst-case arena incl callees
     bigOffs: Table[string, Table[string, int64]] # routine -> local -> offset
     curArena: Table[string, int64] # current routine's big locals
+    curRet: Typ                    # return type of the routine being emitted
     curFrame: int64                # current routine's arena frame bytes
 
 proc put(g: var Gen, s: string) =
@@ -342,6 +343,22 @@ proc genOrdered(g: var Gen, e: Expr): string =
     else:
       g.tempFor(e, call)
 
+proc genCallInto(g: var Gen, e: Expr, dest: string) =
+  ## A big-return call: C cannot return arrays (and big values would land
+  ## on the C stack), so the caller passes where the result goes and the
+  ## callee fills it in place.
+  let r = g.routines[e.sval]
+  var parts: seq[string]
+  for i, a in e.kids:
+    if r.params[i].isVar and r.params[i].typ.passByPtr:
+      parts.add "&" & g.genPathOrdered(a)
+    elif a.typ != nil and a.typ.kind == ArrayType:
+      parts.add g.genPathOrdered(a)
+    else:
+      parts.add g.genOrdered(a)
+  parts.add dest
+  g.put "f_" & e.sval & "(" & parts.join(", ") & ");"
+
 proc collectBig(body: seq[Stmt], offs: var Table[string, int64],
     off: var int64) =
   ## Assign arena offsets (8-aligned) to every big local in a routine.
@@ -410,13 +427,33 @@ proc genStmt(g: var Gen, s: Stmt) =
       else:
         g.put cBase(s.typ) & " *v_" & s.name & " = (" & cBase(s.typ) &
           " *)(ni_base + " & off & ");"
-      if s.init != nil:
+      if s.init != nil and s.init.kind == CallExpr and bigRet(s.init.typ):
+        g.genCallInto(s.init, "v_" & s.name)
+      elif s.init != nil and s.typ.kind == ArrayType:
+        let v =
+          if g.hasEffects(s.init): g.genPathOrdered(s.init)
+          else: g.genExpr(s.init)
+        g.put "memcpy(v_" & s.name & ", " & v & ", " &
+          $typeSize(s.typ) & "LL);"
+      elif s.init != nil:
         let v =
           if g.hasEffects(s.init): g.genOrdered(s.init)
           else: g.genExpr(s.init)
         g.put "*v_" & s.name & " = " & v & ";"
       else:
         g.put "memset(v_" & s.name & ", 0, " & $typeSize(s.typ) & "LL);"
+      return
+    if s.init != nil and s.init.kind == CallExpr and bigRet(s.init.typ):
+      g.put cDecl("v_" & s.name, s.typ) & ";"
+      g.genCallInto(s.init, "&v_" & s.name)
+      return
+    if s.typ.kind == ArrayType and s.init != nil:
+      # C cannot initialize an array from another; declare then copy.
+      let v =
+        if g.hasEffects(s.init): g.genPathOrdered(s.init)
+        else: g.genExpr(s.init)
+      g.put cDecl("v_" & s.name, s.typ) & ";"
+      g.put "memcpy(v_" & s.name & ", " & v & ", " & $typeSize(s.typ) & "LL);"
       return
     let init =
       if s.init != nil and g.hasEffects(s.init): g.genOrdered(s.init)
@@ -428,6 +465,23 @@ proc genStmt(g: var Gen, s: Stmt) =
       else: "0"
     g.put cDecl("v_" & s.name, s.typ) & " = " & init & ";"
   of AssignStmt:
+    if s.rhs.kind == CallExpr and s.rhs.sval in g.routines and
+        bigRet(g.routines[s.rhs.sval].ret):
+      let lhs =
+        if g.hasEffects(s.lhs): g.genPathOrdered(s.lhs)
+        else: g.genExpr(s.lhs)
+      g.genCallInto(s.rhs, "&(" & lhs & ")")
+      return
+    if s.lhs.typ != nil and s.lhs.typ.kind == ArrayType:
+      var lhs, rhs: string
+      if g.hasEffects(s.lhs) or g.hasEffects(s.rhs):
+        lhs = g.genPathOrdered(s.lhs)
+        rhs = g.genPathOrdered(s.rhs)
+      else:
+        lhs = g.genExpr(s.lhs)
+        rhs = g.genExpr(s.rhs)
+      g.put "memcpy(" & lhs & ", " & rhs & ", " & $typeSize(s.lhs.typ) & "LL);"
+      return
     if s.lhs.kind == IndexExpr and s.lhs.kids[0].typ != nil and
         s.lhs.kids[0].typ.kind in {DenseMapType, SparseMapType}:
       let mt = s.lhs.kids[0].typ
@@ -570,6 +624,23 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "f_end(" & arg & ");"
   of ReturnStmt:
     if s.value.isNil:
+      if g.curFrame > 0:
+        g.put "ni_sp = ni_base;"
+      g.put "return;"
+    elif bigRet(g.curRet):
+      if s.value.kind == CallExpr:
+        # A same-type call: forward our destination straight through.
+        g.genCallInto(s.value, "ni_ret")
+      elif g.curRet.kind == ArrayType:
+        let v =
+          if g.hasEffects(s.value): g.genPathOrdered(s.value)
+          else: g.genExpr(s.value)
+        g.put "memcpy(ni_ret, " & v & ", " & $typeSize(g.curRet) & "LL);"
+      else:
+        let v =
+          if g.hasEffects(s.value): g.genOrdered(s.value)
+          else: g.genExpr(s.value)
+        g.put "*ni_ret = " & v & ";"
       if g.curFrame > 0:
         g.put "ni_sp = ni_base;"
       g.put "return;"
@@ -1002,6 +1073,7 @@ proc generate*(m: Module, src: string): string =
   for r in m.routines:
     g.curArena = g.bigOffs[r.name]
     g.curFrame = g.frameOf[r.name]
+    g.curRet = (if r.kind == ThreadRoutine: nil else: r.ret)
     g.put ""
     if r.kind == ThreadRoutine:
       g.put "static void *t_" & r.name & "(void *ni_arg) {"
@@ -1030,7 +1102,17 @@ proc generate*(m: Module, src: string): string =
           ps.add "const " & cDecl("p_" & pm.name, pm.typ)
         else:
           ps.add cDecl("p_" & pm.name, pm.typ)
-      let ret = if r.ret.isNil: "void" else: cBase(r.ret)
+      if bigRet(r.ret):
+        if r.ret.kind == ArrayType:
+          var base = r.ret
+          var dims = ""
+          while base.kind == ArrayType:
+            dims.add "[" & $base.len & "]"
+            base = base.elem
+          ps.add cBase(base) & " (*ni_ret)" & dims
+        else:
+          ps.add cBase(r.ret) & " *ni_ret"
+      let ret = if r.ret.isNil or bigRet(r.ret): "void" else: cBase(r.ret)
       g.put "static " & ret & " f_" & r.name & "(" &
         (if ps.len == 0: "void" else: ps.join(", ")) & ") {"
       inc g.ind

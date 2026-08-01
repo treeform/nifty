@@ -148,6 +148,11 @@ proc typeAlign*(t: Typ): int64 =
   else:
     result = 8 # int, containers (int64 length field first), Lock
 
+proc bigRet*(t: Typ): bool
+  ## Returns of arrays (C cannot) and of values bigger than the arena
+  ## threshold go through a caller-provided destination pointer instead
+  ## of a by-value C return, so no copy ever lands on the C stack.
+
 proc typeSize*(t: Typ): int64 =
   ## C layout size, with alignment and padding.
   if t.opt:
@@ -181,7 +186,7 @@ proc typeSize*(t: Typ): int64 =
     (off + a - 1) div a * a
   else: 0 # Lock: platform-sized, reported separately
 
-proc typEq*(a, b: Typ): bool =
+proc typeEq*(a, b: Typ): bool =
   if a.isNil or b.isNil:
     return a.isNil and b.isNil
   if a.opt != b.opt:
@@ -189,16 +194,16 @@ proc typEq*(a, b: Typ): bool =
   if a.kind != b.kind:
     return false
   if a.kind in {ArrayType, SeqType, QueueType}:
-    return a.len == b.len and typEq(a.elem, b.elem)
+    return a.len == b.len and typeEq(a.elem, b.elem)
   if a.kind == StringType:
     return a.len == b.len
   if a.kind == SetType:
     return a.elem.rlo == b.elem.rlo and a.elem.rhi == b.elem.rhi
   if a.kind == DenseMapType:
     return a.elem.rlo == b.elem.rlo and a.elem.rhi == b.elem.rhi and
-      typEq(a.val, b.val)
+      typeEq(a.val, b.val)
   if a.kind == SparseMapType:
-    return a.len == b.len and typEq(a.elem, b.elem) and typEq(a.val, b.val)
+    return a.len == b.len and typeEq(a.elem, b.elem) and typeEq(a.val, b.val)
   if a.kind == ObjectType:
     return a.name == b.name
   true
@@ -222,3 +227,6 @@ proc `$`*(t: Typ): string =
   of DenseMapType: "map[" & $t.elem & ", " & $t.val & "]"
   of SparseMapType: "map[" & $t.len & ", " & $t.elem & ", " & $t.val & "]"
   of ObjectType: t.name
+
+proc bigRet*(t: Typ): bool =
+  t != nil and (t.kind == ArrayType or typeSize(t) > arenaThreshold)

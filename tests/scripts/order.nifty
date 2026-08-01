@@ -35,6 +35,6 @@ thread main() =
   echo d, " ", s.len
 
   # Short-circuit still short-circuits: note(9) never runs here.
-  var flag = true
+  let flag = true
   if flag or note(9) == 0:
     echo log.len
