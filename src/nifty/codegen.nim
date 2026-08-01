@@ -145,6 +145,8 @@ proc genExpr(g: var Gen, e: Expr): string =
     elif e.kids[0].typ != nil and not e.kids[0].typ.opt and
         e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS}:
       g.genExpr(e.kids[0]) & ".m_len"
+    elif e.unwrapOpt:
+      g.genExpr(e.kids[0]) & ".m_" & e.sval & ".m_val"
     else:
       g.genExpr(e.kids[0]) & ".m_" & e.sval
   of ekMethod:

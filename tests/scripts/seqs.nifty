@@ -1,0 +1,46 @@
+# seq[N, T] fundamentals: bounded, value semantics, live-part discipline,
+# and optional elements (T? works anywhere a regular type does).
+
+object Vec2 =
+  x: -100 .. 100
+  y: -100 .. 100
+
+thread main() =
+  var s: seq[5, 1 .. 9]
+  echo s.len
+  s.add(3)
+  s.add(7)
+  s.add(1)
+  echo s.len
+  echo s[0], " ", s[2]
+  s[1] = 9
+  var total = 0
+  for v in s:
+    total = total + v
+  echo total
+  echo s.pop()
+  echo s.len
+
+  # Value semantics: a copy does not alias.
+  var t = s
+  t.add(5)
+  echo s.len, " ", t.len
+
+  # Objects as elements.
+  var ps: seq[3, Vec2]
+  var v: Vec2
+  v.x = 4
+  ps.add(v)
+  echo ps[0].x
+
+  # Optional elements: bind, then test - or read totally with or().
+  var slots: seq[4, 1 .. 9?]
+  slots.add(none)
+  slots.add(7)
+  echo slots.len
+  let a = slots[0]
+  echo a.ok
+  let b = slots[1]
+  if b.ok:
+    echo b + 1
+  echo slots[1].or(1)

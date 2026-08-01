@@ -1,0 +1,4 @@
+thread main() =
+  var r: 0 .. 9?
+  var a = r
+  echo a + 1

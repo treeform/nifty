@@ -86,8 +86,6 @@ proc parseTypeCore(p: var Parser): Typ =
       let e = p.parseType()
       if e.kind == tyLock:
         err(lt.line, "Lock cannot be a " & t.text & " element")
-      if e.opt:
-        err(lt.line, "a " & t.text & " element cannot be optional")
       if t.text in ["seq", "queue"] and e.kind == tyArray:
         err(lt.line, "a " & t.text & " element cannot be a plain array; " &
           "wrap it in an object")
@@ -113,7 +111,7 @@ proc parseTypeCore(p: var Parser): Typ =
           err(t.line, "map key range is too large (max 16777216 keys)")
         p.expectOp(",")
         let v = p.parseType()
-        if v.kind in {tyLock, tyArray} or v.opt:
+        if v.kind in {tyLock, tyArray}:
           err(t.line, "a map value cannot be a " & $v &
             "; wrap arrays in an object")
         p.expectOp("]")
@@ -127,7 +125,7 @@ proc parseTypeCore(p: var Parser): Typ =
           err(t.line, "map keys must be ints (or ranges) or string[N], got " & $k)
         p.expectOp(",")
         let v = p.parseType()
-        if v.kind in {tyLock, tyArray} or v.opt:
+        if v.kind in {tyLock, tyArray}:
           err(t.line, "a map value cannot be a " & $v &
             "; wrap arrays in an object")
         p.expectOp("]")
@@ -541,9 +539,6 @@ proc parseModule(p: var Parser): Module =
         let ft = p.parseType()
         if ft.kind == tyLock:
           err(p.peek.line, "Lock cannot be a field; a Lock must be a global")
-        if ft.opt:
-          err(p.peek.line, "object fields cannot be optional; use a bool + " &
-            "value pair to store absence")
         for n in names:
           for f in typ.fields:
             if f.name == n:

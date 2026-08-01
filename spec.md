@@ -187,17 +187,23 @@ and in `while` conditions, where execution counts cannot be modeled.
 - **One iteration law**: `set`, dense map, and sparse map all iterate
   **ascending by key** — iteration order is a function of contents,
   never of insertion history.
-- `T?` — a flow-typed optional: a value that may be absent. Allowed on
-  ints/ranges, objects, and strings (not on container elements or object
-  fields). `none` is the absent value — for *missing*, not for failure;
+- `T?` — a flow-typed optional: a value that may be absent. Usable
+  anywhere a regular type is — variables, params, returns, object
+  fields, and container elements/values (`seq[4, 0 .. 9?]`,
+  `map[N, K, V?]`); only `set` elements and map *keys* stay
+  non-optional, since those positions are domains, not values. `none` is the absent value — for *missing*, not for failure;
   a plain value converts implicitly (it is self-evidently present).
   Zero-init is `none`. Reading the value requires a **proven presence**:
   `if r.ok:` grants it (guard style `if not r.ok: return` grants
   afterward; assigning a definite value grants; assigning `none`, a
   `var` argument, a lock release, or a loop that touches `r` kills it) —
   and then `r` simply *is* its base type: no unwrap, no projection,
-  `lastFix.lat` not `lastFix.value.lat`. `r.or(fallback)` is the total
-  read. Using an unproven optional is a compile error — the same proof
+  `lastFix.lat` not `lastFix.value.lat`. **Field paths carry facts
+  too**: `if p.fix.ok:` proves `p.fix` (killed by any store through a
+  field of `p`, var args, locks, loops). Container *elements* have no
+  stable name, so bind first: `let r = s[i]; if r.ok:` — or read
+  totally with `.or(fallback)`, which works on any optional
+  expression. `r.or(fallback)` is the total read. Using an unproven optional is a compile error — the same proof
   obligation family as division, indexing, and map reads. The discard
   rule forces returned optionals to be consulted. Errors live at the
   boundary: `func`s and most `proc`s are total; optionals appear where

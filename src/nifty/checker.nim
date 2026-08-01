@@ -65,7 +65,7 @@ proc rangeStr(f: Fact): string =
   rangeStr(f.lo, f.hi)
 
 proc fits(f: Fact, t: Typ): bool =
-  t.kind != tyInt or (f.lo >= t.rlo and f.hi <= t.rhi)
+  t.kind != tyInt or t.opt or (f.lo >= t.rlo and f.hi <= t.rhi)
 
 # --- saturating interval arithmetic ---------------------------------------
 # Each op reports whether the true result could overflow int64; the checker
@@ -171,10 +171,15 @@ proc setFact(e: Expr, f: Fact) =
 proc rejectOpt(t: Typ, e: Expr) =
   ## Optionals must be proven before their value is used.
   if t != nil and t.opt:
-    let name = if e.kind == ekIdent: e.sval else: "it"
-    err(e.line, "cannot use '" & name & "' before proving it has a value; " &
-      "test with 'if " & name & ".ok:' first (or use ." &
-      "or(fallback))")
+    if e.kind in {ekIdent, ekField}:
+      let name = if e.kind == ekIdent: e.sval else: "this optional"
+      err(e.line, "cannot use " &
+        (if e.kind == ekIdent: "'" & name & "'" else: name) &
+        " before proving it has a value; test with '.ok' first " &
+        "(or use .or(fallback))")
+    else:
+      err(e.line, "this optional has no stable name to prove; bind it " &
+        "first: let r = ...; if r.ok:")
 
 proc coerceOpt(c: var Ctx, e: Expr, target: Typ): bool =
   ## A plain value fits an optional destination (wrapped as ok); `none`
@@ -359,6 +364,18 @@ proc lenPathName(c: Ctx, e: Expr): string =
   else:
     ""
 
+proc stablePathName(c: Ctx, e: Expr): string =
+  ## A provable name: an eligible ident, or a pure field chain on one
+  ## ("p.fix"). Indexed paths have no stable name.
+  case e.kind
+  of ekIdent:
+    if c.factEligibleIdent(e): e.sval else: ""
+  of ekField:
+    let inner = c.stablePathName(e.kids[0])
+    if inner != "" and not e.isOptOk: inner & "." & e.sval else: ""
+  else:
+    ""
+
 proc mapFactKey(c: Ctx, m: Expr, k: Expr): string =
   ## The containment-predicate key "m@k" for a stable map/key pair, or ""
   ## when either side cannot carry a fact.
@@ -385,7 +402,8 @@ proc delFacts(c: var Ctx, name: string) =
   c.facts.del name & ".len"
   var stale: seq[string]
   for k in c.facts.keys:
-    if k.startsWith(name & "@") or k.endsWith("@" & name):
+    if k.startsWith(name & "@") or k.startsWith(name & ".") or
+        k.endsWith("@" & name):
       stale.add k
   for k in stale:
     c.facts.del k
@@ -447,8 +465,9 @@ proc addCondFacts(c: var Ctx, e: Expr, negated = false) =
     c.addCondFacts(e.kids[0], not negated)
     return
   if e.kind == ekField and e.isOptOk and not negated:
-    if e.kids[0].kind == ekIdent and c.factEligibleIdent(e.kids[0]):
-      c.facts[e.kids[0].sval & "@ok"] = Fact(lo: 1, hi: 1)
+    let pn = c.stablePathName(e.kids[0])
+    if pn != "":
+      c.facts[pn & "@ok"] = Fact(lo: 1, hi: 1)
     return
   if e.kind == ekMethod and e.sval == "contains" and not negated and
       e.kids.len == 2:
@@ -892,6 +911,8 @@ proc typRangeFits(a, b: Typ): bool =
 
 proc zeroOk(t: Typ): bool =
   ## Can this type be zero-initialized without violating a range?
+  if t.opt:
+    return true # zero-init means none
   case t.kind
   of tyInt: t.rlo <= 0 and t.rhi >= 0
   of tyArray: zeroOk(t.elem)
@@ -1080,12 +1101,15 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     e.setFact typFact(e.typ)
   of ekField:
     let base = c.expectVal(e.kids[0])
-    if e.sval == "ok" and e.kids[0].kind == ekIdent and
-        (base.opt or e.kids[0].unwrapOpt):
+    if e.sval == "ok" and (base.opt or e.kids[0].unwrapOpt):
       # Reading the presence flag never needs a proof; undo any strip so
       # codegen reads the flag, not the value.
       if e.kids[0].unwrapOpt:
         e.kids[0].unwrapOpt = false
+        if e.kids[0].kind == ekIdent:
+          e.kids[0].typ = c.declTypeOf(e.kids[0])
+        elif e.kids[0].typ != nil:
+          e.kids[0].typ = optOf(e.kids[0].typ)
       e.isOptOk = true
       e.typ = Typ(kind: tyBool)
       return e.typ
@@ -1107,6 +1131,12 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           break
       if e.typ.isNil:
         err(e.line, "type " & base.name & " has no field '" & e.sval & "'")
+      if e.typ.opt:
+        # A proven optional field acts as its base type, like idents.
+        let pn = c.stablePathName(e)
+        if pn != "" and (pn & "@ok") in c.facts:
+          e.typ = deOpt(e.typ)
+          e.unwrapOpt = true
       e.setFact typFact(e.typ)
     else:
       err(e.line, "'.' needs an object, seq, or string, got " & $base)
@@ -1167,9 +1197,18 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       of "add", "push":
         if nArgs != 1:
           err(e.line, e.sval & " takes one argument")
-        var at = c.expectVal(e.kids[1])
-        if c.coerceStrLit(e.kids[1], bt.elem):
+        var at: Typ = nil
+        if e.kids[1].kind == ekNone:
+          if not bt.elem.opt:
+            err(e.kids[1].line, "none needs an optional destination")
+          e.kids[1].typ = bt.elem
           at = bt.elem
+        else:
+          at = c.expectVal(e.kids[1])
+          if c.coerceOpt(e.kids[1], bt.elem):
+            at = bt.elem
+          elif c.coerceStrLit(e.kids[1], bt.elem):
+            at = bt.elem
         if not typEq(at, bt.elem):
           err(e.kids[1].line, "cannot add " & $at & " to " & $bt)
         if bt.elem.kind == tyInt and not exprFact(e.kids[1]).fits(bt.elem):
@@ -1302,9 +1341,18 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           if bt.elem.kind == tyInt and
               not exprFact(e.kids[1]).fits(bt.elem):
             err(e.kids[1].line, "cannot prove key fits " & $bt.elem)
-        var vt = c.expectVal(e.kids[2])
-        if c.coerceStrLit(e.kids[2], bt.val):
+        var vt: Typ = nil
+        if e.kids[2].kind == ekNone:
+          if not bt.val.opt:
+            err(e.kids[2].line, "none needs an optional destination")
+          e.kids[2].typ = bt.val
           vt = bt.val
+        else:
+          vt = c.expectVal(e.kids[2])
+          if c.coerceOpt(e.kids[2], bt.val):
+            vt = bt.val
+          elif c.coerceStrLit(e.kids[2], bt.val):
+            vt = bt.val
         if not typEq(vt, bt.val):
           err(e.kids[2].line, "map value must be " & $bt.val & ", got " & $vt)
         if bt.val.kind == tyInt and not exprFact(e.kids[2]).fits(bt.val):
@@ -1330,9 +1378,18 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if (dense and kt.kind != tyInt) or
             (not dense and not typEq(kt, bt.elem)):
           err(e.kids[1].line, "map key must be " & $bt.elem & ", got " & $kt)
-        var ft = c.expectVal(e.kids[2])
-        if c.coerceStrLit(e.kids[2], bt.val):
+        var ft: Typ = nil
+        if e.kids[2].kind == ekNone:
+          if not bt.val.opt:
+            err(e.kids[2].line, "none needs an optional destination")
+          e.kids[2].typ = bt.val
           ft = bt.val
+        else:
+          ft = c.expectVal(e.kids[2])
+          if c.coerceOpt(e.kids[2], bt.val):
+            ft = bt.val
+          elif c.coerceStrLit(e.kids[2], bt.val):
+            ft = bt.val
         if not typEq(ft, bt.val):
           err(e.kids[2].line, "fallback must be " & $bt.val & ", got " & $ft)
         if bt.val.kind == tyInt and not exprFact(e.kids[2]).fits(bt.val):
@@ -1522,7 +1579,9 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     s.typ = t
     c.scopes[^1][s.name] = Sym(kind: syLocal, typ: t, mutable: s.kind == skVar)
     if t.opt:
-      if s.init != nil and s.init.kind != ekNone:
+      # Only a DEFINITE initializer grants ok: a wrapped plain value or a
+      # proven optional. An unproven optional (or none) grants nothing.
+      if s.init != nil and (s.init.wrapOpt or s.init.unwrapOpt):
         c.facts[s.name & "@ok"] = Fact(lo: 1, hi: 1)
         if t.kind == tyInt:
           c.facts[s.name] = initFact
@@ -1564,9 +1623,18 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           if bt.elem.kind == tyInt and
               not exprFact(s.lhs.kids[1]).fits(bt.elem):
             err(s.lhs.kids[1].line, "cannot prove key fits " & $bt.elem)
-        var vt = c.expectVal(s.rhs)
-        if c.coerceStrLit(s.rhs, bt.val):
+        var vt: Typ = nil
+        if s.rhs.kind == ekNone:
+          if not bt.val.opt:
+            err(s.line, "none needs an optional destination")
+          s.rhs.typ = bt.val
           vt = bt.val
+        else:
+          vt = c.expectVal(s.rhs)
+          if c.coerceOpt(s.rhs, bt.val):
+            vt = bt.val
+          elif c.coerceStrLit(s.rhs, bt.val):
+            vt = bt.val
         if not typEq(vt, bt.val):
           err(s.line, "map value must be " & $bt.val & ", got " & $vt)
         if bt.val.kind == tyInt and not exprFact(s.rhs).fits(bt.val):
@@ -1638,6 +1706,23 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
             c.facts[s.lhs.sval] = exprFact(s.rhs)
       elif c.factName(s.lhs) != "":
         c.facts[s.lhs.sval] = exprFact(s.rhs)
+    else:
+      # A store through a FIELD path invalidates facts under its root
+      # (field ok-facts live there); a pure element store (s[i] = v)
+      # changes no lengths and carries no facts, so nothing dies.
+      var hasField = false
+      var cur = s.lhs
+      while cur.kind in {ekIndex, ekField}:
+        if cur.kind == ekField:
+          hasField = true
+        cur = cur.kids[0]
+      if hasField:
+        c.delFacts root.sval
+        if lt != nil and lt.opt and s.lhs.kind == ekField:
+          # A definite store into an optional field grants its path.
+          let pn = c.stablePathName(s.lhs)
+          if pn != "" and (s.rhs.wrapOpt or s.rhs.unwrapOpt):
+            c.facts[pn & "@ok"] = Fact(lo: 1, hi: 1)
   of skIf:
     var negAcc = c.facts
     var branchFacts: seq[Table[string, Fact]]
@@ -1861,7 +1946,9 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         if root.endsWith(".len"):
           root = root[0 ..< root.len - 4]
         elif "@" in root:
-          root = root.split("@")[0]
+          root = root.split("@")[0].split(".")[0]
+        elif "." in root:
+          root = root.split(".")[0]
         if root in c.sharedProt and s.name in c.sharedProt[root]:
           stale.add k
       for k in stale:
