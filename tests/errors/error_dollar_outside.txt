@@ -1,0 +1,1 @@
+error_dollar_outside.nifty:2: '$' type variables are only allowed in generic parameter lists

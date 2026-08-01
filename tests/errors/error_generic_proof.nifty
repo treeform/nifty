@@ -1,0 +1,10 @@
+func sum(data: array[$N, $T]): int =
+  var total = 0
+  for i in 0 ..< $N:
+    total = total + data[i]
+  return total
+
+thread main() =
+  var raw: array[4, int]
+  raw[0] = 100
+  echo sum(raw)

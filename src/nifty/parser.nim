@@ -11,6 +11,7 @@ type
     pos: int
     consts: Table[string, int64] # needed at parse time for array lengths
     types: Table[string, Typ]    # declared object types
+    allowTypeVar: bool           # $names legal (generic parameter lists only)
 
 proc peek(p: Parser): Token =
   p.toks[p.pos]
@@ -52,11 +53,24 @@ proc parseIntLit(t: Token): int64 =
   except ValueError:
     err(t.line, "integer literal is too large for int64")
 
+proc hasTypeVar(t: Typ): bool =
+  if t.isNil:
+    return false
+  if t.kind == TypeVarType or t.lenVar != "":
+    return true
+  hasTypeVar(t.elem) or hasTypeVar(t.val)
+
 proc parseExpr(p: var Parser): Expr
 proc evalConst(p: Parser, e: Expr): int64
 proc parseType(p: var Parser): Typ
 
 proc parseTypeCore(p: var Parser): Typ =
+  if p.atOp("$"):
+    if not p.allowTypeVar:
+      err(p.peek.line, "'$' type variables are only allowed in generic " &
+        "parameter lists")
+    discard p.next
+    return Typ(kind: TypeVarType, gname: p.expectIdent())
   let t = p.peek
   if t.kind == IdentToken and
       (t.text in ["int", "bool", "Lock", "array", "seq", "string", "set",
@@ -72,28 +86,36 @@ proc parseTypeCore(p: var Parser): Typ =
       Typ(kind: LockType)
     of "array", "seq", "queue":
       p.expectOp("[")
-      let lt = p.next
-      var n: int64
-      if lt.kind == IntToken:
-        n = parseIntLit(lt)
-      elif lt.kind == IdentToken and lt.text in p.consts:
-        n = p.consts[lt.text]
+      var n: int64 = 0
+      var lv = ""
+      if p.atOp("$"):
+        if not p.allowTypeVar:
+          err(p.peek.line, "'$' size variables are only allowed in generic " &
+            "parameter lists")
+        discard p.next
+        lv = p.expectIdent()
       else:
-        err(lt.line, t.text & " capacity must be an integer literal or a const")
-      if n <= 0:
-        err(lt.line, t.text & " capacity must be positive")
+        let lt = p.next
+        if lt.kind == IntToken:
+          n = parseIntLit(lt)
+        elif lt.kind == IdentToken and lt.text in p.consts:
+          n = p.consts[lt.text]
+        else:
+          err(lt.line, t.text & " capacity must be an integer literal or a const")
+        if n <= 0:
+          err(lt.line, t.text & " capacity must be positive")
       p.expectOp(",")
       let e = p.parseType()
       if e.kind == LockType:
-        err(lt.line, "Lock cannot be a " & t.text & " element")
+        err(t.line, "Lock cannot be a " & t.text & " element")
       if t.text in ["seq", "queue"] and e.kind == ArrayType:
-        err(lt.line, "a " & t.text & " element cannot be a plain array; " &
+        err(t.line, "a " & t.text & " element cannot be a plain array; " &
           "wrap it in an object")
       p.expectOp("]")
       Typ(kind: (case t.text
         of "seq": SeqType
         of "queue": QueueType
-        else: ArrayType), len: n, elem: e)
+        else: ArrayType), len: n, lenVar: lv, elem: e)
     of "map":
       # map[lo .. hi, V] (dense) or map[N, K, V] (sorted sparse)
       p.expectOp("[")
@@ -142,18 +164,26 @@ proc parseTypeCore(p: var Parser): Typ =
       Typ(kind: SetType, elem: e)
     of "string":
       p.expectOp("[")
-      let lt = p.next
-      var n: int64
-      if lt.kind == IntToken:
-        n = parseIntLit(lt)
-      elif lt.kind == IdentToken and lt.text in p.consts:
-        n = p.consts[lt.text]
+      var n: int64 = 0
+      var lv = ""
+      if p.atOp("$"):
+        if not p.allowTypeVar:
+          err(p.peek.line, "'$' size variables are only allowed in generic " &
+            "parameter lists")
+        discard p.next
+        lv = p.expectIdent()
       else:
-        err(lt.line, "string capacity must be an integer literal or a const")
-      if n <= 0:
-        err(lt.line, "string capacity must be positive")
+        let lt = p.next
+        if lt.kind == IntToken:
+          n = parseIntLit(lt)
+        elif lt.kind == IdentToken and lt.text in p.consts:
+          n = p.consts[lt.text]
+        else:
+          err(lt.line, "string capacity must be an integer literal or a const")
+        if n <= 0:
+          err(lt.line, "string capacity must be positive")
       p.expectOp("]")
-      Typ(kind: StringType, len: n)
+      Typ(kind: StringType, len: n, lenVar: lv)
     else:
       p.types[t.text]
   else:
@@ -550,6 +580,7 @@ proc parseModule(p: var Parser): Module =
       p.types[name] = typ
       result.types.add TypeDef(name: name, typ: typ, line: t.line)
     of "func", "proc", "thread":
+      let startPos = p.pos
       discard p.next
       let kind = case t.text
         of "func": FuncRoutine
@@ -557,6 +588,7 @@ proc parseModule(p: var Parser): Module =
         else: ThreadRoutine
       var r = Routine(kind: kind, name: p.expectIdent(), line: t.line)
       p.expectOp("(")
+      p.allowTypeVar = true
       if not p.atOp(")"):
         while true:
           var names = @[p.expectIdent()]
@@ -576,11 +608,43 @@ proc parseModule(p: var Parser): Module =
           else:
             break
       p.expectOp(")")
-      if p.atOp(":"):
+      p.allowTypeVar = false
+      var isGen = false
+      for pm in r.params:
+        if hasTypeVar(pm.typ):
+          isGen = true
+      if isGen:
+        # A generic: keep the whole declaration as tokens; each
+        # instantiation substitutes the $names and reparses.
+        if kind == ThreadRoutine:
+          err(t.line, "threads cannot be generic")
+        r.generic = true
+        while not p.atOp("=") and p.peek.kind != EofToken:
+          discard p.next
+        p.expectOp("=")
+        if p.peek.kind == NewlineToken:
+          discard p.next
+        if p.peek.kind != IndentToken:
+          err(p.peek.line, "an indented body expected")
         discard p.next
-        r.ret = p.parseType()
-      p.expectOp("=")
-      r.body = p.parseBody()
+        var depth = 1
+        while depth > 0:
+          case p.peek.kind
+          of IndentToken: inc depth
+          of DedentToken: dec depth
+          of EofToken:
+            err(p.peek.line, "unexpected end of file inside '" & r.name & "'")
+          else: discard
+          discard p.next
+        r.toks = p.toks[startPos ..< p.pos]
+        r.constsSnap = p.consts
+        r.typesSnap = p.types
+      else:
+        if p.atOp(":"):
+          discard p.next
+          r.ret = p.parseType()
+        p.expectOp("=")
+        r.body = p.parseBody()
       result.routines.add r
     else:
       err(t.line, "unknown declaration: '" & t.text &
@@ -591,3 +655,10 @@ proc parse*(toks: seq[Token]): Module =
   ## Parse a token stream into a Module AST.
   var p = Parser(toks: toks)
   p.parseModule()
+
+proc parseInstance*(toks: seq[Token], consts: Table[string, int64],
+    otypes: Table[string, Typ]): Routine =
+  ## Parse one substituted generic instantiation, with the consts and
+  ## object types that were visible where the generic was declared.
+  var p = Parser(toks: toks, consts: consts, types: otypes)
+  p.parseModule().routines[0]

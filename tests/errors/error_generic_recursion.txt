@@ -1,0 +1,2 @@
+error_generic_recursion.nifty:3: recursion is not allowed: generic 'drain' calls itself (even at another binding)
+  while instantiating 'drain' with $N = 4, $T = 0 .. 9 at error_generic_recursion.nifty:8

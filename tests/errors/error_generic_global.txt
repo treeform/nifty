@@ -1,0 +1,2 @@
+error_generic_global.nifty:4: generic 'tally' touches global 'counter'; generic routines cannot access globals - pass values through parameters
+  while instantiating 'tally' with $N = 4, $T = 0 .. 9 at error_generic_global.nifty:9

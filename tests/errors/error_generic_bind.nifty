@@ -1,0 +1,9 @@
+func dot(a: array[$N, int], b: array[$N, int]): int =
+  return a[0] * 0 + b[0] * 0
+
+thread main() =
+  var x: array[3, int]
+  var y: array[4, int]
+  x[0] = 1
+  y[0] = 2
+  echo dot(x, y)

@@ -13,7 +13,7 @@
 ## so their declared range is all the checker will believe.
 
 import std/[strutils, tables, sets]
-import common, types
+import common, lexer, types, parser
 
 type
   Fact = object
@@ -44,6 +44,11 @@ type
     modified: HashSet[string]      # names actually modified this routine
     sharedProt: Table[string, HashSet[string]] # shared global -> its lock(s)
     routineWrites: Table[string, HashSet[string]] # routine -> globals it may write
+    usedNames: HashSet[string]     # every module-level name (shadow checks)
+    generics: Table[string, Routine]    # generic name -> captured declaration
+    instCache: Table[string, string]    # binding key -> instance name
+    instances: Table[string, seq[Routine]] # generic name -> its instances
+    instStack: seq[string]              # generics being instantiated (recursion)
 
 const
   IntLow = low(int64)
@@ -213,6 +218,7 @@ proc coerceStrLit(c: Ctx, e: Expr, target: Typ): bool =
     false
 
 proc checkExpr(c: var Ctx, e: Expr): Typ
+proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string
 
 proc expectVal(c: var Ctx, e: Expr): Typ =
   result = c.checkExpr(e)
@@ -705,12 +711,14 @@ proc declFact(c: Ctx, e: Expr, loopVar: string, loopFact: Fact):
     discard
 
 proc accumWiden(c: Ctx, s: Stmt, assigned: HashSet[string],
-    loopFact: Fact, entry: Table[string, Fact]): Table[string, Fact] =
+    loopFact: Fact, entry: Table[string, Fact],
+    trips: int64): Table[string, Fact] =
   ## Induction for accumulators in a counted for loop: a local assigned
   ## ONLY as v = v + e / v = v - e (e independent of v, not inside a
   ## nested loop) keeps a widened fact instead of losing everything:
-  ## its entry value plus tripCount * the per-iteration delta.
-  let trips = s.tripBound
+  ## its entry value plus trips * the per-iteration delta. Inside the
+  ## body at most trips - 1 additions have run, so callers pass a
+  ## smaller bound for the in-body fact than for the after-loop fact.
   for v in assigned:
     var declTyp: Typ = nil
     for i in countdown(c.scopes.len - 1, 0):
@@ -1455,7 +1463,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
   of CallExpr:
     let bigOk = c.allowBigRet
     c.allowBigRet = false # arguments are not store targets
-    let name = e.sval
+    var name = e.sval
     if name notin c.allRoutines:
       err(e.line, "unknown func or proc: '" & name & "'")
     if name == c.cur.name:
@@ -1463,6 +1471,14 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     if name notin c.checked:
       err(e.line, "'" & name & "' is called before its declaration " &
         "(declare-before-use keeps the call graph recursion-free)")
+    # Every argument is typed exactly once, in source order, up front:
+    # a generic callee needs the types to bind its $names.
+    var ats = newSeq[Typ](e.kids.len)
+    for i, arg in e.kids:
+      if arg.kind != NoneExpr:
+        ats[i] = c.expectVal(arg)
+    if name in c.generics:
+      name = c.instantiate(e, ats)
     let r = c.routineTab[name]
     if r.kind == ThreadRoutine:
       err(e.line, "threads start at program start; they cannot be called")
@@ -1474,14 +1490,13 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         " argument(s), got " & $e.kids.len)
     for i, arg in e.kids:
       let pt = r.params[i]
-      var at: Typ = nil
+      var at: Typ = ats[i]
       if arg.kind == NoneExpr:
         if not pt.typ.opt:
           err(arg.line, "none needs an optional parameter")
         arg.typ = pt.typ
         at = pt.typ
       else:
-        at = c.expectVal(arg)
         if c.coerceOpt(arg, pt.typ):
           at = pt.typ
         elif c.coerceStrLit(arg, pt.typ):
@@ -1841,10 +1856,14 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         "ranged variable makes strict progress every iteration; add " &
         "'max N' to bound it (the loop then also stops after N iterations)")
     s.tripBound = bound
-    let widened = c.accumWiden(s, assigned, fullFact(), entry)
-    for n, f in widened:
+    let widenedIn = c.accumWiden(s, assigned, fullFact(), entry,
+      max(0'i64, bound - 1))
+    let widenedOut = c.accumWiden(s, assigned, fullFact(), entry, bound)
+    for n, f in widenedIn:
       c.facts[n] = f
-    let dropped = c.facts
+    var dropped = c.facts
+    for n, f in widenedOut:
+      dropped[n] = f
     c.addCondFacts(s.cond)
     c.loopWiths.add c.withDepth
     c.checkBody(s.body)
@@ -1877,12 +1896,17 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     var assigned: HashSet[string]
     c.collectAssigned(s.body, assigned)
     # Simple accumulators keep a widened fact instead of losing everything.
-    let widened = c.accumWiden(s, assigned, loopFact, c.facts)
+    let widenedIn = c.accumWiden(s, assigned, loopFact, c.facts,
+      max(0'i64, s.tripBound - 1))
+    let widenedOut = c.accumWiden(s, assigned, loopFact, c.facts,
+      s.tripBound)
     for n in assigned:
       c.delFacts n
-    for n, f in widened:
+    var dropped = c.facts
+    for n, f in widenedOut:
+      dropped[n] = f
+    for n, f in widenedIn:
       c.facts[n] = f
-    let dropped = c.facts
     c.scopes.add initTable[string, Sym]()
     c.scopes[^1][s.name] = Sym(kind: LocalSym, typ: intType(), mutable: false)
     c.facts[s.name] = loopFact
@@ -1930,12 +1954,17 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       s.typ2 = t.val
     # Accumulators widen here too: the element variable is the loop
     # variable, bounded by the element type.
-    let widened = c.accumWiden(s, assigned, typeFact(elemT), c.facts)
+    let widenedIn = c.accumWiden(s, assigned, typeFact(elemT), c.facts,
+      max(0'i64, s.tripBound - 1))
+    let widenedOut = c.accumWiden(s, assigned, typeFact(elemT), c.facts,
+      s.tripBound)
     for n in assigned:
       c.delFacts n
-    for n, f in widened:
+    var dropped = c.facts
+    for n, f in widenedOut:
+      dropped[n] = f
+    for n, f in widenedIn:
       c.facts[n] = f
-    let dropped = c.facts
     c.scopes.add initTable[string, Sym]()
     c.scopes[^1][s.name] = Sym(kind: LocalSym, typ: elemT, mutable: false)
     if s.name2.len > 0:
@@ -2064,6 +2093,290 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       err(s.line, "return value of '" & s.value.sval &
         "' is discarded (use discard or assign it)")
 
+proc checkRoutine(c: var Ctx, r: Routine) =
+  c.cur = r
+  c.withDepth = 0
+  c.loopWiths = @[]
+  c.facts = initTable[string, Fact]()
+  c.heldLocks = @[]
+  c.varDecls = initTable[string, int]()
+  c.modified = initHashSet[string]()
+  c.allowBigRet = false
+  case r.kind
+  of ThreadRoutine:
+    if r.params.len > 0:
+      err(r.line, "threads take no parameters")
+    if not r.ret.isNil:
+      err(r.line, "threads do not return a value")
+  of FuncRoutine:
+    if r.ret.isNil:
+      err(r.line, "func must have a return type (use proc for side effects)")
+  of ProcRoutine:
+    discard
+  var paramScope = initTable[string, Sym]()
+  for pm in r.params:
+    if pm.typ.kind == LockType:
+      err(r.line, "a Lock cannot be a parameter")
+    if pm.isVar and r.kind == FuncRoutine:
+      err(r.line, "func parameters are read-only; var parameters are not allowed")
+    if pm.name in paramScope or pm.name in c.usedNames:
+      err(r.line, "duplicate or shadowing parameter name: '" & pm.name & "'")
+    if pm.isVar:
+      c.varDecls[pm.name] = r.line
+    paramScope[pm.name] = Sym(kind: ParamSym, typ: pm.typ,
+      mutable: pm.isVar, isVarParam: pm.isVar)
+  c.scopes = @[paramScope, initTable[string, Sym]()]
+  for s in r.body:
+    c.checkStmt(s, true)
+  if not r.ret.isNil and not alwaysReturns(r.body):
+    err(r.line, "'" & r.name & "': not all code paths return a value")
+  # Mutability is strategic: var means it changes. A var that never
+  # changes must be a let (or a plain parameter).
+  for vname, vline in c.varDecls:
+    if vname notin c.modified:
+      var isParam = false
+      for pm in r.params:
+        if pm.name == vname:
+          isParam = true
+      if isParam:
+        if r.name in ["start", "end"]:
+          continue # the with protocol imposes the var signature
+        err(vline, "var parameter '" & vname & "' is never modified in '" &
+          r.name & "'; remove var")
+      else:
+        err(vline, "'" & vname & "' is never modified; declare it with " &
+          "let instead of var")
+  c.checked.incl r.name
+
+## Generic Instantiation
+
+proc mangleVal(v: int64): string =
+  if v < 0: "m" & $(-v) else: $v
+
+proc mangleTyp(t: Typ): string =
+  result =
+    case t.kind
+    of IntType:
+      if t.isFullRange: "int"
+      else: mangleVal(t.rlo) & "_" & mangleVal(t.rhi)
+    of BoolType: "bool"
+    of StringType: "str" & $t.len
+    of ObjectType: t.name
+    of ArrayType: "arr" & $t.len & "_" & mangleTyp(t.elem)
+    else: "x"
+  if t.opt:
+    result.add "opt"
+
+proc unifyPat(c: Ctx, pat, at: Typ, sizes: var Table[string, int64],
+    typs: var Table[string, Typ], order: var seq[string],
+    line: int, gname: string) =
+  ## Match a $-pattern against a concrete argument type, binding every
+  ## $name on first sight and demanding agreement after that.
+  if pat.isNil or at.isNil:
+    return
+  if pat.kind == TypeVarType:
+    if pat.gname in typs:
+      let prev = typs[pat.gname]
+      if not (typeEq(prev, at) and typeRangeEq(prev, at) and
+          prev.opt == at.opt):
+        err(line, "generic '" & gname & "': $" & pat.gname &
+          " is bound to both " & $prev & " and " & $at)
+    else:
+      typs[pat.gname] = at
+      order.add pat.gname
+    return
+  if pat.kind != at.kind:
+    err(line, "generic '" & gname & "': expected " & $pat & ", got " & $at)
+  if pat.lenVar != "":
+    if pat.lenVar in sizes:
+      if sizes[pat.lenVar] != at.len:
+        err(line, "generic '" & gname & "': $" & pat.lenVar &
+          " is bound to both " & $sizes[pat.lenVar] & " and " & $at.len)
+    else:
+      sizes[pat.lenVar] = at.len
+      order.add pat.lenVar
+  c.unifyPat(pat.elem, at.elem, sizes, typs, order, line, gname)
+  c.unifyPat(pat.val, at.val, sizes, typs, order, line, gname)
+
+proc typToToks(t: Typ, line: int, gname: string): seq[Token] =
+  ## Spell a bound type back out as source tokens for substitution.
+  proc op(s: string): Token = Token(kind: OpToken, text: s, line: line)
+  proc idt(s: string): Token = Token(kind: IdentToken, text: s, line: line)
+  proc num(v: int64): seq[Token] =
+    if v < 0: @[op("-"), Token(kind: IntToken, text: $(-v), line: line)]
+    else: @[Token(kind: IntToken, text: $v, line: line)]
+  case t.kind
+  of IntType:
+    if t.isFullRange: result = @[idt("int")]
+    else: result = num(t.rlo) & @[op("..")] & num(t.rhi)
+  of BoolType:
+    result = @[idt("bool")]
+  of StringType:
+    result = @[idt("string"), op("["),
+      Token(kind: IntToken, text: $t.len, line: line), op("]")]
+  of ObjectType:
+    result = @[idt(t.name)]
+  of ArrayType:
+    result = @[idt("array"), op("["),
+      Token(kind: IntToken, text: $t.len, line: line), op(",")] &
+      typToToks(t.elem, line, gname) & @[op("]")]
+  else:
+    err(line, "generic '" & gname & "': cannot substitute " & $t &
+      " for a $ type variable")
+  if t.opt:
+    result.add op("?")
+
+proc scanNoGlobals(c: Ctx, gname: string, body: seq[Stmt]) =
+  ## Generic bodies may not reach globals: the thread-ownership and lock
+  ## proofs run before any instantiation exists, so a generic's global
+  ## footprint must be empty for them to stay sound.
+  proc scanE(c: Ctx, e: Expr) =
+    if e.isNil:
+      return
+    if e.kind == IdentExpr and e.sval in c.globals:
+      err(e.line, "generic '" & gname & "' touches global '" & e.sval &
+        "'; generic routines cannot access globals - pass values " &
+        "through parameters")
+    if e.kind == CallExpr and e.sval in c.routineAccess and
+        c.routineAccess[e.sval].len > 0:
+      err(e.line, "generic '" & gname & "' calls '" & e.sval &
+        "', which touches globals; generic routines cannot access " &
+        "globals - pass values through parameters")
+    for k in e.kids:
+      scanE(c, k)
+  proc scanS(c: Ctx, s: Stmt) =
+    if s.kind == WithStmt and s.name in c.globals:
+      err(s.line, "generic '" & gname & "' locks global '" & s.name &
+        "'; generic routines cannot access globals")
+    for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
+      scanE(c, e)
+    for a in s.args:
+      scanE(c, a)
+    for st in s.body:
+      scanS(c, st)
+    for br in s.elifs:
+      scanE(c, br.cond)
+      for st in br.body:
+        scanS(c, st)
+    for st in s.elseBody:
+      scanS(c, st)
+  for s in body:
+    scanS(c, s)
+
+proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string =
+  ## Bind a generic's $names from the argument types, splice the
+  ## bindings into the captured tokens, reparse, and check the result
+  ## as an ordinary routine - once per distinct binding.
+  let gname = e.sval
+  let gr = c.generics[gname]
+  if gname in c.instStack:
+    err(e.line, "recursion is not allowed: generic '" & gname &
+      "' calls itself (even at another binding)")
+  if e.kids.len != gr.params.len:
+    err(e.line, "'" & gname & "' expects " & $gr.params.len &
+      " argument(s), got " & $e.kids.len)
+  var sizes: Table[string, int64]
+  var typs: Table[string, Typ]
+  var order: seq[string]
+  for i, pm in gr.params:
+    if ats[i] == nil:
+      err(e.kids[i].line, "cannot infer generic $names from none; " &
+        "pass a typed value")
+    c.unifyPat(pm.typ, ats[i], sizes, typs, order, e.kids[i].line, gname)
+  var parts: seq[string]
+  var binds: seq[string]
+  for nm in order:
+    if nm in sizes:
+      parts.add mangleVal(sizes[nm])
+      binds.add "$" & nm & " = " & $sizes[nm]
+    else:
+      parts.add mangleTyp(typs[nm])
+      binds.add "$" & nm & " = " & $typs[nm]
+  let key = gname & "|" & parts.join("|")
+  if key in c.instCache:
+    e.sval = c.instCache[key]
+    return e.sval
+  let mangled = gname & "__" & parts.join("_")
+  var toks: seq[Token]
+  var i = 0
+  while i < gr.toks.len:
+    let tk = gr.toks[i]
+    if i == 1:
+      toks.add Token(kind: IdentToken, text: mangled, line: tk.line)
+      inc i
+    elif tk.kind == OpToken and tk.text == "$":
+      if i + 1 >= gr.toks.len or gr.toks[i + 1].kind != IdentToken:
+        err(tk.line, "a name must follow '$'")
+      let nm = gr.toks[i + 1].text
+      if nm in typs and i + 3 < gr.toks.len and
+          gr.toks[i + 2].kind == OpToken and gr.toks[i + 2].text == "." and
+          gr.toks[i + 3].kind == IdentToken and
+          gr.toks[i + 3].text in ["lo", "hi"]:
+        let bt = typs[nm]
+        if bt.kind != IntType or bt.opt:
+          err(tk.line, "$" & nm & "." & gr.toks[i + 3].text &
+            " needs an int type; $" & nm & " is " & $bt)
+        let v = if gr.toks[i + 3].text == "lo": bt.rlo else: bt.rhi
+        if v < 0:
+          toks.add Token(kind: OpToken, text: "-", line: tk.line)
+          toks.add Token(kind: IntToken, text: $(-v), line: tk.line)
+        else:
+          toks.add Token(kind: IntToken, text: $v, line: tk.line)
+        i += 4
+      elif nm in sizes:
+        toks.add Token(kind: IntToken, text: $sizes[nm], line: tk.line)
+        i += 2
+      elif nm in typs:
+        toks.add typToToks(typs[nm], tk.line, gname)
+        i += 2
+      else:
+        err(tk.line, "'$" & nm & "' is not bound by any parameter of '" &
+          gname & "'")
+    else:
+      toks.add tk
+      inc i
+  toks.add Token(kind: EofToken, line: gr.toks[^1].line)
+  let inst = parseInstance(toks, gr.constsSnap, gr.typesSnap)
+  c.allRoutines.incl mangled
+  c.routineTab[mangled] = inst
+  c.routineAccess[mangled] = initHashSet[string]()
+  c.routineWrites[mangled] = initHashSet[string]()
+  # Check the instance re-entrantly, with the caller's state parked.
+  let savedCur = c.cur
+  let savedScopes = c.scopes
+  let savedWith = c.withDepth
+  let savedLoopW = c.loopWiths
+  let savedFacts = c.facts
+  let savedMutBan = c.mutBan
+  let savedHeld = c.heldLocks
+  let savedVarDecls = c.varDecls
+  let savedModified = c.modified
+  let savedBigRet = c.allowBigRet
+  c.instStack.add gname
+  try:
+    c.scanNoGlobals(gname, inst.body)
+    c.checkRoutine(inst)
+  except NiftyError as ex:
+    ex.msg.add "\n  while instantiating '" & gname & "' with " &
+      binds.join(", ") & " at " & locOf(e.line)
+    raise ex
+  finally:
+    discard c.instStack.pop
+    c.cur = savedCur
+    c.scopes = savedScopes
+    c.withDepth = savedWith
+    c.loopWiths = savedLoopW
+    c.facts = savedFacts
+    c.mutBan = savedMutBan
+    c.heldLocks = savedHeld
+    c.varDecls = savedVarDecls
+    c.modified = savedModified
+    c.allowBigRet = savedBigRet
+  c.instCache[key] = mangled
+  c.instances.mgetOrPut(gname, @[]).add inst
+  e.sval = mangled
+  mangled
+
 proc check*(m: Module) =
   ## Check the whole module; raises NiftyError on the first violation.
   var c = Ctx()
@@ -2094,9 +2407,13 @@ proc check*(m: Module) =
       err(r.line, "duplicate name: '" & r.name & "'")
     used.incl r.name
     c.allRoutines.incl r.name
-    c.routineTab[r.name] = r
+    if r.generic:
+      c.generics[r.name] = r
+    else:
+      c.routineTab[r.name] = r
     if r.kind == ThreadRoutine:
       anyThread = true
+  c.usedNames = used
   if not anyThread:
     err(1, "a nifty program needs at least one thread (thread name() = ...)")
 
@@ -2228,55 +2545,15 @@ proc check*(m: Module) =
       c.sharedProt[g] = lockProt[g]
 
   for r in m.routines:
-    c.cur = r
-    c.withDepth = 0
-    c.loopWiths = @[]
-    c.facts = initTable[string, Fact]()
-    c.heldLocks = @[]
-    c.varDecls = initTable[string, int]()
-    c.modified = initHashSet[string]()
-    case r.kind
-    of ThreadRoutine:
-      if r.params.len > 0:
-        err(r.line, "threads take no parameters")
-      if not r.ret.isNil:
-        err(r.line, "threads do not return a value")
-    of FuncRoutine:
-      if r.ret.isNil:
-        err(r.line, "func must have a return type (use proc for side effects)")
-    of ProcRoutine:
-      discard
-    var paramScope = initTable[string, Sym]()
-    for pm in r.params:
-      if pm.typ.kind == LockType:
-        err(r.line, "a Lock cannot be a parameter")
-      if pm.isVar and r.kind == FuncRoutine:
-        err(r.line, "func parameters are read-only; var parameters are not allowed")
-      if pm.name in paramScope or pm.name in used:
-        err(r.line, "duplicate or shadowing parameter name: '" & pm.name & "'")
-      if pm.isVar:
-        c.varDecls[pm.name] = r.line
-      paramScope[pm.name] = Sym(kind: ParamSym, typ: pm.typ,
-        mutable: pm.isVar, isVarParam: pm.isVar)
-    c.scopes = @[paramScope, initTable[string, Sym]()]
-    for s in r.body:
-      c.checkStmt(s, true)
-    if not r.ret.isNil and not alwaysReturns(r.body):
-      err(r.line, "'" & r.name & "': not all code paths return a value")
-    # Mutability is strategic: var means it changes. A var that never
-    # changes must be a let (or a plain parameter).
-    for vname, vline in c.varDecls:
-      if vname notin c.modified:
-        var isParam = false
-        for pm in r.params:
-          if pm.name == vname:
-            isParam = true
-        if isParam:
-          if r.name in ["start", "end"]:
-            continue # the with protocol imposes the var signature
-          err(vline, "var parameter '" & vname & "' is never modified in '" &
-            r.name & "'; remove var")
-        else:
-          err(vline, "'" & vname & "' is never modified; declare it with " &
-            "let instead of var")
-    c.checked.incl r.name
+    if r.generic:
+      c.checked.incl r.name
+      continue
+    c.checkRoutine(r)
+  var flat: seq[Routine]
+  for r in m.routines:
+    if r.generic:
+      for inst in c.instances.getOrDefault(r.name, @[]):
+        flat.add inst
+    else:
+      flat.add r
+  m.routines = flat

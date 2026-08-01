@@ -1,0 +1,9 @@
+var counter: int
+
+proc tally(data: seq[$N, $T]) =
+  counter = counter + 1
+
+thread main() =
+  var s: seq[4, 0 .. 9]
+  s.add(3)
+  tally(s)

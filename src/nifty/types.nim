@@ -1,9 +1,13 @@
 ## The AST and type representation shared by the parser, checker, and codegen.
 
+import std/tables
+import lexer
+
 type
   TypKind* = enum
     IntType, BoolType, StringLitType, LockType, ArrayType, ObjectType, SeqType, StringType, SetType,
-    QueueType, DenseMapType, SparseMapType # dense map[range, V]; sorted sparse map[N, K, V]
+    QueueType, DenseMapType, SparseMapType, # dense map[range, V]; sorted sparse map[N, K, V]
+    TypeVarType # a generic $T waiting to be bound at instantiation
   Field* = object
     name*: string
     typ*: Typ
@@ -16,6 +20,8 @@ type
     val*: Typ            # DenseMapType/SparseMapType: the value type
     rlo*, rhi*: int64    # IntType: declared range; full range = plain int
     opt*: bool           # T?: an optional (value + ok flag)
+    gname*: string       # TypeVarType: the $name
+    lenVar*: string      # containers: a $name standing in for the size
 
   SymKind* = enum
     ConstSym, GlobalSym, LocalSym, ParamSym
@@ -82,6 +88,10 @@ type
     params*: seq[Param]
     ret*: Typ # nil = no return value
     body*: seq[Stmt]
+    generic*: bool             # has $ variables; body kept as tokens
+    toks*: seq[Token]          # generic only: the whole declaration
+    constsSnap*: Table[string, int64] # consts visible at declaration
+    typesSnap*: Table[string, Typ]    # object types visible at declaration
 
   ConstDef* = object
     name*: string
@@ -208,6 +218,9 @@ proc typeEq*(a, b: Typ): bool =
     return a.name == b.name
   true
 
+proc sizeStr(t: Typ): string =
+  if t.lenVar != "": "$" & t.lenVar else: $t.len
+
 proc `$`*(t: Typ): string =
   if t.isNil:
     return "void"
@@ -219,14 +232,15 @@ proc `$`*(t: Typ): string =
   of BoolType: "bool"
   of StringLitType: "string"
   of LockType: "Lock"
-  of ArrayType: "array[" & $t.len & ", " & $t.elem & "]"
-  of SeqType: "seq[" & $t.len & ", " & $t.elem & "]"
-  of StringType: "string[" & $t.len & "]"
+  of ArrayType: "array[" & t.sizeStr & ", " & $t.elem & "]"
+  of SeqType: "seq[" & t.sizeStr & ", " & $t.elem & "]"
+  of StringType: "string[" & t.sizeStr & "]"
   of SetType: "set[" & $t.elem & "]"
-  of QueueType: "queue[" & $t.len & ", " & $t.elem & "]"
+  of QueueType: "queue[" & t.sizeStr & ", " & $t.elem & "]"
   of DenseMapType: "map[" & $t.elem & ", " & $t.val & "]"
   of SparseMapType: "map[" & $t.len & ", " & $t.elem & ", " & $t.val & "]"
   of ObjectType: t.name
+  of TypeVarType: "$" & t.gname
 
 proc bigRet*(t: Typ): bool =
   t != nil and (t.kind == ArrayType or typeSize(t) > arenaThreshold)

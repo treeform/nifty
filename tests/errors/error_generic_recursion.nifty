@@ -1,0 +1,8 @@
+proc drain(data: var seq[$N, $T]) =
+  var copy = data
+  drain(copy)
+
+thread main() =
+  var s: seq[4, 0 .. 9]
+  s.add(3)
+  drain(s)

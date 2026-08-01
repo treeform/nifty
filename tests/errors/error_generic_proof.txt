@@ -1,0 +1,2 @@
+error_generic_proof.nifty:4: cannot prove '+' does not overflow: int + int; narrow the ranges or guard first
+  while instantiating 'sum' with $N = 4, $T = int at error_generic_proof.nifty:10

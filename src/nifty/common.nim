@@ -10,10 +10,13 @@ const fileLineBase* = 1_000_000
 
 var srcFiles*: seq[string] ## display names, indexed by file id
 
-proc err*(line: int, msg: string) {.noreturn.} =
+proc locOf*(line: int): string =
   if srcFiles.len > 0:
     let f = line div fileLineBase
     let l = line mod fileLineBase
     let name = if f < srcFiles.len: srcFiles[f] else: "?"
-    raise newException(NiftyError, name & ":" & $l & ": " & msg)
-  raise newException(NiftyError, "line " & $line & ": " & msg)
+    return name & ":" & $l
+  "line " & $line
+
+proc err*(line: int, msg: string) {.noreturn.} =
+  raise newException(NiftyError, locOf(line) & ": " & msg)

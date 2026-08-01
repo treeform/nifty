@@ -130,6 +130,52 @@ Assigning one straight into a global the callee itself accesses is
 rejected (the callee would be writing its own input); store to a local
 first.
 
+## Generics: `$` substitution variables
+
+A routine becomes generic by using `$name` variables in its parameter
+types: `$N` in a size position binds a compile-time integer, `$T` in an
+element position binds a type — including its exact range, which is the
+point: nifty's "element types" are the whole space of ranges, so
+`sort(data: var array[$N, $T])` accepts an `array[8, 0 .. 9]` exactly
+(a `var` parameter demands the precise range; only a bound `$T` can
+supply it).
+
+The rules are few and mechanical:
+
+- A `$name` **binds** at its first occurrence in the parameter list,
+  left to right. Every later occurrence — another parameter, the return
+  type, the body — **references** that binding and must agree:
+  `func dot(a: array[$N, int], b: array[$N, int])` states in the
+  signature that both arrays are the same size, and a mismatched call
+  fails with `$N is bound to both 3 and 4`.
+- In the body, a size `$N` is a `const`: usable in ranges
+  (`var i: 1 .. $N`), expressions (`while i < $N`), and local types
+  (`var copy: seq[$N, $T]`). A type `$T` is a type, and exposes its
+  bounds as constants: `$T.lo`, `$T.hi`.
+- Return types are expressions over the bindings — sizes are already
+  const-expressions, so arithmetic falls out:
+  `func merge(a: seq[$N, $T], b: seq[$M, $T]): seq[$N + $M, $T]`, or the
+  proof-carrying `func sum(data: array[$N, $T]): $N * $T.lo .. $N * $T.hi`.
+
+**Instantiation is splice-and-prove.** A generic is kept as its token
+slice (the same mechanism as imports). Each call binds the `$names`
+from the argument types, substitutes them into the tokens, reparses,
+and then checks and **proves** the result as an ordinary routine — with
+concrete constants, once per distinct binding (later identical calls
+reuse the instance). There is no separate generic type system: the
+body's proof obligations, evaluated per instance, are the constraint
+language, exactly as strict as the body requires. Proof failures name
+the binding: `... while instantiating 'sum' with $N = 4, $T = int
+at main.nifty:10`.
+
+Each instance monomorphizes to one C function and one report entry
+(`sort__5_0_9`). Restrictions: threads cannot be generic; a generic may
+not call itself (no recursion through other bindings); and a generic
+routine may not touch globals, directly or through callees — the
+thread-ownership and lock proofs run before any instantiation exists,
+so a generic's global footprint must be empty. Pass values through
+parameters — which is what a reusable routine should do anyway.
+
 ## Types
 
 - `int` — 64-bit signed integer (the full range).
@@ -242,10 +288,9 @@ stay non-optional (domains, not values).
   rule forces returned optionals to be consulted.
 
 Planned types: typed indices (`index arr` — a range plus provenance),
-wildcard generics over builtins (`proc sort(arr: var array)`, implicit
-`N`/`T` binding, monomorphized, Go-before-1.18 rule), absence *reasons*
-(`T ? codeRange` with a provable `.error`), fixed-point
-(`fixed[lo .. hi, step]` — a scaled ranged int), deterministic floats.
+absence *reasons* (`T ? codeRange` with a provable `.error`),
+fixed-point (`fixed[lo .. hi, step]` — a scaled ranged int),
+deterministic floats. Generics exist — see Generics above.
 
 ## Statements
 
@@ -547,13 +592,16 @@ and-predicate engine; thread ownership and lock inference (data-race
 freedom); defined left-to-right evaluation with effects; accumulator
 induction; per-thread arenas for big locals; whole-array/container
 copies with element-range fit proofs; strategic `var`/`let` (unmodified
-`var` is an error); any-size returns via destination passing;
+`var` is an error); any-size returns via destination passing; generics
+via `$` substitution variables (splice-per-instantiation, proven per
+binding, `$T.lo`/`$T.hi`, computed return ranges);
 `echo`/`discard`; C output
 with zero runtime checks; generated `main` with thread spawn/join;
 `nifty report` (globals / stack / arena / ops); splice-once imports with
 cycle rejection and file-tagged errors; gold-master test suite.
 
-Not yet implemented: wildcard generics, `index` types, absence reasons
+Not yet implemented: `$T` for scalar (non-container) parameters,
+generic `set`/`map` patterns, `index` types, absence reasons
 (`T ? codeRange` with a provable `.error` — `none` is deliberately mute),
 a `Result`-returning `map.get` (needs absence reasons; `get(k, fallback)`
 and proven `m[k]` cover today), tail-call recursion, int width from

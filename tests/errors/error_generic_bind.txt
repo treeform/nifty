@@ -1,0 +1,1 @@
+error_generic_bind.nifty:9: generic 'dot': $N is bound to both 3 and 4

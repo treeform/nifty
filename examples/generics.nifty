@@ -1,0 +1,42 @@
+proc sort(data: var array[$N, $T]) =
+  var i: 1 .. $N = 1
+  while i < $N:
+    let key = data[i]
+    var j: -1 .. $N - 2 = i - 1
+    while j >= 0 and data[j] > key:
+      data[j + 1] = data[j]
+      j = j - 1
+    data[j + 1] = key
+    i = i + 1
+
+func head(data: array[$N, $T]): $T =
+  return data[0]
+
+func sum(data: array[$N, $T]): $N * $T.lo .. $N * $T.hi =
+  var total: $N * $T.lo .. $N * $T.hi = 0
+  for i in 0 ..< $N:
+    total = total + data[i]
+  return total
+
+thread main() =
+  var small: array[5, 0 .. 9]
+  small[0] = 7
+  small[1] = 3
+  small[2] = 9
+  small[3] = 1
+  small[4] = 5
+  sort(small)
+  echo small[0], " ", small[2], " ", small[4]
+  echo head(small), " ", sum(small)
+
+  # A second binding: another size, a signed range.
+  var wide: array[3, -50 .. 50]
+  wide[0] = 20
+  wide[1] = -30
+  wide[2] = 0
+  sort(wide)
+  echo wide[0], " ", wide[1], " ", wide[2]
+
+  # Same binding again: reuses the first instantiation.
+  sort(small)
+  echo small[1]

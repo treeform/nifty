@@ -1097,9 +1097,13 @@ proc generate*(m: Module, src: string): string =
         if pm.isVar and pm.typ.passByPtr:
           ps.add cBase(pm.typ) & " *p_" & pm.name
         elif pm.typ.kind == ArrayType:
-          # Non-var arrays decay to pointers in C; const makes the C
-          # compiler enforce read-only as a second line of defense.
-          ps.add "const " & cDecl("p_" & pm.name, pm.typ)
+          # Arrays decay to pointers in C either way; const makes the C
+          # compiler enforce read-only non-var params as a second line
+          # of defense.
+          if pm.isVar:
+            ps.add cDecl("p_" & pm.name, pm.typ)
+          else:
+            ps.add "const " & cDecl("p_" & pm.name, pm.typ)
         else:
           ps.add cDecl("p_" & pm.name, pm.typ)
       if bigRet(r.ret):
