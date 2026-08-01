@@ -42,6 +42,9 @@ proc mangle(t: Typ): string =
   of tyStr: "s" & $t.len
   of tySet: "t" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi)
   of tyQueue: "u" & $t.len & "_" & mangle(t.elem)
+  of tyMapD: "d" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi) &
+    "_" & mangle(t.val)
+  of tyMapS: "m" & $t.len & "_" & mangle(t.elem) & "_" & mangle(t.val)
   of tyObject: "o" & t.name
   else: "x"
 
@@ -49,7 +52,7 @@ proc cBase(t: Typ): string =
   case t.kind
   of tyBool: "bool"
   of tyObject: "S_" & t.name
-  of tySeq, tyStr, tySet, tyQueue: "NS_" & mangle(t)
+  of tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS: "NS_" & mangle(t)
   else: "int64_t"
 
 proc cDecl(name: string, t: Typ): string =
@@ -100,7 +103,13 @@ proc genExpr(g: var Gen, e: Expr): string =
     else: "(" & a & " " & e.sval & " " & b & ")"
   of ekIndex:
     # The checker proved the index is in bounds; no runtime check needed.
-    if e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr}:
+    if e.kids[0].typ != nil and e.kids[0].typ.kind == tyMapD:
+      g.genExpr(e.kids[0]) & ".m_vals[(" & g.genExpr(e.kids[1]) & ") - " &
+        $e.kids[0].typ.elem.rlo & "LL]"
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind == tyMapS:
+      cBase(e.kids[0].typ) & "_at(&" & g.genExpr(e.kids[0]) & ", " &
+        g.genExpr(e.kids[1]) & ")"
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind in {tySeq, tyStr}:
       g.genExpr(e.kids[0]) & ".m_data[" & g.genExpr(e.kids[1]) & "]"
     else:
       g.genExpr(e.kids[0]) & "[" & g.genExpr(e.kids[1]) & "]"
@@ -115,7 +124,7 @@ proc genExpr(g: var Gen, e: Expr): string =
     "f_" & e.sval & "(" & parts.join(", ") & ")"
   of ekField:
     if e.kids[0].typ != nil and
-        e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue}:
+        e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS}:
       g.genExpr(e.kids[0]) & ".m_len"
     else:
       g.genExpr(e.kids[0]) & ".m_" & e.sval
@@ -133,6 +142,9 @@ proc genExpr(g: var Gen, e: Expr): string =
         # The argument is a path-like string value; safe to mention twice.
         let av = g.genExpr(a)
         fn & "(" & basePtr & ", " & av & ".m_data, " & av & ".m_len)"
+    elif e.kids.len > 2:
+      fn & "(" & basePtr & ", " & g.genExpr(e.kids[1]) & ", " &
+        g.genExpr(e.kids[2]) & ")"
     elif e.kids.len > 1:
       fn & "(" & basePtr & ", " & g.genExpr(e.kids[1]) & ")"
     else:
@@ -175,7 +187,8 @@ proc tempFor(g: var Gen, e: Expr, val: string): string =
   let ctype =
     if e.typ == nil: "int64_t"
     elif e.typ.kind == tyBool: "bool"
-    elif e.typ.kind in {tyObject, tySeq, tyStr, tySet, tyQueue}: cBase(e.typ)
+    elif e.typ.kind in {tyObject, tySeq, tyStr, tySet, tyQueue,
+      tyMapD, tyMapS}: cBase(e.typ)
     else: "int64_t"
   g.put ctype & " " & t & " = " & val & ";"
   t
@@ -197,12 +210,21 @@ proc genOrdered(g: var Gen, e: Expr): string =
     if e.typ != nil and e.typ.kind == tyArray:
       g.genPathOrdered(e)
     elif e.kids[0].typ != nil and
-        e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue}:
+        e.kids[0].typ.kind in {tySeq, tyStr, tySet, tyQueue, tyMapD, tyMapS}:
       g.tempFor(e, g.genPathOrdered(e.kids[0]) & ".m_len")
     else:
       g.tempFor(e, g.genPathOrdered(e))
   of ekIndex:
-    if e.typ != nil and e.typ.kind == tyArray:
+    if e.kids[0].typ != nil and e.kids[0].typ.kind == tyMapD:
+      let base = g.genPathOrdered(e.kids[0])
+      let k = g.genOrdered(e.kids[1])
+      g.tempFor(e, base & ".m_vals[(" & k & ") - " &
+        $e.kids[0].typ.elem.rlo & "LL]")
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind == tyMapS:
+      let base = g.genPathOrdered(e.kids[0])
+      let k = g.genOrdered(e.kids[1])
+      g.tempFor(e, cBase(e.kids[0].typ) & "_at(&" & base & ", " & k & ")")
+    elif e.typ != nil and e.typ.kind == tyArray:
       g.genPathOrdered(e)
     else:
       g.tempFor(e, g.genPathOrdered(e))
@@ -260,6 +282,10 @@ proc genOrdered(g: var Gen, e: Expr): string =
       else:
         let av = g.genPathOrdered(a)
         call = fn & "(&" & base & ", " & av & ".m_data, " & av & ".m_len)"
+    elif e.kids.len > 2:
+      let a1 = g.genOrdered(e.kids[1])
+      let a2 = g.genOrdered(e.kids[2])
+      call = fn & "(&" & base & ", " & a1 & ", " & a2 & ")"
     elif e.kids.len > 1:
       call = fn & "(&" & base & ", " & g.genOrdered(e.kids[1]) & ")"
     else:
@@ -290,12 +316,30 @@ proc genStmt(g: var Gen, s: Stmt) =
     let init =
       if s.init != nil and g.hasEffects(s.init): g.genOrdered(s.init)
       elif s.init != nil: g.genExpr(s.init)
-      elif s.typ.kind in {tyArray, tyObject, tySeq, tyStr, tySet, tyQueue}: "{0}"
+      elif s.typ.kind in {tyArray, tyObject, tySeq, tyStr, tySet, tyQueue,
+        tyMapD, tyMapS}: "{0}"
       elif s.typ.kind == tyBool: "false"
       else: "0"
     g.put cDecl("v_" & s.name, s.typ) & " = " & init & ";"
   of skAssign:
-    if g.hasEffects(s.lhs) or g.hasEffects(s.rhs):
+    if s.lhs.kind == ekIndex and s.lhs.kids[0].typ != nil and
+        s.lhs.kids[0].typ.kind in {tyMapD, tyMapS}:
+      let mt = s.lhs.kids[0].typ
+      var base, k, v: string
+      if g.hasEffects(s.lhs) or g.hasEffects(s.rhs):
+        base = g.genPathOrdered(s.lhs.kids[0])
+        k = g.genOrdered(s.lhs.kids[1])
+        v = g.genOrdered(s.rhs)
+      else:
+        base = g.genExpr(s.lhs.kids[0])
+        k = g.genExpr(s.lhs.kids[1])
+        v = g.genExpr(s.rhs)
+      if mt.kind == tyMapD:
+        g.put cBase(mt) & "_put(&" & base & ", " & k & ", " & v & ");"
+      else:
+        g.put "(void)" & cBase(mt) & "_put(&" & base & ", " & k & ", " &
+          v & ");"
+    elif g.hasEffects(s.lhs) or g.hasEffects(s.rhs):
       # Left-to-right, as written: target indexes first, then the value.
       let lhs = g.genPathOrdered(s.lhs)
       let rhs = g.genOrdered(s.rhs)
@@ -486,7 +530,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       if g.hasEffects(s.value): g.genPathOrdered(s.value)
       else: g.genExpr(s.value)
     g.put cBase(s.value.typ) & " *" & it & " = &" & basePath & ";"
-    if s.value.typ.kind == tySet:
+    if s.value.typ.kind in {tySet, tyMapD}:
       let lo = $s.value.typ.elem.rlo & "LL"
       let hi = $s.value.typ.elem.rhi & "LL"
       g.put "for (int64_t " & ix & " = " & lo & "; " & ix & " <= " & hi &
@@ -495,6 +539,18 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "if (!" & cBase(s.value.typ) & "_contains(" & it & ", " & ix &
         ")) continue;"
       g.put cBase(s.typ) & " v_" & s.name & " = " & ix & ";"
+      if s.name2.len > 0:
+        g.put cBase(s.typ2) & " v_" & s.name2 & " = " & it & "->m_vals[" &
+          ix & " - " & lo & "];"
+    elif s.value.typ.kind == tyMapS:
+      g.put "const int64_t " & nn & " = " & it & "->m_len;"
+      g.put "for (int64_t " & ix & " = 0; " & ix & " < " & nn & "; ++" & ix &
+        ") {"
+      inc g.ind
+      g.put cBase(s.typ) & " v_" & s.name & " = " & it & "->m_keys[" & ix & "];"
+      if s.name2.len > 0:
+        g.put cBase(s.typ2) & " v_" & s.name2 & " = " & it & "->m_vals[" &
+          ix & "];"
     elif s.value.typ.kind == tyQueue:
       g.put "const int64_t " & nn & " = " & it & "->m_len;"
       g.put "for (int64_t " & ix & " = 0; " & ix & " < " & nn & "; ++" & ix &
@@ -620,6 +676,103 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       "s->m_head = (s->m_head + 1) % " & cap & "; s->m_len -= 1; return v; }"
     g.put "static void " & n & "_clear(" & n &
       " *s) { s->m_len = 0; s->m_head = 0; }"
+  of tyMapD:
+    g.emitTypeDefs(t.val)
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    let n = "NS_" & key
+    let lo = $t.elem.rlo & "LL"
+    let hi = $t.elem.rhi & "LL"
+    let span = t.setSize
+    let words = (span + 63) div 64
+    let v = cBase(t.val)
+    g.put ""
+    g.put "typedef struct {"
+    g.put "  int64_t m_len;"
+    g.put "  uint64_t m_bits[" & $words & "];"
+    g.put "  " & v & " m_vals[" & $span & "];"
+    g.put "} " & n & ";"
+    g.put "static bool " & n & "_contains(" & n & " *s, int64_t k) { " &
+      "if (k < " & lo & " || k > " & hi & ") return false; " &
+      "return (s->m_bits[(k - " & lo & ") >> 6] >> ((k - " & lo &
+      ") & 63)) & 1; }"
+    g.put "static void " & n & "_put(" & n & " *s, int64_t k, " & v &
+      " x) { uint64_t *w = &s->m_bits[(k - " & lo & ") >> 6]; " &
+      "uint64_t m = 1ULL << ((k - " & lo & ") & 63); " &
+      "if (!(*w & m)) { *w |= m; s->m_len += 1; } " &
+      "s->m_vals[k - " & lo & "] = x; }"
+    g.put "static " & v & " " & n & "_get(" & n & " *s, int64_t k, " & v &
+      " fb) { return " & n & "_contains(s, k) ? s->m_vals[k - " & lo &
+      "] : fb; }"
+    g.put "static void " & n & "_remove(" & n & " *s, int64_t k) { " &
+      "if (k < " & lo & " || k > " & hi & ") return; " &
+      "uint64_t *w = &s->m_bits[(k - " & lo & ") >> 6]; " &
+      "uint64_t m = 1ULL << ((k - " & lo & ") & 63); " &
+      "if (*w & m) { *w &= ~m; s->m_len -= 1; " &
+      "memset(&s->m_vals[k - " & lo & "], 0, sizeof(" & v & ")); } }"
+    g.put "static void " & n & "_clear(" & n &
+      " *s) { memset(s, 0, sizeof(*s)); }"
+  of tyMapS:
+    g.emitTypeDefs(t.elem)
+    g.emitTypeDefs(t.val)
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    let n = "NS_" & key
+    let cap = $t.len & "LL"
+    let kt = cBase(t.elem)
+    let v = cBase(t.val)
+    g.put ""
+    g.put "typedef struct {"
+    g.put "  int64_t m_len;"
+    g.put "  " & kt & " m_keys[" & $t.len & "];"
+    g.put "  " & v & " m_vals[" & $t.len & "];"
+    g.put "} " & n & ";"
+    if t.elem.kind == tyStr:
+      g.put "static int " & n & "_cmp(" & kt & " a, " & kt & " b) { " &
+        "size_t na = (size_t)a.m_len, nb = (size_t)b.m_len; " &
+        "int c = memcmp(a.m_data, b.m_data, na < nb ? na : nb); " &
+        "if (c) return c; return (a.m_len > b.m_len) - (a.m_len < b.m_len); }"
+      g.put "static int64_t " & n & "_find(" & n & " *s, " & kt & " k) { " &
+        "int64_t lo = 0, hi = s->m_len - 1; while (lo <= hi) { " &
+        "int64_t mid = (lo + hi) / 2; int c = " & n &
+        "_cmp(s->m_keys[mid], k); if (c == 0) return mid; " &
+        "if (c < 0) lo = mid + 1; else hi = mid - 1; } return -(lo + 1); }"
+    else:
+      g.put "static int64_t " & n & "_find(" & n & " *s, " & kt & " k) { " &
+        "int64_t lo = 0, hi = s->m_len - 1; while (lo <= hi) { " &
+        "int64_t mid = (lo + hi) / 2; if (s->m_keys[mid] == k) return mid; " &
+        "if (s->m_keys[mid] < k) lo = mid + 1; else hi = mid - 1; } " &
+        "return -(lo + 1); }"
+    g.put "static bool " & n & "_contains(" & n & " *s, " & kt &
+      " k) { return " & n & "_find(s, k) >= 0; }"
+    g.put "static bool " & n & "_put(" & n & " *s, " & kt & " k, " & v &
+      " x) { int64_t i = " & n & "_find(s, k); " &
+      "if (i >= 0) { s->m_vals[i] = x; return true; } " &
+      "if (s->m_len >= " & cap & ") return false; int64_t p = -i - 1; " &
+      "memmove(&s->m_keys[p + 1], &s->m_keys[p], " &
+      "(size_t)((s->m_len - p) * (int64_t)sizeof(" & kt & "))); " &
+      "memmove(&s->m_vals[p + 1], &s->m_vals[p], " &
+      "(size_t)((s->m_len - p) * (int64_t)sizeof(" & v & "))); " &
+      "s->m_keys[p] = k; s->m_vals[p] = x; s->m_len += 1; return true; }"
+    g.put "static " & v & " " & n & "_get(" & n & " *s, " & kt & " k, " & v &
+      " fb) { int64_t i = " & n & "_find(s, k); " &
+      "return i >= 0 ? s->m_vals[i] : fb; }"
+    g.put "static " & v & " " & n & "_at(" & n & " *s, " & kt &
+      " k) { return s->m_vals[" & n & "_find(s, k)]; }"
+    g.put "static void " & n & "_remove(" & n & " *s, " & kt & " k) { " &
+      "int64_t i = " & n & "_find(s, k); if (i < 0) return; " &
+      "memmove(&s->m_keys[i], &s->m_keys[i + 1], " &
+      "(size_t)((s->m_len - i - 1) * (int64_t)sizeof(" & kt & "))); " &
+      "memmove(&s->m_vals[i], &s->m_vals[i + 1], " &
+      "(size_t)((s->m_len - i - 1) * (int64_t)sizeof(" & v & "))); " &
+      "s->m_len -= 1; memset(&s->m_keys[s->m_len], 0, sizeof(" & kt &
+      ")); memset(&s->m_vals[s->m_len], 0, sizeof(" & v & ")); }"
+    g.put "static void " & n & "_clear(" & n &
+      " *s) { memset(s, 0, sizeof(*s)); }"
   of tySet:
     let key = mangle(t)
     if key in g.emitted:

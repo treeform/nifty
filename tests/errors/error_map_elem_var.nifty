@@ -1,0 +1,11 @@
+var m: map[0 .. 7, 0 .. 99]
+
+proc bump(x: var 0 .. 99) =
+  let t = x
+  if t < 99:
+    x = t + 1
+
+thread main() =
+  m.put(3, 30)
+  if m.contains(3):
+    bump(m[3])

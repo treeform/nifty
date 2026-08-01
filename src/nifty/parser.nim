@@ -59,7 +59,7 @@ proc parseType(p: var Parser): Typ =
   let t = p.peek
   if t.kind == tkIdent and
       (t.text in ["int", "bool", "Lock", "array", "seq", "string", "set",
-        "queue"] or
+        "queue", "map"] or
        t.text in p.types):
     discard p.next
     case t.text
@@ -93,6 +93,42 @@ proc parseType(p: var Parser): Typ =
         of "seq": tySeq
         of "queue": tyQueue
         else: tyArray), len: n, elem: e)
+    of "map":
+      # map[lo .. hi, V] (dense) or map[N, K, V] (sorted sparse)
+      p.expectOp("[")
+      let n = p.evalConst(p.parseExpr())
+      if p.atOp("..") or p.atOp("..<"):
+        let inclusive = p.peek.text == ".."
+        discard p.next
+        var hi = p.evalConst(p.parseExpr())
+        if not inclusive:
+          hi = hi - 1
+        if hi < n:
+          err(t.line, "empty key range for map")
+        if n < -1_000_000_000 or hi > 1_000_000_000 or
+            hi - n + 1 > 16_777_216:
+          err(t.line, "map key range is too large (max 16777216 keys)")
+        p.expectOp(",")
+        let v = p.parseType()
+        if v.kind in {tyLock, tyArray}:
+          err(t.line, "a map value cannot be a " & $v &
+            "; wrap arrays in an object")
+        p.expectOp("]")
+        Typ(kind: tyMapD, elem: intType(n, hi), val: v)
+      else:
+        if n <= 0:
+          err(t.line, "map capacity must be positive")
+        p.expectOp(",")
+        let k = p.parseType()
+        if not (k.kind == tyInt or k.kind == tyStr):
+          err(t.line, "map keys must be ints (or ranges) or string[N], got " & $k)
+        p.expectOp(",")
+        let v = p.parseType()
+        if v.kind in {tyLock, tyArray}:
+          err(t.line, "a map value cannot be a " & $v &
+            "; wrap arrays in an object")
+        p.expectOp("]")
+        Typ(kind: tyMapS, len: n, elem: k, val: v)
     of "set":
       p.expectOp("[")
       let e = p.parseType()
@@ -356,6 +392,10 @@ proc parseStmt(p: var Parser): Stmt =
   of "for":
     discard p.next
     let vname = p.expectIdent()
+    var vname2 = ""
+    if p.atOp(","):
+      discard p.next
+      vname2 = p.expectIdent()
     p.expectKeyword("in")
     let first = p.parseExpr()
     if p.atOp("..<") or p.atOp(".."):
@@ -364,8 +404,9 @@ proc parseStmt(p: var Parser): Stmt =
       discard p.next
       result.hi = p.parseExpr()
     elif p.atOp(":"):
-      # for x in s: - iterate a seq or string
-      result = Stmt(kind: skForEach, line: t.line, name: vname, value: first)
+      # for x in s: - iterate a container (for k, v in m: over maps)
+      result = Stmt(kind: skForEach, line: t.line, name: vname,
+        name2: vname2, value: first)
     else:
       err(p.peek.line, "expected '..', '..<' (a range) or ':' (iterate a " &
         "seq/string) in for loop")

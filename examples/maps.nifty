@@ -1,0 +1,44 @@
+# Two map shapes, one iteration law: ascending by key, always.
+#
+# Dense map[lo .. hi, V]: the key range IS the capacity (a slot per
+# possible key), so every operation is total - no fullness, no proofs.
+#
+# Sparse map[N, K, V]: sorted entries with binary search. put returns
+# false when full-and-absent; m[k] = v is the strict write (prove
+# contains or room); reading m[k] needs a proven contains - the test,
+# a strict write, or iteration provides it.
+
+var modes: map[0 .. 7, 0 .. 99]
+
+thread main() =
+  echo modes.len
+  modes.put(3, 30)
+  modes[5] = 50
+  echo modes.len
+  echo modes.contains(3)
+  echo modes.contains(4)
+  echo modes.get(4, 9)
+  if modes.contains(3):
+    echo modes[3]
+  for k, v in modes:
+    echo k, "=", v
+  modes.remove(3)
+  echo modes.len
+
+  var ages: map[4, string[8], 0 .. 150]
+  echo ages.put("bob", 42)
+  echo ages.put("al", 9)
+  ages["cy"] = 77
+  echo ages["cy"]
+  echo ages.len
+  for k, v in ages:
+    echo k, " ", v
+  echo ages.get("zed", 0)
+  if ages.contains("bob"):
+    echo ages["bob"]
+  ages.remove("al")
+  for k in ages:
+    echo k
+  echo ages.put("dee", 1)
+  echo ages.put("eve", 2)
+  echo ages.put("fay", 3)

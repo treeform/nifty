@@ -1,0 +1,7 @@
+var m: map[4, int, int]
+
+proc w(k: int) =
+  m[k] = 1
+
+thread main() =
+  w(1)

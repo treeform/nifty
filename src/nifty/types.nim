@@ -3,7 +3,7 @@
 type
   TypKind* = enum
     tyInt, tyBool, tyString, tyLock, tyArray, tyObject, tySeq, tyStr, tySet,
-    tyQueue
+    tyQueue, tyMapD, tyMapS # dense map[range, V]; sorted sparse map[N, K, V]
   Field* = object
     name*: string
     typ*: Typ
@@ -13,6 +13,7 @@ type
     elem*: Typ           # tyArray/tySeq; tySet: the range element type
     name*: string        # tyObject
     fields*: seq[Field]  # tyObject
+    val*: Typ            # tyMapD/tyMapS: the value type
     rlo*, rhi*: int64    # tyInt: declared range; full range = plain int
 
   SymKind* = enum
@@ -47,7 +48,9 @@ type
     kind*: StmtKind
     line*: int
     name*: string      # var/let/for/with
+    name2*: string     # for k, v in m: - the value variable
     typ*: Typ          # var/let declared or inferred type
+    typ2*: Typ         # foreach over a map: the value variable's type
     init*: Expr        # var/let initializer
     lhs*, rhs*: Expr   # assign
     cond*: Expr        # while
@@ -93,7 +96,8 @@ type
     types*: seq[TypeDef]
     routines*: seq[Routine]
 
-const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl"]
+const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
+  "put", "remove"]
 
 proc intType*(lo = low(int64), hi = high(int64)): Typ =
   ## An int type, optionally restricted to a declared range.
@@ -103,7 +107,7 @@ proc isFullRange*(t: Typ): bool =
   t.rlo == low(int64) and t.rhi == high(int64)
 
 proc setSize*(t: Typ): int64 =
-  ## Number of possible values of a set's element range.
+  ## Number of possible values of a set's (or dense map's) element range.
   t.elem.rhi - t.elem.rlo + 1
 
 proc typEq*(a, b: Typ): bool =
@@ -117,6 +121,11 @@ proc typEq*(a, b: Typ): bool =
     return a.len == b.len
   if a.kind == tySet:
     return a.elem.rlo == b.elem.rlo and a.elem.rhi == b.elem.rhi
+  if a.kind == tyMapD:
+    return a.elem.rlo == b.elem.rlo and a.elem.rhi == b.elem.rhi and
+      typEq(a.val, b.val)
+  if a.kind == tyMapS:
+    return a.len == b.len and typEq(a.elem, b.elem) and typEq(a.val, b.val)
   if a.kind == tyObject:
     return a.name == b.name
   true
@@ -135,4 +144,6 @@ proc `$`*(t: Typ): string =
   of tyStr: "string[" & $t.len & "]"
   of tySet: "set[" & $t.elem & "]"
   of tyQueue: "queue[" & $t.len & ", " & $t.elem & "]"
+  of tyMapD: "map[" & $t.elem & ", " & $t.val & "]"
+  of tyMapS: "map[" & $t.len & ", " & $t.elem & ", " & $t.val & "]"
   of tyObject: t.name

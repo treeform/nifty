@@ -1,0 +1,4 @@
+var m: map[0 .. 7, int]
+
+thread main() =
+  echo m[3]

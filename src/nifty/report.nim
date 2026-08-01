@@ -54,6 +54,14 @@ proc typeSize(t: Typ): int64 =
   of tyQueue:
     # int64 length + int64 head + data, padded to 8.
     (sadd(16, smul(t.len, typeSize(t.elem))) + 7) div 8 * 8
+  of tyMapD:
+    # int64 count + presence bits + one value slot per possible key.
+    (sadd(sadd(8, (t.setSize + 63) div 64 * 8),
+      smul(t.setSize, typeSize(t.val))) + 7) div 8 * 8
+  of tyMapS:
+    # int64 count + sorted keys + values, padded to 8.
+    (sadd(8, sadd(smul(t.len, typeSize(t.elem)),
+      smul(t.len, typeSize(t.val)))) + 7) div 8 * 8
   of tyObject:
     var off = 0'i64
     for f in t.fields:
@@ -66,12 +74,29 @@ proc typeSize(t: Typ): int64 =
 
 # --- worst-case ops -------------------------------------------------------
 
+proc log2Ceil(n: int64): int64 =
+  result = 1
+  var v = 1'i64
+  while v < n:
+    v = v * 2
+    inc result
+
 proc exprOps(e: Expr, costs: Table[string, int64]): int64 =
   if e.isNil:
     return 0
   result = 1
   if e.kind == ekCall:
     result = sadd(result, costs.getOrDefault(e.sval, 0))
+  if e.kind == ekMethod and e.kids[0].typ != nil:
+    let bt = e.kids[0].typ
+    if bt.kind == tyMapS:
+      # Sorted entries: searches are log-bounded, writes shift.
+      if e.sval in ["contains", "get"]:
+        result = sadd(result, log2Ceil(bt.len))
+      elif e.sval in ["put", "remove"]:
+        result = sadd(result, bt.len)
+    elif bt.kind == tyStr and e.sval == "add":
+      result = sadd(result, bt.len)
   for k in e.kids:
     result = sadd(result, exprOps(k, costs))
 

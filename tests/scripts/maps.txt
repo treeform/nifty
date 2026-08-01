@@ -1,0 +1,23 @@
+0
+2
+true
+false
+9
+30
+3=30
+5=50
+1
+true
+true
+77
+3
+al 9
+bob 42
+cy 77
+0
+42
+bob
+cy
+true
+true
+false

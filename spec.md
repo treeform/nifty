@@ -162,6 +162,31 @@ and in `while` conditions, where execution counts cannot be modeled.
   `for x in q:` iterates front to back. Length facts, sharing rules, and
   zero-init-is-empty all work exactly as for `seq`. There is no `q[i]` —
   queues are streams, not tables.
+- `map[lo .. hi, V]` (dense) — when the key is a range, the range IS the
+  capacity: one value slot per possible key, plus a presence bitset.
+  Every operation is total: `m.put(k, v)` always has room (the key must
+  prove it fits the range, like any store), `m.get(k, fallback)`,
+  `m.contains(k)` (out-of-range is simply false), `m.remove(k)` (absent
+  is a no-op), `m.len`, `m.clear()`.
+- `map[N, K, V]` (sparse) — sorted entries with binary search; keys are
+  ints/ranges or `string[N]` (bytewise lexicographic, shorter-first on
+  prefix ties). `m.put(k, v): bool` inserts-or-updates, `false` when
+  full and absent; `m[k] = v` is the strict write — prove
+  `m.contains(k)` (update) or `m.len < N` (insert) first. Vacated slots
+  are zeroed, so a map's bytes are a canonical function of its contents.
+- Both maps share the reading rule: `m[k]` requires a **proven
+  containment** — established by `if m.contains(k):`, by a strict write,
+  by a total dense `put`, or by iteration (`for k, v in m:` proves the
+  loop key by construction). `m.get(k, fallback)` is the total escape
+  hatch. Containment facts (`m@k`) live and die exactly like length
+  facts: any mutation of the map, any change to the key variable, a var
+  argument, a lock release, or a loop that touches either kills them,
+  and a join keeps them only when proven on every path. Map elements are
+  values, not places: `m[k]` cannot be a `var` argument or an iteration
+  base.
+- **One iteration law**: `set`, dense map, and sparse map all iterate
+  **ascending by key** — iteration order is a function of contents,
+  never of insertion history.
 - `Lock` — a mutex. Only allowed as a global; only usable via `with`.
 - `object` — a static struct, exactly like C:
 
@@ -391,7 +416,9 @@ properties the checker proves:
   chain itself is printed (`consumer -> tryPop`).
 - **ops** — worst-case abstract operation count per thread: every loop
   has a proven trip bound, so each thread's outer `loop` pass (or its
-  whole body) has a finite worst case. Multiply by a target's
+  whole body) has a finite worst case. Container ops are priced
+  honestly: sparse-map searches cost ⌈log₂N⌉, its writes and string
+  appends cost N. Multiply by a target's
   cycles-per-op to approximate WCET; feed it to the watchdog.
 
 ## Grammar (v0, informal)
@@ -429,9 +456,10 @@ protocol), locks, the three static proofs (division, indexing, overflow)
 via interval analysis with zero runtime checks in the generated C, `echo`,
 `discard`, C output, generated `main` with thread spawn/join.
 
-Not yet implemented: `index` types, wildcard generics, the `map` builtin
-(waiting on error values for an honest `get`), tail-call recursion, the
-per-thread error flag,
+Not yet implemented: `index` types, wildcard generics, a
+`Result`-returning `map.get` (waiting on error values; `get(k, fallback)`
+and proven `m[k]` cover today), tail-call recursion, the per-thread error
+flag,
 deterministic floats and fixed-point (`fixed[lo .. hi, step]` — a scaled
 ranged int, so the existing proofs apply directly), int width from ranges
 (seq elements are still 8 bytes each; string data is already 1 byte).
