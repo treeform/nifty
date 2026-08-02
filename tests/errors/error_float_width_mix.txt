@@ -1,0 +1,1 @@
+error_float_width_mix.nifty:6: '+' cannot mix float32 and float64; convert explicitly (float64(x), float32(x), or x.toInt)

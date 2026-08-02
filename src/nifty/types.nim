@@ -7,7 +7,8 @@ type
   TypKind* = enum
     IntType, BoolType, StringLitType, LockType, ArrayType, ObjectType, SeqType, StringType, SetType,
     QueueType, DenseMapType, SparseMapType, # dense map[range, V]; sorted sparse map[N, K, V]
-    TypeVarType # a generic $T waiting to be bound at instantiation
+    TypeVarType, # a generic $T waiting to be bound at instantiation
+    FloatType # IEEE float32/float64: data values, outside the proof engine
   Field* = object
     name*: string
     typ*: Typ
@@ -22,18 +23,21 @@ type
     opt*: bool           # T?: an optional (value + ok flag)
     gname*: string       # TypeVarType: the $name
     lenVar*: string      # containers: a $name standing in for the size
+    width*: int          # storage bytes for hardware types (0 = natural 8)
+    dname*: string       # display name for named hardware types
 
   SymKind* = enum
     ConstSym, GlobalSym, LocalSym, ParamSym
 
   ExprKind* = enum
-    IntExpr, BoolExpr, StrExpr, IdentExpr, BinExpr, NotExpr, NegExpr, IndexExpr, CallExpr,
+    IntExpr, FloatExpr, BoolExpr, StrExpr, IdentExpr, BinExpr, NotExpr, NegExpr, IndexExpr, CallExpr,
     FieldExpr, MethodExpr, # MethodExpr: builtin op on a container, kids[0] = base
     NoneExpr # the absent optional value; typed by its destination
   Expr* = ref object
     kind*: ExprKind
     line*: int
     ival*: int64
+    fval*: float64
     bval*: bool
     sval*: string   # StrExpr text, IdentExpr name, BinExpr operator, CallExpr name,
                     # FieldExpr field name
@@ -120,16 +124,26 @@ proc deOpt*(t: Typ): Typ =
   if t == nil or not t.opt:
     return t
   Typ(kind: t.kind, len: t.len, elem: t.elem, name: t.name,
-    fields: t.fields, val: t.val, rlo: t.rlo, rhi: t.rhi, opt: false)
+    fields: t.fields, val: t.val, rlo: t.rlo, rhi: t.rhi, opt: false,
+    width: t.width, dname: t.dname)
 
 proc optOf*(t: Typ): Typ =
   ## The optional flavor of a type (a copy with the flag set).
   Typ(kind: t.kind, len: t.len, elem: t.elem, name: t.name,
-    fields: t.fields, val: t.val, rlo: t.rlo, rhi: t.rhi, opt: true)
+    fields: t.fields, val: t.val, rlo: t.rlo, rhi: t.rhi, opt: true,
+    width: t.width, dname: t.dname)
 
 proc intType*(lo = low(int64), hi = high(int64)): Typ =
   ## An int type, optionally restricted to a declared range.
   Typ(kind: IntType, rlo: lo, rhi: hi)
+
+proc sizedInt*(lo, hi: int64, width: int, dname: string): Typ =
+  ## A hardware integer: an ordinary range with a storage width.
+  Typ(kind: IntType, rlo: lo, rhi: hi, width: width, dname: dname)
+
+proc floatType*(width: int, dname: string): Typ =
+  ## float32 or float64: IEEE data values, no ranges, no proofs.
+  Typ(kind: FloatType, width: width, dname: dname)
 
 proc isFullRange*(t: Typ): bool =
   t.rlo == low(int64) and t.rhi == high(int64)
@@ -150,6 +164,8 @@ proc typeAlign*(t: Typ): int64 =
   case t.kind
   of BoolType:
     result = 1
+  of IntType, FloatType:
+    result = if t.width > 0: t.width else: 8
   of ArrayType:
     result = typeAlign(t.elem)
   of ObjectType:
@@ -157,7 +173,7 @@ proc typeAlign*(t: Typ): int64 =
     for f in t.fields:
       result = max(result, typeAlign(f.typ))
   else:
-    result = 8 # int, containers (int64 length field first), Lock
+    result = 8 # containers (int64 length field first), Lock
 
 proc bigRet*(t: Typ): bool
   ## Returns of arrays (C cannot) and of values bigger than the arena
@@ -171,7 +187,8 @@ proc typeSize*(t: Typ): int64 =
     return (sizeAdd(typeSize(deOpt(t)), 1) + a - 1) div a * a
   case t.kind
   of BoolType: 1
-  of IntType: 8
+  of IntType: (if t.width > 0: t.width else: 8)
+  of FloatType: t.width
   of ArrayType: sizeMul(t.len, typeSize(t.elem))
   of SeqType:
     (sizeAdd(8, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
@@ -204,17 +221,23 @@ proc typeEq*(a, b: Typ): bool =
     return false
   if a.kind != b.kind:
     return false
+  if a.kind == FloatType:
+    return a.width == b.width
   if a.kind in {ArrayType, SeqType, QueueType}:
-    return a.len == b.len and typeEq(a.elem, b.elem)
+    # Elements must also match in storage width: the memory layouts of
+    # array[4, uint8] and array[4, 0 .. 255] are different things.
+    return a.len == b.len and typeEq(a.elem, b.elem) and
+      a.elem.width == b.elem.width
   if a.kind == StringType:
     return a.len == b.len
   if a.kind == SetType:
     return a.elem.rlo == b.elem.rlo and a.elem.rhi == b.elem.rhi
   if a.kind == DenseMapType:
     return a.elem.rlo == b.elem.rlo and a.elem.rhi == b.elem.rhi and
-      typeEq(a.val, b.val)
+      typeEq(a.val, b.val) and a.val.width == b.val.width
   if a.kind == SparseMapType:
-    return a.len == b.len and typeEq(a.elem, b.elem) and typeEq(a.val, b.val)
+    return a.len == b.len and typeEq(a.elem, b.elem) and
+      typeEq(a.val, b.val) and a.val.width == b.val.width
   if a.kind == ObjectType:
     return a.name == b.name
   true
@@ -229,7 +252,10 @@ proc `$`*(t: Typ): string =
     return $deOpt(t) & "?"
   case t.kind
   of IntType:
-    if t.isFullRange: "int" else: $t.rlo & " .. " & $t.rhi
+    if t.dname != "": t.dname
+    elif t.isFullRange: "int"
+    else: $t.rlo & " .. " & $t.rhi
+  of FloatType: t.dname
   of BoolType: "bool"
   of StringLitType: "string"
   of LockType: "Lock"

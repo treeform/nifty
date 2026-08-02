@@ -74,12 +74,39 @@ proc parseTypeCore(p: var Parser): Typ =
   let t = p.peek
   if t.kind == IdentToken and
       (t.text in ["int", "bool", "Lock", "array", "seq", "string", "set",
-        "queue", "map"] or
+        "queue", "map", "int8", "uint8", "char", "int16", "uint16",
+        "int32", "uint32", "int64", "uint64", "float32", "float64"] or
        t.text in p.types):
     discard p.next
     case t.text
     of "int":
       intType()
+    of "int8":
+      sizedInt(-128, 127, 1, "int8")
+    of "uint8":
+      sizedInt(0, 255, 1, "uint8")
+    of "char":
+      # One byte, always: a UTF-8 code unit. A Unicode code point may be
+      # several chars; strings are always UTF-8 bytes.
+      sizedInt(0, 255, 1, "char")
+    of "int16":
+      sizedInt(-32768, 32767, 2, "int16")
+    of "uint16":
+      sizedInt(0, 65535, 2, "uint16")
+    of "int32":
+      sizedInt(-2147483648, 2147483647, 4, "int32")
+    of "uint32":
+      sizedInt(0, 4294967295, 4, "uint32")
+    of "int64":
+      sizedInt(low(int64), high(int64), 8, "int64")
+    of "uint64":
+      # Stored as 8 unsigned bytes for binary compatibility; nifty
+      # values stay in 0 .. int64.high (the interval engine's world).
+      sizedInt(0, high(int64), 8, "uint64")
+    of "float32":
+      floatType(4, "float32")
+    of "float64":
+      floatType(8, "float64")
     of "bool":
       Typ(kind: BoolType)
     of "Lock":
@@ -218,6 +245,10 @@ proc parseAtom(p: var Parser): Expr =
   of IntToken:
     discard p.next
     result = Expr(kind: IntExpr, line: t.line, ival: parseIntLit(t))
+  of FloatToken:
+    discard p.next
+    result = Expr(kind: FloatExpr, line: t.line,
+      fval: parseFloat(t.text))
   of StrToken:
     discard p.next
     result = Expr(kind: StrExpr, line: t.line, sval: t.text)

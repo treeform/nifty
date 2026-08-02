@@ -5,7 +5,7 @@ import common
 
 type
   TokKind* = enum
-    IdentToken, IntToken, StrToken, OpToken, NewlineToken, IndentToken, DedentToken, EofToken
+    IdentToken, IntToken, FloatToken, StrToken, OpToken, NewlineToken, IndentToken, DedentToken, EofToken
   Token* = object
     kind*: TokKind
     text*: string
@@ -63,7 +63,24 @@ proc tokenize*(src: string, baseLine = 0): seq[Token] =
         let s = p
         while p < line.len and (line[p].isDigit or line[p] == '_'):
           inc p
-        result.add Token(kind: IntToken, text: line[s ..< p].replace("_", ""), line: lineNo)
+        # A float literal: digits '.' digits, optionally e[+-]digits.
+        # ("0 .. 9" survives: '.' must be followed by a digit.)
+        if p + 1 < line.len and line[p] == '.' and line[p + 1].isDigit:
+          inc p
+          while p < line.len and (line[p].isDigit or line[p] == '_'):
+            inc p
+          if p + 1 < line.len and line[p] in {'e', 'E'} and
+              (line[p + 1].isDigit or (p + 2 < line.len and
+                line[p + 1] in {'+', '-'} and line[p + 2].isDigit)):
+            inc p
+            if line[p] in {'+', '-'}:
+              inc p
+            while p < line.len and line[p].isDigit:
+              inc p
+          result.add Token(kind: FloatToken,
+            text: line[s ..< p].replace("_", ""), line: lineNo)
+        else:
+          result.add Token(kind: IntToken, text: line[s ..< p].replace("_", ""), line: lineNo)
       elif c.isAlphaAscii or c == '_':
         let s = p
         while p < line.len and (line[p].isAlphaNumeric or line[p] == '_'):

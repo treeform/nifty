@@ -222,6 +222,20 @@ proc coerceStrLit(c: Ctx, e: Expr, target: Typ): bool =
 proc checkExpr(c: var Ctx, e: Expr): Typ
 proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string
 
+proc coerceFloatLit(e: Expr, want: Typ): bool =
+  ## A float literal has no width of its own: it takes the width its
+  ## destination asks for, like int literals slot into any range.
+  if e == nil or want == nil or want.kind != FloatType or want.opt:
+    return false
+  if e.kind == FloatExpr:
+    e.typ = want
+    return true
+  if e.kind == NegExpr and e.kids[0].kind == FloatExpr:
+    e.kids[0].typ = want
+    e.typ = want
+    return true
+  false
+
 var lockReport*: seq[tuple[name: string, guards: seq[string],
   users: seq[string]]] ## for `nifty report`: what each lock protects
 
@@ -907,6 +921,7 @@ proc whileBound(c: Ctx, s: Stmt): int64 =
 ## Range Compatibility
 
 proc typeRangeEq(a, b: Typ): bool =
+  if a != nil and b != nil and (a.width != b.width): return false
   ## Exact range match, required for var parameters (writes flow both ways).
   if a.kind != b.kind:
     return false
@@ -948,6 +963,8 @@ proc zeroOk(t: Typ): bool =
 
 proc checkExpr(c: var Ctx, e: Expr): Typ =
   case e.kind
+  of FloatExpr:
+    e.typ = floatType(8, "float64") # literals default to float64
   of IntExpr:
     e.typ = intType()
     e.setFact Fact(lo: e.ival, hi: e.ival, notZero: e.ival != 0)
@@ -979,8 +996,11 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
   of NegExpr:
     let nt = c.expectVal(e.kids[0])
     rejectOpt(nt, e.kids[0])
+    if nt.kind == FloatType:
+      e.typ = nt
+      return e.typ
     if nt.kind != IntType:
-      err(e.line, "unary '-' needs an int operand")
+      err(e.line, "unary '-' needs an int or float operand")
     let a = exprFact(e.kids[0])
     let l = satNeg(a.hi)
     let h = satNeg(a.lo)
@@ -1018,6 +1038,29 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       let b = c.expectVal(e.kids[1])
       rejectOpt(a, e.kids[0])
       rejectOpt(b, e.kids[1])
+      var fa = a
+      var fb = b
+      if fa.kind == FloatType or fb.kind == FloatType:
+        # Float literals take the width of the other side.
+        if coerceFloatLit(e.kids[1], fa):
+          fb = fa
+        elif coerceFloatLit(e.kids[0], fb):
+          fa = fb
+        if fa.kind != FloatType or fb.kind != FloatType or fa.width != fb.width:
+          err(e.line, "'" & e.sval & "' cannot mix " & $fa & " and " & $fb &
+            "; convert explicitly (float64(x), float32(x), or x.toInt)")
+        case e.sval
+        of "+", "-", "*", "/":
+          # IEEE never traps: x / 0.0 is inf, overflow is inf, 0.0 / 0.0
+          # is NaN - all values, no exits. Floats carry no proofs.
+          e.typ = fa
+        of "%":
+          err(e.line, "'%' is not defined for floats")
+        of "<", "<=", ">", ">=", "==", "!=":
+          e.typ = Typ(kind: BoolType) # NaN compares false; == is IEEE ==
+        else:
+          err(e.line, "internal: unknown operator " & e.sval)
+        return e.typ
       case e.sval
       of "+", "-", "*", "/", "%":
         if a.kind != IntType or b.kind != IntType:
@@ -1159,6 +1202,12 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           e.typ = deOpt(e.typ)
           e.unwrapOpt = true
       e.setFact typeFact(e.typ)
+    elif base.kind == FloatType:
+      if e.sval != "toInt":
+        err(e.line, $base & " has no property '" & e.sval & "' (only .toInt)")
+      # Saturating and NaN-safe (NaN -> 0): the one float -> int door.
+      # Full-range result: guard before using it as an index or length.
+      e.typ = intType()
     else:
       err(e.line, "'.' needs an object, seq, or string, got " & $base)
   of MethodExpr:
@@ -1186,6 +1235,16 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       e.setFact typeFact(e.typ)
       return e.typ
     rejectOpt(bt, e.kids[0])
+    if bt != nil and bt.kind == FloatType:
+      if e.sval != "toInt":
+        err(e.line, $bt & " has no method '" & e.sval & "'")
+      if nArgs != 0:
+        err(e.line, "toInt takes no arguments")
+      # Saturating and NaN-safe (NaN becomes 0): a bare C cast of an
+      # out-of-range or NaN float is undefined behavior, so nifty never
+      # emits one. The result is a full-range int: guard before use.
+      e.typ = intType()
+      return e.typ
     if e.sval in mutMethods:
       if c.mutBan > 0:
         err(e.line, "a mutating method cannot appear here: this position " &
@@ -1471,6 +1530,15 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     let bigOk = c.allowBigRet
     c.allowBigRet = false # arguments are not store targets
     var name = e.sval
+    if name in ["float32", "float64"]:
+      if e.kids.len != 1:
+        err(e.line, name & "(x) takes exactly one argument")
+      let at = c.expectVal(e.kids[0])
+      rejectOpt(at, e.kids[0])
+      if at.kind notin {IntType, FloatType}:
+        err(e.line, name & "(x) converts ints and floats, got " & $at)
+      e.typ = floatType((if name == "float32": 4 else: 8), name)
+      return e.typ
     if name notin c.allRoutines:
       err(e.line, "unknown func or proc: '" & name & "'")
     if name == c.cur.name:
@@ -1507,6 +1575,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if c.coerceOpt(arg, pt.typ):
           at = pt.typ
         elif c.coerceStrLit(arg, pt.typ):
+          at = pt.typ
+        elif coerceFloatLit(arg, pt.typ):
           at = pt.typ
       if not typeEq(at, pt.typ):
         err(arg.line, "argument " & $(i + 1) & " of '" & name & "': expected " &
@@ -1606,6 +1676,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       if c.coerceOpt(s.init, t):
         it = t
       elif c.coerceStrLit(s.init, t):
+        it = t
+      elif coerceFloatLit(s.init, t):
         it = t
       elif it.kind == StringLitType:
         err(s.line, "string literals need a string[N] destination " &
@@ -1754,6 +1826,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       if c.coerceOpt(s.rhs, lt):
         rt = lt
       elif c.coerceStrLit(s.rhs, lt):
+        rt = lt
+      elif coerceFloatLit(s.rhs, lt):
         rt = lt
     if s.rhs.kind == CallExpr and bigRet(rt):
       # The callee fills the destination directly; it must not also be
@@ -2100,6 +2174,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         t = c.expectVal(s.value)
         if c.coerceOpt(s.value, c.cur.ret):
           t = c.cur.ret
+        elif coerceFloatLit(s.value, c.cur.ret):
+          t = c.cur.ret
         elif c.coerceStrLit(s.value, c.cur.ret):
           t = c.cur.ret
       if not typeEq(t, c.cur.ret):
@@ -2120,7 +2196,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     for a in s.args:
       let at = c.expectVal(a)
       rejectOpt(at, a)
-      if at.kind notin {IntType, BoolType, StringLitType, StringType}:
+      if at.kind notin {IntType, BoolType, StringLitType, StringType,
+          FloatType}:
         err(a.line, "cannot echo a " & $a.typ)
   of DiscardStmt:
     discard c.checkExpr(s.value)
@@ -2296,7 +2373,8 @@ proc checkSmallestScope(body: seq[Stmt]) =
   ## independent, so moving the declaration provably changes nothing.
   for i, s in body:
     if s.kind in {VarStmt, LetStmt} and
-        (s.init == nil or s.init.kind in {IntExpr, BoolExpr, StrExpr}):
+        (s.init == nil or s.init.kind in {IntExpr, FloatExpr, BoolExpr,
+          StrExpr}):
       var users: seq[int]
       for j in (i + 1) ..< body.len:
         if stmtUsesName(body[j], s.name):
@@ -2375,8 +2453,10 @@ proc mangleTyp(t: Typ): string =
   result =
     case t.kind
     of IntType:
-      if t.isFullRange: "int"
+      if t.dname != "": t.dname
+      elif t.isFullRange: "int"
       else: mangleVal(t.rlo) & "_" & mangleVal(t.rhi)
+    of FloatType: t.dname
     of BoolType: "bool"
     of StringType: "str" & $t.len
     of ObjectType: t.name
@@ -2425,8 +2505,11 @@ proc typToToks(t: Typ, line: int, gname: string): seq[Token] =
     else: @[Token(kind: IntToken, text: $v, line: line)]
   case t.kind
   of IntType:
-    if t.isFullRange: result = @[idt("int")]
+    if t.dname != "": result = @[idt(t.dname)]
+    elif t.isFullRange: result = @[idt("int")]
     else: result = num(t.rlo) & @[op("..")] & num(t.rhi)
+  of FloatType:
+    result = @[idt(t.dname)]
   of BoolType:
     result = @[idt("bool")]
   of StringType:

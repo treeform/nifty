@@ -43,7 +43,11 @@ proc mangle(t: Typ): string =
   if t.opt:
     return "p" & mangle(deOpt(t))
   case t.kind
-  of IntType: "i"
+  of IntType:
+    if t.width > 0 and t.width != 8: (if t.rlo >= 0: "u" else: "i") & $(t.width * 8)
+    elif t.width == 8 and t.rlo >= 0: "u64"
+    else: "i"
+  of FloatType: "f" & $(t.width * 8)
   of BoolType: "b"
   of ArrayType: "a" & $t.len & "_" & mangle(t.elem)
   of SeqType: "q" & $t.len & "_" & mangle(t.elem)
@@ -61,6 +65,10 @@ proc cBase(t: Typ): string =
     return "NS_" & mangle(t)
   case t.kind
   of BoolType: "bool"
+  of FloatType: (if t.width == 4: "float" else: "double")
+  of IntType:
+    if t.width == 0 or (t.width == 8 and t.rlo < 0): "int64_t"
+    else: (if t.rlo >= 0: "uint" else: "int") & $(t.width * 8) & "_t"
   of ObjectType: "S_" & t.name
   of SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType: "NS_" & mangle(t)
   else: "int64_t"
@@ -92,6 +100,8 @@ proc genExpr(g: var Gen, e: Expr): string =
     "((" & cBase(e.typ) & "){0})"
   of IntExpr:
     $e.ival & "LL"
+  of FloatExpr:
+    (if e.typ != nil and e.typ.width == 4: $e.fval & "f" else: $e.fval)
   of BoolExpr:
     if e.bval: "true" else: "false"
   of StrExpr:
@@ -123,11 +133,16 @@ proc genExpr(g: var Gen, e: Expr): string =
   of BinExpr:
     let a = g.genExpr(e.kids[0])
     let b = g.genExpr(e.kids[1])
+    let isFloat = e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType
     case e.sval
     # / and % are proven safe by the checker; no runtime check needed.
     of "and": "(" & a & " && " & b & ")"
     of "or": "(" & a & " || " & b & ")"
-    else: "(" & a & " " & e.sval & " " & b & ")"
+    else:
+      if isFloat:
+        "(" & a & " " & e.sval & " " & b & ")"
+      else:
+        "((int64_t)" & a & " " & e.sval & " (int64_t)" & b & ")"
   of IndexExpr:
     # The checker proved the index is in bounds; no runtime check needed.
     if e.kids[0].typ != nil and e.kids[0].typ.kind == DenseMapType:
@@ -141,6 +156,10 @@ proc genExpr(g: var Gen, e: Expr): string =
     else:
       g.genExpr(e.kids[0]) & "[" & g.genExpr(e.kids[1]) & "]"
   of CallExpr:
+    if e.sval == "float32":
+      return "((float)(" & g.genExpr(e.kids[0]) & "))"
+    if e.sval == "float64":
+      return "((double)(" & g.genExpr(e.kids[0]) & "))"
     let r = g.routines[e.sval]
     var parts: seq[string]
     for i, a in e.kids:
@@ -152,6 +171,8 @@ proc genExpr(g: var Gen, e: Expr): string =
   of FieldExpr:
     if e.isOptOk:
       g.genExpr(e.kids[0]) & ".m_ok"
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
+      "ni_ftoi(" & g.genExpr(e.kids[0]) & ")"
     elif e.kids[0].typ != nil and not e.kids[0].typ.opt and
         e.kids[0].typ.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
       g.genExpr(e.kids[0]) & ".m_len"
@@ -164,6 +185,8 @@ proc genExpr(g: var Gen, e: Expr): string =
     if e.sval == "or" and bt != nil and bt.opt:
       return cBase(bt) & "_or(" & g.genExpr(e.kids[0]) & ", " &
         g.genExpr(e.kids[1]) & ")"
+    if bt != nil and bt.kind == FloatType:
+      return "ni_ftoi(" & g.genExpr(e.kids[0]) & ")"
     let fn = cBase(bt) & "_" & (if bt.kind == StringType and e.sval == "add": "adds"
       else: e.sval)
     let basePtr = "&" & g.genExpr(e.kids[0])
@@ -242,7 +265,7 @@ proc genOrdered(g: var Gen, e: Expr): string =
     e.wrapOpt = true
     return "((" & cBase(optT) & "){ .m_val = " & inner & ", .m_ok = true })"
   case e.kind
-  of NoneExpr, IntExpr, BoolExpr, StrExpr:
+  of NoneExpr, IntExpr, FloatExpr, BoolExpr, StrExpr:
     g.genExpr(e)
   of IdentExpr:
     if e.typ != nil and e.typ.kind == ArrayType:
@@ -292,8 +315,15 @@ proc genOrdered(g: var Gen, e: Expr): string =
     else:
       let a = g.genOrdered(e.kids[0])
       let b = g.genOrdered(e.kids[1])
-      "(" & a & " " & e.sval & " " & b & ")"
+      if e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
+        "(" & a & " " & e.sval & " " & b & ")"
+      else:
+        "((int64_t)" & a & " " & e.sval & " (int64_t)" & b & ")"
   of CallExpr:
+    if e.sval == "float32":
+      return "((float)(" & g.genOrdered(e.kids[0]) & "))"
+    if e.sval == "float64":
+      return "((double)(" & g.genOrdered(e.kids[0]) & "))"
     let r = g.routines[e.sval]
     var parts: seq[string]
     for i, a in e.kids:
@@ -317,6 +347,8 @@ proc genOrdered(g: var Gen, e: Expr): string =
       let b = g.genOrdered(e.kids[0])
       let f = g.genOrdered(e.kids[1])
       return g.tempFor(e, cBase(bt) & "_or(" & b & ", " & f & ")")
+    if bt != nil and bt.kind == FloatType:
+      return "ni_ftoi(" & g.genOrdered(e.kids[0]) & ")"
     let base = g.genPathOrdered(e.kids[0])
     let fn = cBase(bt) & "_" &
       (if bt.kind == StringType and e.sval == "add": "adds" else: e.sval)
@@ -684,6 +716,7 @@ proc genStmt(g: var Gen, s: Stmt) =
             case a.typ.kind
             of BoolType: "bool"
             of StringType: cBase(a.typ)
+            of FloatType: "double"
             else: "int64_t"
           let v =
             if g.hasEffects(a): g.genOrdered(a) else: g.genExpr(a)
@@ -704,6 +737,9 @@ proc genStmt(g: var Gen, s: Stmt) =
       of BoolType:
         fmt.add "%s"
         cargs.add "((" & temps[i] & ") ? \"true\" : \"false\")"
+      of FloatType:
+        fmt.add "%g"
+        cargs.add temps[i]
       else:
         discard
     fmt.add "\n"
@@ -791,6 +827,16 @@ const cPrelude = """
 #include <stdbool.h>
 #include <string.h>
 #include <pthread.h>
+
+// The one float -> int conversion: saturating, NaN-safe (NaN -> 0).
+// A bare C cast of an out-of-range or NaN value is undefined behavior,
+// so nifty never emits one.
+static inline int64_t ni_ftoi(double f) {
+  if (f != f) return 0;
+  if (f >= 9223372036854775807.0) return INT64_MAX;
+  if (f <= -9223372036854775808.0) return INT64_MIN;
+  return (int64_t)f;
+}
 """
 
 proc emitTypeDefs(g: var Gen, t: Typ) =

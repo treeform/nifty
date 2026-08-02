@@ -1,0 +1,2 @@
+thread main() =
+  echo 1.5 % 2.0

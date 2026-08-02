@@ -1,0 +1,4 @@
+thread main() =
+  var n = 1
+  n = n + 1
+  echo n + 2.0

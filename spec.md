@@ -188,6 +188,33 @@ parameters — which is what a reusable routine should do anyway.
   feed the index and overflow proofs. Zero-initialized locations
   (globals, fields, un-initialized locals) need 0 inside their range.
 - `bool` — `true` / `false`.
+- **Hardware integers** `int8 uint8 int16 uint16 int32 uint32 int64
+  uint64` — ordinary ranges (`uint8` *is* `0 .. 255`) that also fix the
+  storage width: object fields, container elements, and globals hold
+  the hardware size, so structs are byte-compatible with C and the
+  report tells the truth. Arithmetic still runs in the one int64 proof
+  engine (no C promotion rules, no width-dependent overflow: the
+  generated C widens operands to 64 bits, so `int32 * int32` is exact).
+  `uint64` is stored as 8 unsigned bytes for binary compatibility, but
+  nifty values stay within `0 .. int64.high`. There is no wraparound
+  anywhere: exceeding a range is the ordinary overflow error.
+- `char` — one byte, always: a UTF-8 code unit (same range and storage
+  as `uint8`). A Unicode code point may span several chars; strings are
+  always UTF-8 bytes. There is no Unicode-codepoint char type.
+- `float32` / `float64` — IEEE floats, **outside the proof engine**:
+  data values for graphics, DSP, and FFI. They carry no ranges and no
+  proof obligations, and they cannot trap: `1.0 / 0.0` is `inf`,
+  `0.0 / 0.0` is NaN — values, not exits. Structural safety holds
+  because indices, loop bounds, and termination counters are ints, so
+  floats can never reach a proof. No implicit conversions: mixing
+  int and float (or float32 and float64) is a compile error; convert
+  with `float64(x)` / `float32(x)`, and come back through `.toInt` —
+  the one float-to-int door, saturating and NaN-safe (NaN becomes 0;
+  a bare C cast of an out-of-range float is undefined behavior, so
+  nifty never emits one). Its result is a full-range int: guard before
+  use. Float literals (`1.5`, `2.5e3`) are widthless and slot into
+  either float type, like int literals slot into ranges. `%` is not
+  defined for floats; `==` is IEEE equality (NaN never equals).
 - `array[N, T]` — fixed length `N` (an integer literal or `const`),
   element type `T`. Indexing `a[i]` is proven in bounds at compile time.
   Arrays are values like everything else: whole-array assignment and
@@ -659,7 +686,9 @@ binding, `$T.lo`/`$T.hi`, computed return ranges);
 smallest-scope enforcement (unused/one-thread/scratch globals,
 narrowable locals) and `block:` with sibling-block arena overlay;
 lock order (deadlock freedom, lexical + cross-call), pointless-lock
-errors, and the report's locks section;
+errors, and the report's locks section; hardware types (sized ints
+with real storage widths, char, IEEE float32/float64 sealed off from
+the proofs, saturating .toInt);
 `echo`/`discard`; C output
 with zero runtime checks; generated `main` with thread spawn/join;
 `nifty report` (globals / stack / arena / ops); splice-once imports with
@@ -669,8 +698,9 @@ Not yet implemented: `$T` for scalar (non-container) parameters,
 generic `set`/`map` patterns, `index` types, absence reasons
 (`T ? codeRange` with a provable `.error` — `none` is deliberately mute),
 a `Result`-returning `map.get` (needs absence reasons; `get(k, fallback)`
-and proven `m[k]` cover today), tail-call recursion, int width from
-ranges (container elements are still 8 bytes each; string data is
-already 1 byte), deterministic floats and `fixed[lo .. hi, step]`,
+and proven `m[k]` cover today), tail-call recursion, automatic int width from
+ranges (named hardware types size storage today; bare ranges are still
+8 bytes), float transcendentals (no libm; base ops only, contraction
+off), `fixed[lo .. hi, step]`,
 volatile registers and interrupt handlers,
 optional niche packing.

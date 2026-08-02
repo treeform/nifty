@@ -1,0 +1,12 @@
+var pixels: array[100, uint32]
+var samples: array[100, float32]
+var pair: array[2, int16]
+
+proc fill() =
+  pixels[0] = 1
+  samples[0] = 1.5
+  pair[0] = -5
+
+thread main() =
+  fill()
+  echo pixels[0], " ", samples[0], " ", pair[0]

@@ -1,0 +1,13 @@
+nifty report: hardware_sizes.nifty
+
+globals:
+  pixels: 400 bytes (array[100, uint32])
+  samples: 400 bytes (array[100, float32])
+  pair: 4 bytes (array[2, int16])
+  total: 804 bytes
+
+stack, worst case per thread (estimate: locals + params + 16 bytes/frame; big locals are on the arena):
+  main: 32 bytes (main -> fill)
+
+worst-case abstract ops per thread:
+  main: 30 ops total

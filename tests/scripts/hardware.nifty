@@ -1,0 +1,48 @@
+object Pixel =
+  r: uint8
+  g: uint8
+  b: uint8
+  a: uint8
+
+thread main() =
+  # Sized integers are ordinary ranges with real storage widths.
+  var small: array[4, uint8]
+  small[0] = 200
+  small[1] = 255
+  var total: 0 .. 1020 = 0
+  for i in 0 ..< 4:
+    total = total + small[i]
+  echo total
+
+  var p: Pixel
+  p.r = 255
+  p.g = 128
+  echo p.r + p.g
+
+  # char is one byte, always: a UTF-8 code unit.
+  let c: char = 65
+  echo c
+
+  # int32 * int32 computes in 64 bits (C alone would overflow at 32).
+  let big: int32 = 2000000000
+  let wide: int64 = big * 2
+  echo wide
+
+  # Floats are IEEE data values: no proofs, no traps.
+  var f = 1.5
+  f = f * 2.0 + 0.25
+  echo f
+  var g32: float32 = 0.5
+  g32 = g32 + 0.25
+  echo g32
+
+  # Division by zero is a value, not a crash.
+  let inf = 1.0 / 0.0
+  echo inf
+
+  # The one door back to ints is saturating and NaN-safe.
+  let nan = 0.0 / 0.0
+  echo nan.toInt
+  let short = 2.9
+  echo short.toInt
+  echo float64(7) / 2.0
