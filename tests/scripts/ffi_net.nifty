@@ -1,0 +1,93 @@
+# Every libc call a server needs, exercised end to end over loopback:
+# socket, bind, getsockname, listen, connect, accept, poll, read,
+# write, socketpair, signal, close. Constants and the sockaddr_in
+# byte layout are Darwin's.
+
+object PollFd =
+  fd: int32
+  events: int16
+  revents: int16
+
+extern "libc":
+  proc socket(domain: int32, kind: int32, protocol: int32): int32
+  proc bindSock "bind" (fd: int32, sa: array[16, uint8], salen: int32): int32
+  proc getsockname(fd: int32, sa: var array[16, uint8], salen: var int32): int32
+  proc listen(fd: int32, backlog: int32): int32
+  proc connect(fd: int32, sa: array[16, uint8], salen: int32): int32
+  proc accept(fd: int32, sa: int64, salen: int64): int32
+  proc poll(fds: var array[1, PollFd], nfds: int32, timeoutMs: int32): int32
+  proc socketpair(domain: int32, kind: int32, protocol: int32, fds: var array[2, int32]): int32
+  proc readFd "read" (fd: int32, buf: var string[128], cap: int64): int64
+  proc writeFd "write" (fd: int32, buf: string[128], n: int64): int64
+  proc closeFd "close" (fd: int32): int32
+  proc signal(sig: int32, handler: int64): int64
+  proc usleep(usec: uint32): int32
+
+var port: 0 .. 65535
+var portLock: Lock
+
+thread server() =
+  discard signal(13, 1) # SIGPIPE -> SIG_IGN: a dead peer must not kill us
+
+  # socketpair + poll: data is readable exactly when it was written.
+  var pair: array[2, int32]
+  if socketpair(1, 1, 0, pair) == 0:   # AF_UNIX, SOCK_STREAM
+    var ping: string[128]
+    ping.add("x")
+    discard writeFd(pair[1], ping, 1)
+    var pfds: array[1, PollFd]
+    pfds[0].fd = pair[0]
+    pfds[0].events = 1                 # POLLIN
+    let ready = poll(pfds, 1, 1000)
+    echo "poll ", ready, " ", pfds[0].revents % 2
+    discard closeFd(pair[0])
+    discard closeFd(pair[1])
+
+  # TCP loopback: bind port 0, discover the port, serve one echo.
+  let fd = socket(2, 1, 0)             # AF_INET, SOCK_STREAM
+  if fd >= 0:
+    var sa: array[16, uint8]
+    sa[1] = 2                          # Darwin: sin_family at byte 1
+    if bindSock(fd, sa, 16) == 0:
+      var got: array[16, uint8]
+      var galen: int32 = 16
+      if getsockname(fd, got, galen) == 0 and listen(fd, 8) == 0:
+        with portLock:
+          port = got[2] * 256 + got[3] # sin_port is big-endian
+        let conn = accept(fd, 0, 0)
+        if conn >= 0:
+          var buf: string[128]
+          let n = readFd(conn, buf, 128)
+          # The return is untrusted until proven.
+          if n >= 0 and n <= 128:
+            buf.setLen(n)
+            echo "server got ", n, " ", buf
+            discard writeFd(conn, buf, n)
+          discard closeFd(conn)
+    discard closeFd(fd)
+
+thread client() =
+  var p: 0 .. 65535 = 0
+  while p == 0 max 20000:
+    with portLock:
+      p = port
+    if p == 0:
+      discard usleep(500)
+  let fd = socket(2, 1, 0)
+  if fd >= 0:
+    var sa: array[16, uint8]
+    sa[1] = 2
+    sa[2] = p / 256                    # sin_port, big-endian
+    sa[3] = p % 256
+    sa[4] = 127                        # 127.0.0.1
+    sa[7] = 1
+    if connect(fd, sa, 16) == 0:
+      var msg: string[128]
+      msg.add("hello")
+      discard writeFd(fd, msg, 5)
+      var back: string[128]
+      let n = readFd(fd, back, 128)
+      if n >= 0 and n <= 128:
+        back.setLen(n)
+        echo "client echo ", n, " ", back
+    discard closeFd(fd)

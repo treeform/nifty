@@ -1,0 +1,3 @@
+poll 1 1
+server got 5 hello
+client echo 5 hello
