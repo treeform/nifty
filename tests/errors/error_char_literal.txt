@@ -1,0 +1,1 @@
+error_char_literal.nifty:2: a char literal holds exactly one byte ('A', '\n')

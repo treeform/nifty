@@ -1,0 +1,6 @@
+thread main() =
+  var n = 0
+  n = n + 300
+  var s: string[16]
+  s.addByte(n)
+  echo s.len

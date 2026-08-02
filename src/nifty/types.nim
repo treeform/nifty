@@ -120,7 +120,7 @@ type
     routines*: seq[Routine]
 
 const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
-  "put", "remove", "setLen"]
+  "put", "remove", "setLen", "addByte", "addNum", "copyRange"]
 
 proc deOpt*(t: Typ): Typ =
   ## The base type of an optional (a copy with the flag cleared).

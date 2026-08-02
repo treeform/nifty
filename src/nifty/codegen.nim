@@ -32,7 +32,9 @@ proc cQuote(s: string): string =
     of '\\': result.add "\\\\"
     of '"': result.add "\\\""
     of '\n': result.add "\\n"
+    of '\r': result.add "\\r"
     of '\t': result.add "\\t"
+    of '\0': result.add "\\0"
     else: result.add ch
   result.add "\""
 
@@ -87,6 +89,10 @@ proc passByPtr(t: Typ): bool =
 
 proc externSym(r: Routine): string =
   if r.cname != "": r.cname else: r.name
+
+proc genStrMethod(g: var Gen, e: Expr, ordered: bool): string
+proc genOrdered(g: var Gen, e: Expr): string
+proc genPathOrdered(g: var Gen, e: Expr): string
 
 proc genExpr(g: var Gen, e: Expr): string =
   if e.wrapOpt:
@@ -181,6 +187,9 @@ proc genExpr(g: var Gen, e: Expr): string =
       g.genExpr(e.kids[0]) & ".m_ok"
     elif e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
       "ni_ftoi(" & g.genExpr(e.kids[0]) & ")"
+    elif e.sval == "toInt" and e.kids[0].typ != nil and
+        e.kids[0].typ.kind == StringType:
+      cBase(e.kids[0].typ) & "_toInt(&" & g.genExpr(e.kids[0]) & ")"
     elif e.kids[0].typ != nil and not e.kids[0].typ.opt and
         e.kids[0].typ.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
       g.genExpr(e.kids[0]) & ".m_len"
@@ -195,25 +204,48 @@ proc genExpr(g: var Gen, e: Expr): string =
         g.genExpr(e.kids[1]) & ")"
     if bt != nil and bt.kind == FloatType:
       return "ni_ftoi(" & g.genExpr(e.kids[0]) & ")"
-    let fn = cBase(bt) & "_" & (if bt.kind == StringType and e.sval == "add": "adds"
-      else: e.sval)
+    if bt != nil and bt.kind == StringType:
+      return g.genStrMethod(e, false)
+    let fn = cBase(bt) & "_" & e.sval
     let basePtr = "&" & g.genExpr(e.kids[0])
-    if bt.kind == StringType and e.sval == "add":
-      let a = e.kids[1]
-      if a.kind == StrExpr and (a.typ == nil or a.typ.kind != StringType):
-        fn & "(" & basePtr & ", (const uint8_t *)" & cQuote(a.sval) & ", " &
-          $a.sval.len & "LL)"
-      else:
-        # The argument is a path-like string value; safe to mention twice.
-        let av = g.genExpr(a)
-        fn & "(" & basePtr & ", " & av & ".m_data, " & av & ".m_len)"
-    elif e.kids.len > 2:
+    if e.kids.len > 2:
       fn & "(" & basePtr & ", " & g.genExpr(e.kids[1]) & ", " &
         g.genExpr(e.kids[2]) & ")"
     elif e.kids.len > 1:
       fn & "(" & basePtr & ", " & g.genExpr(e.kids[1]) & ")"
     else:
       fn & "(" & basePtr & ")"
+
+proc strNeedle(g: var Gen, a: Expr, ordered: bool): string =
+  ## A string argument as the C pair (data, length).
+  if a.kind == StrExpr and (a.typ == nil or a.typ.kind != StringType):
+    "(const uint8_t *)" & cQuote(a.sval) & ", " & $a.sval.len & "LL"
+  else:
+    let av = if ordered: g.genPathOrdered(a) else: g.genExpr(a)
+    av & ".m_data, " & av & ".m_len"
+
+proc genStrMethod(g: var Gen, e: Expr, ordered: bool): string =
+  ## Every string method call; all are total and capacity-bounded.
+  let bt = e.kids[0].typ
+  let n = cBase(bt)
+  let basePtr = "&" &
+    (if ordered: g.genPathOrdered(e.kids[0]) else: g.genExpr(e.kids[0]))
+  case e.sval
+  of "add":
+    n & "_adds(" & basePtr & ", " & g.strNeedle(e.kids[1], ordered) & ")"
+  of "startsWith", "endsWith", "contains", "find":
+    n & "_" & e.sval & "(" & basePtr & ", " &
+      g.strNeedle(e.kids[1], ordered) & ")"
+  of "copyRange":
+    let src = g.strNeedle(e.kids[1], ordered)
+    let lo = if ordered: g.genOrdered(e.kids[2]) else: g.genExpr(e.kids[2])
+    let hi = if ordered: g.genOrdered(e.kids[3]) else: g.genExpr(e.kids[3])
+    n & "_copyRange(" & basePtr & ", " & src & ", " & lo & ", " & hi & ")"
+  of "toInt", "clear":
+    n & "_" & e.sval & "(" & basePtr & ")"
+  else:
+    let a = if ordered: g.genOrdered(e.kids[1]) else: g.genExpr(e.kids[1])
+    n & "_" & e.sval & "(" & basePtr & ", " & a & ")"
 
 proc hasEffects(g: Gen, e: Expr): bool =
   ## Does evaluating this expression run a proc or mutate a container?
@@ -228,8 +260,6 @@ proc hasEffects(g: Gen, e: Expr): bool =
   for k in e.kids:
     if g.hasEffects(k):
       return true
-
-proc genOrdered(g: var Gen, e: Expr): string
 
 proc genPathOrdered(g: var Gen, e: Expr): string =
   ## An lvalue path with its index expressions hoisted in source order.
@@ -361,19 +391,16 @@ proc genOrdered(g: var Gen, e: Expr): string =
       return g.tempFor(e, cBase(bt) & "_or(" & b & ", " & f & ")")
     if bt != nil and bt.kind == FloatType:
       return "ni_ftoi(" & g.genOrdered(e.kids[0]) & ")"
-    let base = g.genPathOrdered(e.kids[0])
-    let fn = cBase(bt) & "_" &
-      (if bt.kind == StringType and e.sval == "add": "adds" else: e.sval)
     var call: string
-    if bt.kind == StringType and e.sval == "add":
-      let a = e.kids[1]
-      if a.kind == StrExpr and (a.typ == nil or a.typ.kind != StringType):
-        call = fn & "(&" & base & ", (const uint8_t *)" & cQuote(a.sval) &
-          ", " & $a.sval.len & "LL)"
-      else:
-        let av = g.genPathOrdered(a)
-        call = fn & "(&" & base & ", " & av & ".m_data, " & av & ".m_len)"
-    elif e.kids.len > 2:
+    if bt != nil and bt.kind == StringType:
+      call = g.genStrMethod(e, true)
+      if e.typ.isNil:
+        g.put call & ";"
+        return ""
+      return g.tempFor(e, call)
+    let base = g.genPathOrdered(e.kids[0])
+    let fn = cBase(bt) & "_" & e.sval
+    if e.kids.len > 2:
       let a1 = g.genOrdered(e.kids[1])
       let a2 = g.genOrdered(e.kids[2])
       call = fn & "(&" & base & ", " & a1 & ", " & a2 & ")"
@@ -744,8 +771,13 @@ proc genStmt(g: var Gen, s: Stmt) =
         cargs.add "(int)(" & temps[i] & ".m_len)"
         cargs.add "(const char *)" & temps[i] & ".m_data"
       of IntType:
-        fmt.add "%lld"
-        cargs.add "(long long)(" & temps[i] & ")"
+        if a.typ.dname == "char":
+          # char exists to say "this byte is text": print it as text.
+          fmt.add "%c"
+          cargs.add "(int)(" & temps[i] & ")"
+        else:
+          fmt.add "%lld"
+          cargs.add "(long long)(" & temps[i] & ")"
       of BoolType:
         fmt.add "%s"
         cargs.add "((" & temps[i] & ") ? \"true\" : \"false\")"
@@ -909,14 +941,13 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     g.put "static " & e & " " & n & "_pop(" & n &
       " *s) { s->m_len -= 1; return s->m_data[s->m_len]; }"
     g.put "static void " & n & "_clear(" & n & " *s) { s->m_len = 0; }"
-    g.put "static void " & n & "_setLen(" & n &
-      " *s, int64_t k) { s->m_len = k; }"
   of StringType:
     let key = mangle(t)
     if key in g.emitted:
       return
     g.emitted.incl key
     let n = "NS_" & key
+    g.emitTypeDefs(optOf(intType())) # find/toInt return int?
     g.put ""
     g.put "typedef struct {"
     g.put "  int64_t m_len;"
@@ -928,6 +959,86 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     g.put "static void " & n & "_clear(" & n & " *s) { s->m_len = 0; }"
     g.put "static void " & n & "_setLen(" & n &
       " *s, int64_t k) { s->m_len = k; }"
+    g.put "static void " & n & "_addByte(" & n &
+      " *s, int64_t b) { s->m_data[s->m_len] = (uint8_t)b; s->m_len += 1; }"
+    g.put "static void " & n & "_addNum(" & n & " *s, int64_t v) {"
+    g.put "  char t[24]; int k = snprintf(t, sizeof t, \"%lld\", (long long)v);"
+    g.put "  if (k < 0) k = 0; if (k > 20) k = 20;"
+    g.put "  memcpy(&s->m_data[s->m_len], t, (size_t)k); s->m_len += k;"
+    g.put "}"
+    g.put "static bool " & n & "_startsWith(const " & n &
+      " *s, const uint8_t *d, int64_t k) {"
+    g.put "  if (k > s->m_len) return false;"
+    g.put "  return memcmp(s->m_data, d, (size_t)k) == 0;"
+    g.put "}"
+    g.put "static bool " & n & "_endsWith(const " & n &
+      " *s, const uint8_t *d, int64_t k) {"
+    g.put "  if (k > s->m_len) return false;"
+    g.put "  return memcmp(&s->m_data[s->m_len - k], d, (size_t)k) == 0;"
+    g.put "}"
+    g.put "static int64_t " & n & "_findRaw(const " & n &
+      " *s, const uint8_t *d, int64_t k) {"
+    g.put "  if (k == 0) return 0;"
+    g.put "  if (k > s->m_len) return -1;"
+    g.put "  for (int64_t i = 0; i + k <= s->m_len; ++i)"
+    g.put "    if (memcmp(&s->m_data[i], d, (size_t)k) == 0) return i;"
+    g.put "  return -1;"
+    g.put "}"
+    g.put "static bool " & n & "_contains(const " & n &
+      " *s, const uint8_t *d, int64_t k) { return " & n &
+      "_findRaw(s, d, k) >= 0; }"
+    g.put "static int64_t " & n & "_findByteRaw(const " & n &
+      " *s, int64_t b) {"
+    g.put "  for (int64_t i = 0; i < s->m_len; ++i)"
+    g.put "    if (s->m_data[i] == (uint8_t)b) return i;"
+    g.put "  return -1;"
+    g.put "}"
+    g.put "static void " & n & "_copyRange(" & n &
+      " *s, const uint8_t *d, int64_t dlen, int64_t lo, int64_t hi) {"
+    g.put "  // Total by clamping: any bounds give a defined result."
+    g.put "  if (lo < 0) lo = 0;"
+    g.put "  if (hi > dlen) hi = dlen;"
+    g.put "  int64_t k = hi - lo;"
+    g.put "  if (k < 0) k = 0;"
+    g.put "  if (k > " & $t.len & "LL) k = " & $t.len & "LL;"
+    g.put "  memcpy(s->m_data, &d[lo], (size_t)k); s->m_len = k;"
+    g.put "}"
+    g.put "static bool " & n & "_toIntRaw(const " & n &
+      " *s, int64_t *out) {"
+    g.put "  int64_t i = 0, sign = 1, v = 0;"
+    g.put "  if (s->m_len == 0) return false;"
+    g.put "  if (s->m_data[0] == (uint8_t)45) { sign = -1; i = 1; }"
+    g.put "  if (i >= s->m_len) return false;"
+    g.put "  for (; i < s->m_len; ++i) {"
+    g.put "    uint8_t c = s->m_data[i];"
+    g.put "    if (c < 48 || c > 57) return false;"
+    g.put "    if (v > 922337203685477580LL) return false;"
+    g.put "    v = v * 10 + (c - 48);"
+    g.put "    if (v < 0) return false;"
+    g.put "  }"
+    g.put "  *out = sign * v; return true;"
+    g.put "}"
+    # find/toInt hand back optionals: absence is a value the caller must
+    # consult, not a sentinel index to forget about.
+    let optI = "NS_" & mangle(optOf(intType()))
+    g.put "static " & optI & " " & n & "_find(const " & n &
+      " *s, const uint8_t *d, int64_t k) {"
+    g.put "  int64_t r = " & n & "_findRaw(s, d, k);"
+    g.put "  " & optI & " o = {0}; if (r >= 0) { o.m_val = r; o.m_ok = true; }"
+    g.put "  return o;"
+    g.put "}"
+    g.put "static " & optI & " " & n & "_findByte(const " & n &
+      " *s, int64_t b) {"
+    g.put "  int64_t r = " & n & "_findByteRaw(s, b);"
+    g.put "  " & optI & " o = {0}; if (r >= 0) { o.m_val = r; o.m_ok = true; }"
+    g.put "  return o;"
+    g.put "}"
+    g.put "static " & optI & " " & n & "_toInt(const " & n & " *s) {"
+    g.put "  int64_t v = 0;"
+    g.put "  " & optI & " o = {0};"
+    g.put "  if (" & n & "_toIntRaw(s, &v)) { o.m_val = v; o.m_ok = true; }"
+    g.put "  return o;"
+    g.put "}"
   of QueueType:
     g.emitTypeDefs(t.elem)
     let key = mangle(t)

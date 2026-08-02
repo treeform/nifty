@@ -1,0 +1,1 @@
+error_addbyte_range.nifty:5: cannot prove the byte (300) is 0 .. 255; guard or clamp first

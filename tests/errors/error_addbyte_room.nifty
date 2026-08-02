@@ -1,0 +1,5 @@
+thread main() =
+  var s: string[4]
+  s.add("abcd")
+  s.addByte('x')
+  echo s.len

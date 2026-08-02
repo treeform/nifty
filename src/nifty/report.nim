@@ -46,8 +46,13 @@ proc exprOps(e: Expr, costs: Table[string, int64]): int64 =
         result = sadd(result, log2Ceil(bt.len))
       elif e.sval in ["put", "remove"]:
         result = sadd(result, bt.len)
-    elif bt.kind == StringType and e.sval == "add":
-      result = sadd(result, bt.len)
+    elif bt.kind == StringType:
+      # Appends copy, scans walk: everything is capacity-bounded.
+      if e.sval in ["add", "find", "findByte", "contains", "copyRange",
+          "toInt", "addNum"]:
+        result = sadd(result, bt.len)
+      elif e.sval in ["startsWith", "endsWith"]:
+        result = sadd(result, bt.len)
   for k in e.kids:
     result = sadd(result, exprOps(k, costs))
 

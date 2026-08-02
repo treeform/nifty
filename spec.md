@@ -295,9 +295,31 @@ fine zero-initialized. `.len` reads create flow facts exactly like ints
   - `s[i]` — requires proof `i < s.len` (pin or test the length first).
   - `s.clear()`; `for x in s:` — safe by construction, bounded by `N`.
 - `string[N]` — a `seq` of bytes (`0 .. 255`, stored one byte each) with
-  literal syntax: `var s: string[40] = "hello"`, `s.add(", ")`,
-  `s.add(other)` (append, with a capacity proof), `echo s`, `s[i]`,
-  `for b in s:`.
+  literal syntax: `var s: string[40] = "hello"`, `echo s`, `s[i]`,
+  `for b in s:`. Strings are length-exact, never NUL-terminated. The
+  method set splits three ways by how each one can fail:
+
+  *Writes — capacity is proven at compile time:* `add(lit or string)`,
+  `addByte(b)` (one byte, proven `0 .. 255`), `addNum(v)` (a decimal
+  int, priced at its 20-byte worst case), `clear()`, and `setLen(n)`
+  (proven `0 .. N` — the FFI's "C filled my buffer" door).
+
+  *Tests and slices — total, no proof needed:* `startsWith(x)`,
+  `endsWith(x)`, `contains(x)` (a needle longer than the haystack is
+  simply false) and `copyRange(src, lo, hi)`, which clamps its bounds,
+  so any indices give a defined (possibly empty) result. Totality is
+  what makes parsing hostile input pleasant: no guard per slice.
+
+  *Searches and parses — optional-returning:* `find(x)`, `findByte(b)`
+  give the index or `none`; `.toInt` gives the number or `none`. The
+  optional forces the caller to consult the answer, and a parsed
+  number arrives full-range — untrusted until guarded, like any
+  outside value.
+- `char` — one byte of text. It is `uint8` with a name and two extra
+  affordances: char literals (`'A'`, `'\n'`, `'\0'`) and `echo`
+  printing it as a character rather than a number. Everything else is
+  ordinary ranged-int behavior, so classification needs no library:
+  `if b >= '0' and b <= '9':`.
 - `set[T]` — a set over a *range type*; no capacity parameter, the range
   IS the capacity (`set[0 .. 63]` is one 64-bit word plus a cardinality
   field). Every operation is total: `incl`/`excl` (the value proves it

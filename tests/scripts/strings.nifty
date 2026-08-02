@@ -1,0 +1,74 @@
+# String and char handling: everything is total or optional-returning,
+# and every write is capacity-proven. This is the layer an HTTP parser
+# lives on.
+
+thread main() =
+  var s: string[64]
+  s.add("GET /index.html HTTP/1.1")
+  echo s.len
+
+  # Tests are total: a needle longer than the haystack is just false.
+  echo s.startsWith("GET "), " ", s.endsWith("1.1"), " ", s.contains("/index")
+  echo s.startsWith("POST"), " ", s.contains("nope")
+
+  # Searches return an index or none - absence is a value to consult.
+  let sp = s.findByte(' ')
+  if sp.ok:
+    echo "space at ", sp
+  echo s.findByte('@').ok
+
+  let h = s.find("HTTP/")
+  if h.ok:
+    var ver: string[16]
+    ver.copyRange(s, h + 5, h + 8)
+    echo ver
+
+  # copyRange is total by clamping: any bounds give a defined result.
+  if sp.ok:
+    var path: string[32]
+    path.copyRange(s, sp + 1, sp + 12)
+    echo path, " ", path.len
+  var wild: string[16]
+  wild.copyRange(s, -50, 3)
+  echo wild, " ", wild.len
+  wild.copyRange(s, 900, 950)
+  echo wild.len
+
+  # Parsing hands back an optional; the value is untrusted until guarded.
+  var num: string[24]
+  num.add("4096")
+  let n = num.toInt
+  if n.ok and n >= 0 and n <= 65535:
+    echo n + 1
+  var bad: string[24]
+  bad.add("12x")
+  echo bad.toInt.ok, " ", bad.toInt.or(-1)
+
+  # Building: bytes, chars, and numbers, each capacity-proven.
+  var out: string[64]
+  out.add("len=")
+  out.addNum(1234)
+  out.addByte(' ')
+  out.addByte('o')
+  out.addByte('k')
+  out.addByte('!')
+  echo out, " ", out.len
+
+  # char is an ordinary byte: literals, arithmetic, comparisons.
+  let c: char = 'A'
+  var lower: char = 0
+  lower = c + 32
+  echo c, " ", lower, " ", c < lower
+  var word: string[8]
+  word.addByte(c)
+  word.addByte(lower)
+  word.addByte('\n')
+  echo word.len
+
+  # Indexing yields bytes; classification is ordinary range logic.
+  var digits = 0
+  for i in 0 ..< s.len:
+    let b = s[i]
+    if b >= '0' and b <= '9':
+      digits = digits + 1
+  echo digits

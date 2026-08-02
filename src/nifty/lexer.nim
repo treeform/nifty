@@ -86,6 +86,32 @@ proc tokenize*(src: string, baseLine = 0): seq[Token] =
         while p < line.len and (line[p].isAlphaNumeric or line[p] == '_'):
           inc p
         result.add Token(kind: IdentToken, text: line[s ..< p], line: lineNo)
+      elif c == '\'':
+        # A char literal is a byte: 'A', '\n'. char is a ranged int, so
+        # this is just an int token with a friendlier spelling.
+        inc p
+        if p >= line.len:
+          err(lineNo, "unterminated char literal")
+        var v = 0
+        if line[p] == '\\':
+          inc p
+          if p >= line.len:
+            err(lineNo, "unterminated char escape")
+          case line[p]
+          of 'n': v = 10
+          of 'r': v = 13
+          of 't': v = 9
+          of '0': v = 0
+          of '\'': v = 39
+          of '\\': v = 92
+          else: err(lineNo, "unknown escape: \\" & line[p])
+        else:
+          v = ord(line[p])
+        inc p
+        if p >= line.len or line[p] != '\'':
+          err(lineNo, "a char literal holds exactly one byte ('A', '\\n')")
+        inc p
+        result.add Token(kind: IntToken, text: $v, line: lineNo)
       elif c == '"':
         inc p
         var s = ""
@@ -96,7 +122,9 @@ proc tokenize*(src: string, baseLine = 0): seq[Token] =
               err(lineNo, "unterminated string escape")
             case line[p]
             of 'n': s.add '\n'
+            of 'r': s.add '\r'
             of 't': s.add '\t'
+            of '0': s.add '\0'
             of '"': s.add '"'
             of '\\': s.add '\\'
             else: err(lineNo, "unknown escape: \\" & line[p])

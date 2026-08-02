@@ -1178,9 +1178,15 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       e.typ = Typ(kind: BoolType)
       return e.typ
     rejectOpt(base, e.kids[0])
+    if base.kind == StringType and e.sval == "toInt":
+      # Parse a decimal number, or none: absence is a value to consult.
+      e.typ = optOf(intType())
+      return e.typ
     if base.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
       if e.sval != "len":
-        err(e.line, $base & " has no property '" & e.sval & "' (only .len)")
+        err(e.line, $base & " has no property '" & e.sval &
+          (if base.kind == StringType: "' (only .len and .toInt)"
+           else: "' (only .len)"))
       e.typ = intType(0,
         (if base.kind in {SetType, DenseMapType}: base.setSize else: base.len))
       let key = c.lenPathName(e)
@@ -1361,6 +1367,39 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           c.facts[key] = Fact(lo: min(lf.lo + addLo, bt.len),
             hi: min(lf.hi + addHi, bt.len))
         e.typ = nil
+      of "addByte":
+        # Append one byte: the char/byte building block.
+        if nArgs != 1:
+          err(e.line, "addByte takes one argument")
+        let bt2 = c.expectVal(e.kids[1])
+        if bt2.kind != IntType:
+          err(e.kids[1].line, "addByte needs a byte (char or 0 .. 255)")
+        let bf = exprFact(e.kids[1])
+        if bf.lo < 0 or bf.hi > 255:
+          err(e.kids[1].line, "cannot prove the byte (" & rangeStr(bf) &
+            ") is 0 .. 255; guard or clamp first")
+        if lf.hi + 1 > bt.len:
+          err(e.line, "cannot prove '" & e.kids[0].sval &
+            "' has room for one more byte (length is up to " & $lf.hi &
+            " of " & $bt.len & "); test .len first")
+        if key != "":
+          c.facts[key] = Fact(lo: min(lf.lo + 1, bt.len),
+            hi: min(lf.hi + 1, bt.len))
+        e.typ = nil
+      of "addNum":
+        # Append a decimal number: up to 20 bytes (int64.min).
+        if nArgs != 1:
+          err(e.line, "addNum takes one argument")
+        let nt2 = c.expectVal(e.kids[1])
+        if nt2.kind != IntType:
+          err(e.kids[1].line, "addNum needs an int")
+        if lf.hi + 20 > bt.len:
+          err(e.line, "cannot prove '" & e.kids[0].sval & "' has room for " &
+            "a number (up to 20 bytes; length is up to " & $lf.hi & " of " &
+            $bt.len & "); test .len first")
+        if key != "":
+          c.facts[key] = Fact(lo: lf.lo, hi: min(lf.hi + 20, bt.len))
+        e.typ = nil
       of "setLen":
         # After C wrote into the buffer: set the live length, proven to
         # fit the capacity. Any byte value is a valid string byte, so
@@ -1384,6 +1423,58 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if key != "":
           c.facts[key] = Fact(lo: 0, hi: 0)
         e.typ = nil
+      of "startsWith", "endsWith", "contains":
+        # Total: a needle longer than the haystack is simply false.
+        if nArgs != 1:
+          err(e.line, e.sval & " takes one argument")
+        let a = e.kids[1]
+        if a.kind == StrExpr:
+          discard c.checkExpr(a)
+        else:
+          let at = c.expectVal(a)
+          if at.kind != StringType:
+            err(a.line, e.sval & " needs a string literal or a string, got " &
+              $at)
+        e.typ = Typ(kind: BoolType)
+      of "find":
+        # The index of the needle, or none: absence is a value, and the
+        # optional forces the caller to consult it.
+        if nArgs != 1:
+          err(e.line, "find takes one argument")
+        let a = e.kids[1]
+        if a.kind == StrExpr:
+          discard c.checkExpr(a)
+        else:
+          let at = c.expectVal(a)
+          if at.kind != StringType:
+            err(a.line, "find needs a string literal or a string, got " & $at)
+        e.typ = optOf(intType(0, max(bt.len - 1, 0)))
+      of "findByte":
+        if nArgs != 1:
+          err(e.line, "findByte takes one argument")
+        let bt2 = c.expectVal(e.kids[1])
+        if bt2.kind != IntType:
+          err(e.kids[1].line, "findByte needs a byte (char or 0 .. 255)")
+        e.typ = optOf(intType(0, max(bt.len - 1, 0)))
+      of "copyRange":
+        # Total by clamping: any lo/hi give a defined result (possibly
+        # empty), so slicing needs no proof at every call site.
+        if nArgs != 3:
+          err(e.line, "copyRange takes a source, a start, and an end")
+        let st = c.expectVal(e.kids[1])
+        if st.kind != StringType:
+          err(e.kids[1].line, "copyRange needs a string source, got " & $st)
+        for i in 2 .. 3:
+          if c.expectVal(e.kids[i]).kind != IntType:
+            err(e.kids[i].line, "copyRange bounds must be ints")
+        if key != "":
+          c.facts[key] = Fact(lo: 0, hi: bt.len)
+        e.typ = nil
+      of "toInt":
+        # Parse a decimal number, or none when the string is not one.
+        if nArgs != 0:
+          err(e.line, "toInt takes no arguments")
+        e.typ = optOf(intType())
       else:
         err(e.line, $bt & " has no method '" & e.sval & "'")
     of SetType:
