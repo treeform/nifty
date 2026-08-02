@@ -1,0 +1,95 @@
+# Every numeric type: it exists, holds its bounds, computes in the
+# 64-bit proof engine, and stores at its hardware width.
+
+object Mixed =
+  tiny: int8
+  small: uint16
+  wide: int64
+  ratio: float32
+
+func sum(data: array[$N, $T]): $N * $T.lo .. $N * $T.hi =
+  var total: $N * $T.lo .. $N * $T.hi = 0
+  for i in 0 ..< $N:
+    total = total + data[i]
+  return total
+
+thread main() =
+  # Bounds of every integer type.
+  let a: int8 = -128
+  let b: int8 = 127
+  let c: uint8 = 255
+  let d: int16 = -32768
+  let e: int16 = 32767
+  let f: uint16 = 65535
+  let g: int32 = -2147483648
+  let h: int32 = 2147483647
+  let i: uint32 = 4294967295
+  let j: int64 = -9223372036854775807 - 1
+  let k: int64 = 9223372036854775807
+  let l: uint64 = 9223372036854775807
+  echo a, " ", b, " ", c
+  echo d, " ", e, " ", f
+  echo g, " ", h, " ", i
+  echo j, " ", k, " ", l
+
+  # char is a byte; arithmetic is ordinary ranged arithmetic.
+  let ch: char = 65
+  var next: char = 0
+  next = ch + 1
+  echo ch, " ", next
+
+  # Cross-width math runs in 64 bits; ranges prove the fit.
+  let wide: int64 = h * 4
+  echo wide
+
+  # Sized storage round-trips through arrays, copies, and objects.
+  var bytes: array[4, uint8]
+  bytes[0] = 250
+  bytes[3] = 5
+  var copyB = bytes
+  copyB[0] = 7
+  echo bytes[0], " ", copyB[0], " ", copyB[3]
+  echo sum(bytes)
+
+  var m: Mixed
+  m.tiny = -100
+  m.small = 60000
+  m.wide = 5000000000
+  m.ratio = 0.25
+  var m2 = m
+  m2.tiny = 100
+  echo m.tiny, " ", m2.tiny, " ", m2.small, " ", m2.wide, " ", m2.ratio
+
+  # Floats: both widths, literals slot in, IEEE all the way.
+  var x = 1.5
+  x = x * 2.0 + 0.25
+  var y: float32 = 0.5
+  y = y + 0.25
+  echo x, " ", y
+  echo 2.5e3, " ", 1.0 / 4.0
+
+  # inf is a value; NaN compares false to everything, itself included.
+  let inf = 1.0 / 0.0
+  let ninf = -1.0 / 0.0
+  echo inf, " ", ninf
+  let nan = 0.0 / 0.0
+  echo nan == nan, " ", nan < 1.0, " ", inf > 1.0
+
+  # toInt saturates and eats NaN; conversions are explicit both ways.
+  echo (2.9).toInt, " ", (-2.9).toInt, " ", nan.toInt
+  echo (1.0e300).toInt
+  echo (-1.0e300).toInt
+  echo float64(7) / 2.0, " ", float32(1) / 8.0
+
+  # Floats in containers: seq elements and map values.
+  var samples: seq[3, float32]
+  samples.add(0.5)
+  samples.add(1.25)
+  var total = 0.0
+  for s in samples:
+    total = total + float64(s)
+  echo samples[1], " ", total
+
+  var curve: map[0 .. 3, float64]
+  curve[2] = 6.5
+  echo curve[2], " ", curve.get(1, 0.0)

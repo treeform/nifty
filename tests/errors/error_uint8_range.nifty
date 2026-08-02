@@ -1,0 +1,4 @@
+thread main() =
+  var c: uint8 = 0
+  c = 256
+  echo c

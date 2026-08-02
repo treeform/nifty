@@ -1291,6 +1291,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             at = bt.elem
           elif c.coerceStrLit(e.kids[1], bt.elem):
             at = bt.elem
+          elif coerceFloatLit(e.kids[1], bt.elem):
+            at = bt.elem
         if not typeEq(at, bt.elem):
           err(e.kids[1].line, "cannot add " & $at & " to " & $bt)
         if bt.elem.kind == IntType and not exprFact(e.kids[1]).fits(bt.elem):
@@ -1435,6 +1437,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             vt = bt.val
           elif c.coerceStrLit(e.kids[2], bt.val):
             vt = bt.val
+          elif coerceFloatLit(e.kids[2], bt.val):
+            vt = bt.val
         if not typeEq(vt, bt.val):
           err(e.kids[2].line, "map value must be " & $bt.val & ", got " & $vt)
         if bt.val.kind == IntType and not exprFact(e.kids[2]).fits(bt.val):
@@ -1471,6 +1475,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           if c.coerceOpt(e.kids[2], bt.val):
             ft = bt.val
           elif c.coerceStrLit(e.kids[2], bt.val):
+            ft = bt.val
+          elif coerceFloatLit(e.kids[2], bt.val):
             ft = bt.val
         if not typeEq(ft, bt.val):
           err(e.kids[2].line, "fallback must be " & $bt.val & ", got " & $ft)
@@ -1578,6 +1584,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           at = pt.typ
         elif coerceFloatLit(arg, pt.typ):
           at = pt.typ
+        elif coerceFloatLit(arg, pt.typ):
+          at = pt.typ
       if not typeEq(at, pt.typ):
         err(arg.line, "argument " & $(i + 1) & " of '" & name & "': expected " &
           $pt.typ & ", got " & $at)
@@ -1679,6 +1687,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         it = t
       elif coerceFloatLit(s.init, t):
         it = t
+      elif coerceFloatLit(s.init, t):
+        it = t
       elif it.kind == StringLitType:
         err(s.line, "string literals need a string[N] destination " &
           "(e.g. var s: string[20] = \"hi\")")
@@ -1765,6 +1775,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
             vt = bt.val
           elif c.coerceStrLit(s.rhs, bt.val):
             vt = bt.val
+          elif coerceFloatLit(s.rhs, bt.val):
+            vt = bt.val
         if not typeEq(vt, bt.val):
           err(s.line, "map value must be " & $bt.val & ", got " & $vt)
         if bt.val.kind == IntType and not exprFact(s.rhs).fits(bt.val):
@@ -1826,6 +1838,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       if c.coerceOpt(s.rhs, lt):
         rt = lt
       elif c.coerceStrLit(s.rhs, lt):
+        rt = lt
+      elif coerceFloatLit(s.rhs, lt):
         rt = lt
       elif coerceFloatLit(s.rhs, lt):
         rt = lt
@@ -2177,6 +2191,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         elif coerceFloatLit(s.value, c.cur.ret):
           t = c.cur.ret
         elif c.coerceStrLit(s.value, c.cur.ret):
+          t = c.cur.ret
+        elif coerceFloatLit(s.value, c.cur.ret):
           t = c.cur.ret
       if not typeEq(t, c.cur.ret):
         err(s.line, "return type mismatch: got " & $t & ", expected " & $c.cur.ret)

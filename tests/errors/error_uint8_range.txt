@@ -1,0 +1,1 @@
+error_uint8_range.nifty:3: cannot prove value (256) fits uint8; guard or clamp first
