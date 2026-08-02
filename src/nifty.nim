@@ -8,10 +8,16 @@ import nifty/[common, lexer, parser, checker, codegen, report, loader]
 
 export common
 
+var lastExternLibs*: seq[string] ## non-libc libs of the last compile
+
 proc compileToC*(src: string, moduleName: string, dir = ""): string =
   ## Compile nifty source text (plus its imports) to a C translation unit.
   let m = parse(loadTokens(src, moduleName, dir))
   check(m)
+  lastExternLibs = @[]
+  for lib in m.externLibs:
+    if lib != "libc":
+      lastExternLibs.add lib
   generate(m, moduleName)
 
 proc reportFor*(src: string, moduleName: string, dir = ""): string =
@@ -84,7 +90,11 @@ options:
     echo cPath
     quit(0)
   let bin = if outPath.len > 0: outPath else: base
-  if execShellCmd("cc -O2 -pthread -o " & quoteShell(bin) & " " & quoteShell(cPath)) != 0:
+  var link = ""
+  for lib in lastExternLibs:
+    link.add " -l" & lib
+  if execShellCmd("cc -O2 -pthread -o " & quoteShell(bin) & " " &
+      quoteShell(cPath) & link) != 0:
     quit("nifty: C compilation failed", 1)
   echo "built ", bin
   if cmd == "run":

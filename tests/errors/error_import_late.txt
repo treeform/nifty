@@ -1,1 +1,1 @@
-error_import_late.nifty:3: unknown declaration: 'import' (expected const, var, object, func, proc, or thread; import must be at the top of the file)
+error_import_late.nifty:3: unknown declaration: 'import' (expected const, var, object, func, proc, thread, or extern; import must be at the top of the file)

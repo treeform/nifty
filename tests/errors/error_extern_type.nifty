@@ -1,0 +1,7 @@
+extern "libc":
+  proc bad(s: seq[4, int]): int32
+
+thread main() =
+  var s: seq[4, int]
+  s.add(1)
+  echo bad(s)

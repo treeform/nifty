@@ -1,1 +1,1 @@
-unknown_declaration.nifty:1: unknown declaration: 'include' (expected const, var, object, func, proc, or thread; import must be at the top of the file)
+unknown_declaration.nifty:1: unknown declaration: 'include' (expected const, var, object, func, proc, thread, or extern; import must be at the top of the file)

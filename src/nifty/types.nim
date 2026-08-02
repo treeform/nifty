@@ -93,6 +93,8 @@ type
     params*: seq[Param]
     ret*: Typ # nil = no return value
     body*: seq[Stmt]
+    externLib*: string         # extern routines: the library ("libc", ...)
+    cname*: string             # extern routines: the C symbol, if renamed
     generic*: bool             # has $ variables; body kept as tokens
     toks*: seq[Token]          # generic only: the whole declaration
     constsSnap*: Table[string, int64] # consts visible at declaration
@@ -111,13 +113,14 @@ type
     typ*: Typ
     line*: int
   Module* = ref object
+    externLibs*: seq[string]   # every extern library, for link flags
     consts*: seq[ConstDef]
     globals*: seq[GlobalDef]
     types*: seq[TypeDef]
     routines*: seq[Routine]
 
 const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
-  "put", "remove"]
+  "put", "remove", "setLen"]
 
 proc deOpt*(t: Typ): Typ =
   ## The base type of an optional (a copy with the flag cleared).

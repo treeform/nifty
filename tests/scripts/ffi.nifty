@@ -1,0 +1,27 @@
+# Binary FFI: we declare the shapes ourselves in plain sized types and
+# the linker resolves the symbols. No headers are ever read.
+extern "libc":
+  proc usleep(usec: uint32): int32
+  proc getpid(): int32
+  proc pipe(fds: var array[2, int32]): int32
+  proc writeFd "write" (fd: int32, buf: string[64], n: int64): int64
+  proc readFd "read" (fd: int32, buf: var string[64], cap: int64): int64
+  proc closeFd "close" (fd: int32): int32
+
+thread main() =
+  echo usleep(1)
+  echo getpid() > 0
+
+  var fds: array[2, int32]
+  if pipe(fds) == 0:
+    var msg: string[64]
+    msg.add("ping")
+    let sent = writeFd(fds[1], msg, 4)
+    var buf: string[64]
+    let got = readFd(fds[0], buf, 64)
+    # An extern return is untrusted: prove it before it becomes a length.
+    if got >= 0 and got <= 64:
+      buf.setLen(got)
+      echo sent, " ", got, " ", buf
+    discard closeFd(fds[0])
+    discard closeFd(fds[1])

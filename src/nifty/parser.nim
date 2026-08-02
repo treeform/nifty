@@ -615,6 +615,55 @@ proc parseModule(p: var Parser): Module =
         discard p.next
       p.types[name] = typ
       result.types.add TypeDef(name: name, typ: typ, line: t.line)
+    of "extern":
+      # extern "lib": - binary bindings. We declare the shapes ourselves
+      # in plain sized types and link against the symbols; no headers.
+      discard p.next
+      if p.peek.kind != StrToken:
+        err(t.line, "extern needs a library name string: extern \"libc\":")
+      let lib = p.next.text
+      if lib notin result.externLibs:
+        result.externLibs.add lib
+      p.expectOp(":")
+      p.expectNewline()
+      if p.peek.kind != IndentToken:
+        err(p.peek.line, "an indented block of proc declarations expected")
+      discard p.next
+      while p.peek.kind != DedentToken:
+        if p.peek.kind == NewlineToken:
+          discard p.next
+          continue
+        p.expectKeyword("proc")
+        var r = Routine(kind: ProcRoutine, name: p.expectIdent(),
+          line: p.peek.line, externLib: lib)
+        if p.peek.kind == StrToken:
+          r.cname = p.next.text # proc bindSock "bind" (...)
+        p.expectOp("(")
+        if not p.atOp(")"):
+          while true:
+            var names = @[p.expectIdent()]
+            while p.atOp(","):
+              discard p.next
+              names.add p.expectIdent()
+            p.expectOp(":")
+            var isVar = false
+            if p.atIdent("var"):
+              discard p.next
+              isVar = true
+            let ty = p.parseType()
+            for n in names:
+              r.params.add Param(name: n, typ: ty, isVar: isVar)
+            if p.atOp(","):
+              discard p.next
+            else:
+              break
+        p.expectOp(")")
+        if p.atOp(":"):
+          discard p.next
+          r.ret = p.parseType()
+        p.expectNewline()
+        result.routines.add r
+      discard p.next
     of "func", "proc", "thread":
       let startPos = p.pos
       discard p.next
@@ -684,7 +733,7 @@ proc parseModule(p: var Parser): Module =
       result.routines.add r
     else:
       err(t.line, "unknown declaration: '" & t.text &
-        "' (expected const, var, object, func, proc, or thread; " &
+        "' (expected const, var, object, func, proc, thread, or extern; " &
         "import must be at the top of the file)")
 
 proc parse*(toks: seq[Token]): Module =

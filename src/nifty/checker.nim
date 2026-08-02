@@ -1361,6 +1361,23 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           c.facts[key] = Fact(lo: min(lf.lo + addLo, bt.len),
             hi: min(lf.hi + addHi, bt.len))
         e.typ = nil
+      of "setLen":
+        # After C wrote into the buffer: set the live length, proven to
+        # fit the capacity. Any byte value is a valid string byte, so
+        # this cannot expose anything unsound.
+        if nArgs != 1:
+          err(e.line, "setLen takes one argument")
+        let nt = c.expectVal(e.kids[1])
+        if nt.kind != IntType:
+          err(e.kids[1].line, "setLen needs an int")
+        let nf = exprFact(e.kids[1])
+        if nf.lo < 0 or nf.hi > bt.len:
+          err(e.kids[1].line, "cannot prove the new length (" &
+            rangeStr(nf) & ") fits 0 .. " & $bt.len &
+            "; guard the value first")
+        if key != "":
+          c.facts[key] = Fact(lo: nf.lo, hi: nf.hi)
+        e.typ = nil
       of "clear":
         if nArgs != 0:
           err(e.line, "clear takes no arguments")
@@ -2918,6 +2935,30 @@ proc check*(m: Module) =
 
   for r in m.routines:
     if r.generic:
+      c.checked.incl r.name
+      continue
+    if r.externLib != "":
+      # Binary FFI: we declared the shape; validate it is expressible.
+      for pm in r.params:
+        case pm.typ.kind
+        of IntType, FloatType:
+          discard # by value (or by pointer when var)
+        of StringType, ArrayType:
+          discard # a data pointer; var makes it writable
+        of ObjectType:
+          if not pm.isVar:
+            err(r.line, "extern '" & r.name & "': pass objects as var " &
+              "(a pointer); by-value struct ABIs are not supported")
+        else:
+          err(r.line, "extern '" & r.name & "': " & $pm.typ &
+            " cannot cross the C boundary; use sized ints, floats, " &
+            "string[N] buffers, arrays, or var objects")
+        if pm.typ.opt:
+          err(r.line, "extern '" & r.name & "': optionals cannot cross " &
+            "the C boundary")
+      if r.ret != nil and r.ret.kind notin {IntType, FloatType}:
+        err(r.line, "extern '" & r.name & "' can only return ints or " &
+          "floats (fill a var buffer for data)")
       c.checked.incl r.name
       continue
     c.checkRoutine(r)

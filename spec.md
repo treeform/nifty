@@ -130,6 +130,44 @@ Assigning one straight into a global the callee itself accesses is
 rejected (the callee would be writing its own input); store to a local
 first.
 
+## FFI: binary bindings
+
+`extern "lib":` declares C functions the binary way: you write the
+shapes yourself in plain sized types, nifty emits its own prototypes,
+and the linker resolves the symbols — no headers are ever read, no
+vendor type zoo, no unbuildable includes.
+
+```nim
+extern "libc":
+  proc pipe(fds: var array[2, int32]): int32
+  proc writeFd "write" (fd: int32, buf: string[64], n: int64): int64
+  proc readFd "read" (fd: int32, buf: var string[64], cap: int64): int64
+```
+
+- The optional string after the name is the C symbol (`writeFd` calls
+  `write`). `"libc"` links for free; any other name adds `-lname`.
+- **Arguments are proven, returns are not.** Passing into an `int32`
+  parameter is the ordinary range-fit proof (a lossy narrowing does
+  not compile). A return is trusted only as far as its C type
+  physically constrains it — `readFd`'s `int64` comes back full-range,
+  so the checker forces the guard before it can become a length:
+  `if got >= 0 and got <= 64: buf.setLen(got)`. `setLen` proves the
+  new length fits the capacity; any byte C wrote is a valid string
+  byte, so nothing unsound can enter.
+- Pointers exist only at the boundary: `var` passes the address
+  (scalars, objects), strings and arrays pass their data pointers
+  (`var` = writable, otherwise `const`). Opaque C pointers are held as
+  `int64` handles and never dereferenced. Nifty strings are
+  length-exact, not NUL-terminated — byte-count APIs (read, write,
+  sockets) fit directly; NUL-expecting APIs need a 0 byte kept in the
+  buffer by the caller.
+- Extern routines are proc-like (a `func` cannot call them), cannot be
+  variadic, and only sized ints, floats, `string[N]`/array buffers,
+  and `var` objects cross the boundary. No optionals, no containers.
+- The honest asterisk: "what compiles cannot trap" now reads "assuming
+  externs honor their declared shapes." The declaration file is the
+  contract; everything on nifty's side of it stays proven.
+
 ## Generics: `$` substitution variables
 
 A routine becomes generic by using `$name` variables in its parameter
@@ -688,7 +726,9 @@ narrowable locals) and `block:` with sibling-block arena overlay;
 lock order (deadlock freedom, lexical + cross-call), pointless-lock
 errors, and the report's locks section; hardware types (sized ints
 with real storage widths, char, IEEE float32/float64 sealed off from
-the proofs, saturating .toInt);
+the proofs, saturating .toInt); binary FFI (extern "lib" blocks,
+symbol aliases, proven arguments / untrusted returns, string buffers
+with setLen, link flags);
 `echo`/`discard`; C output
 with zero runtime checks; generated `main` with thread spawn/join;
 `nifty report` (globals / stack / arena / ops); splice-once imports with

@@ -1,0 +1,1 @@
+error_extern_type.nifty:2: extern 'bad': seq[4, int] cannot cross the C boundary; use sized ints, floats, string[N] buffers, arrays, or var objects

@@ -85,6 +85,9 @@ proc passByPtr(t: Typ): bool =
   ## var parameters pass by pointer, except arrays which already decay.
   t.kind != ArrayType
 
+proc externSym(r: Routine): string =
+  if r.cname != "": r.cname else: r.name
+
 proc genExpr(g: var Gen, e: Expr): string =
   if e.wrapOpt:
     # A plain value flowing into an optional destination.
@@ -163,11 +166,16 @@ proc genExpr(g: var Gen, e: Expr): string =
     let r = g.routines[e.sval]
     var parts: seq[string]
     for i, a in e.kids:
-      if r.params[i].isVar and r.params[i].typ.passByPtr:
+      if r.externLib != "" and r.params[i].typ.kind == StringType:
+        parts.add g.genExpr(a) & ".m_data"
+      elif r.params[i].isVar and r.params[i].typ.passByPtr:
         parts.add "&" & g.genExpr(a)
       else:
         parts.add g.genExpr(a)
-    "f_" & e.sval & "(" & parts.join(", ") & ")"
+    if r.externLib != "":
+      externSym(r) & "(" & parts.join(", ") & ")"
+    else:
+      "f_" & e.sval & "(" & parts.join(", ") & ")"
   of FieldExpr:
     if e.isOptOk:
       g.genExpr(e.kids[0]) & ".m_ok"
@@ -327,13 +335,17 @@ proc genOrdered(g: var Gen, e: Expr): string =
     let r = g.routines[e.sval]
     var parts: seq[string]
     for i, a in e.kids:
-      if r.params[i].isVar and r.params[i].typ.passByPtr:
+      if r.externLib != "" and r.params[i].typ.kind == StringType:
+        parts.add g.genPathOrdered(a) & ".m_data"
+      elif r.params[i].isVar and r.params[i].typ.passByPtr:
         parts.add "&" & g.genPathOrdered(a)
       elif a.typ != nil and a.typ.kind == ArrayType:
         parts.add g.genPathOrdered(a)
       else:
         parts.add g.genOrdered(a)
-    let call = "f_" & e.sval & "(" & parts.join(", ") & ")"
+    let call =
+      if r.externLib != "": externSym(r) & "(" & parts.join(", ") & ")"
+      else: "f_" & e.sval & "(" & parts.join(", ") & ")"
     if r.kind == FuncRoutine:
       call # pure: args are already ordered, the call itself has no effects
     elif r.ret.isNil:
@@ -897,6 +909,8 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     g.put "static " & e & " " & n & "_pop(" & n &
       " *s) { s->m_len -= 1; return s->m_data[s->m_len]; }"
     g.put "static void " & n & "_clear(" & n & " *s) { s->m_len = 0; }"
+    g.put "static void " & n & "_setLen(" & n &
+      " *s, int64_t k) { s->m_len = k; }"
   of StringType:
     let key = mangle(t)
     if key in g.emitted:
@@ -912,6 +926,8 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       " *s, const uint8_t *d, int64_t k) { " &
       "memcpy(&s->m_data[s->m_len], d, (size_t)k); s->m_len += k; }"
     g.put "static void " & n & "_clear(" & n & " *s) { s->m_len = 0; }"
+    g.put "static void " & n & "_setLen(" & n &
+      " *s, int64_t k) { s->m_len = k; }"
   of QueueType:
     g.emitTypeDefs(t.elem)
     let key = mangle(t)
@@ -1133,6 +1149,23 @@ proc generate*(m: Module, src: string): string =
         g.put "static _Alignas(16) uint8_t ni_arena_" & r.name & "[" &
           $g.needOf[r.name] & "];"
   for r in m.routines:
+    if r.externLib != "":
+      # Binary FFI: our own prototype in our own plain types; the
+      # linker resolves the symbol. No headers are ever read.
+      var ps: seq[string]
+      for pm in r.params:
+        if pm.typ.kind == StringType:
+          ps.add (if pm.isVar: "" else: "const ") & "uint8_t *"
+        elif pm.typ.kind == ArrayType:
+          ps.add (if pm.isVar: "" else: "const ") & cBase(pm.typ.elem) & " *"
+        elif pm.isVar:
+          ps.add cBase(pm.typ) & " *"
+        else:
+          ps.add cBase(pm.typ)
+      let ret = if r.ret.isNil: "void" else: cBase(r.ret)
+      g.put "extern " & ret & " " & externSym(r) & "(" &
+        (if ps.len == 0: "void" else: ps.join(", ")) & ");"
+      continue
     g.curArena = g.bigOffs[r.name]
     g.curFrame = g.frameOf[r.name]
     g.curRet = (if r.kind == ThreadRoutine: nil else: r.ret)
