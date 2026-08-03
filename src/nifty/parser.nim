@@ -74,7 +74,7 @@ proc parseTypeCore(p: var Parser): Typ =
   let t = p.peek
   if t.kind == IdentToken and
       (t.text in ["int", "bool", "Lock", "array", "seq", "string", "set",
-        "queue", "map", "int8", "uint8", "char", "int16", "uint16",
+        "queue", "channel", "map", "int8", "uint8", "char", "int16", "uint16",
         "int32", "uint32", "int64", "uint64", "float32", "float64"] or
        t.text in p.types):
     discard p.next
@@ -111,7 +111,7 @@ proc parseTypeCore(p: var Parser): Typ =
       Typ(kind: BoolType)
     of "Lock":
       Typ(kind: LockType)
-    of "array", "seq", "queue":
+    of "array", "seq", "queue", "channel":
       p.expectOp("[")
       var n: int64 = 0
       var lv = ""
@@ -135,13 +135,17 @@ proc parseTypeCore(p: var Parser): Typ =
       let e = p.parseType()
       if e.kind == LockType:
         err(t.line, "Lock cannot be a " & t.text & " element")
-      if t.text in ["seq", "queue"] and e.kind == ArrayType:
+      if t.text in ["seq", "queue", "channel"] and e.kind == ArrayType:
         err(t.line, "a " & t.text & " element cannot be a plain array; " &
           "wrap it in an object")
+      if e.kind == ChannelType:
+        err(t.line, "a channel can only be a global, not a " & t.text &
+          " element")
       p.expectOp("]")
       Typ(kind: (case t.text
         of "seq": SeqType
         of "queue": QueueType
+        of "channel": ChannelType
         else: ArrayType), len: n, lenVar: lv, elem: e)
     of "map":
       # map[lo .. hi, V] (dense) or map[N, K, V] (sorted sparse)
@@ -160,7 +164,7 @@ proc parseTypeCore(p: var Parser): Typ =
           err(t.line, "map key range is too large (max 16777216 keys)")
         p.expectOp(",")
         let v = p.parseType()
-        if v.kind in {LockType, ArrayType}:
+        if v.kind in {LockType, ChannelType, ArrayType}:
           err(t.line, "a map value cannot be a " & $v &
             "; wrap arrays in an object")
         p.expectOp("]")
@@ -174,7 +178,7 @@ proc parseTypeCore(p: var Parser): Typ =
           err(t.line, "map keys must be ints (or ranges) or string[N], got " & $k)
         p.expectOp(",")
         let v = p.parseType()
-        if v.kind in {LockType, ArrayType}:
+        if v.kind in {LockType, ChannelType, ArrayType}:
           err(t.line, "a map value cannot be a " & $v &
             "; wrap arrays in an object")
         p.expectOp("]")
@@ -400,6 +404,20 @@ proc parseSimpleStmt(p: var Parser): Stmt =
     discard p.next
     Stmt(kind: DiscardStmt, line: t.line, value: p.parseExpr())
   else:
+    # Command syntax: when a call is the whole statement, the parens
+    # are optional - "bump counter" is bump(counter). The token after
+    # the name must begin an argument (a name or a literal), so
+    # operators still mean themselves: "a - 1" stays arithmetic.
+    if t.kind == IdentToken and p.pos + 1 < p.toks.len and
+        p.toks[p.pos + 1].kind in {IdentToken, IntToken, FloatToken,
+          StrToken}:
+      discard p.next
+      var call = Expr(kind: CallExpr, line: t.line, sval: t.text)
+      call.kids.add p.parseExpr()
+      while p.atOp(","):
+        discard p.next
+        call.kids.add p.parseExpr()
+      return Stmt(kind: CallStmt, line: t.line, value: call)
     let e = p.parseExpr()
     if p.atOp("="):
       discard p.next
@@ -603,8 +621,8 @@ proc parseModule(p: var Parser): Module =
           names.add p.expectIdent()
         p.expectOp(":")
         let ft = p.parseType()
-        if ft.kind == LockType:
-          err(p.peek.line, "Lock cannot be a field; a Lock must be a global")
+        if ft.kind in {LockType, ChannelType}:
+          err(p.peek.line, $ft & " cannot be a field; it must be a global")
         for n in names:
           for f in typ.fields:
             if f.name == n:
@@ -671,7 +689,24 @@ proc parseModule(p: var Parser): Module =
         of "func": FuncRoutine
         of "proc": ProcRoutine
         else: ThreadRoutine
-      var r = Routine(kind: kind, name: p.expectIdent(), line: t.line)
+      # thread 4 worker() = ... declares four identical threads; the
+      # count is an int literal or a const, like any capacity.
+      var count = 1
+      if kind == ThreadRoutine:
+        let ct = p.peek
+        if ct.kind == IntToken:
+          discard p.next
+          count = int(parseIntLit(ct))
+        elif ct.kind == IdentToken and p.pos + 1 < p.toks.len and
+            p.toks[p.pos + 1].kind == IdentToken:
+          if ct.text notin p.consts:
+            err(ct.line, "unknown const '" & ct.text & "' as thread count")
+          discard p.next
+          count = int(p.consts[ct.text])
+        if count < 1:
+          err(ct.line, "a thread count must be at least 1")
+      var r = Routine(kind: kind, count: count, name: p.expectIdent(),
+        line: t.line)
       p.expectOp("(")
       p.allowTypeVar = true
       if not p.atOp(")"):

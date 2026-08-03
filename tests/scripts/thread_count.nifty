@@ -1,0 +1,21 @@
+# thread 4 adder() declares four identical threads - a thread pool in
+# one line. A global used only by a counted thread is still shared
+# between its instances, so the ordinary lock rules apply, and the
+# last instance to finish prints the deterministic total.
+
+const Crew = 4
+
+var total: 0 .. 4000
+var done: 0 .. Crew
+var tLock: Lock
+
+thread Crew adder() =
+  for i in 0 ..< 10:
+    with tLock:
+      if total <= 3900:
+        total = total + 100
+  with tLock:
+    if done < Crew:
+      done = done + 1
+    if done == Crew:
+      echo "total ", total

@@ -1,0 +1,42 @@
+# Overloading: routines share one good name and the kind of the
+# first argument picks the routine - close(file) and close(socket)
+# instead of closeFile and closeSocket. With uniform call syntax the
+# call reads the way it should: file.close(), socket.close().
+# Overloads must differ in first-parameter kind (ranges, capacities,
+# and widths never take part), so resolution is one lookup, and every
+# proof runs on the routine that was picked.
+
+object File =
+  descriptor: int32
+
+object Socket =
+  descriptor: int32
+  port: 0 .. 65535
+
+proc close(file: File) =
+  echo "closed file ", file.descriptor
+
+proc close(socket: Socket) =
+  echo "closed socket ", socket.descriptor, " port ", socket.port
+
+func doubled(x: 0 .. 100): 0 .. 200 =
+  return x * 2
+
+func doubled(s: string[20]): string[40] =
+  var text: string[40]
+  text.add(s)
+  text.add(s)
+  return text
+
+thread main() =
+  var file: File
+  file.descriptor = 3
+  var socket: Socket
+  socket.descriptor = 4
+  socket.port = 8080
+  file.close()                  # uniform call picks close(File)
+  socket.close()                # ... and close(Socket)
+  close file                    # command syntax resolves the same way
+  echo doubled(21)              # the int overload
+  let twice = "ho".doubled()    # the string overload, off a literal
+  echo twice

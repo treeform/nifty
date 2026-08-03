@@ -1,0 +1,22 @@
+# channel[N, T]: the semaphore system. send blocks while full, recv
+# blocks while empty - a real OS-level sleep on a condition variable,
+# with the data riding along. The capacity IS the backpressure: fifty
+# items through a four-slot channel makes the producer block over and
+# over, and the sum still proves - recv hands back the element's
+# declared range (1 .. 100), so one guard bounds the accumulator.
+
+const Items = 50
+
+var jobs: channel[4, 1 .. 100]
+
+thread producer() =
+  for i in 1 .. Items:
+    jobs.send(i)
+
+thread consumer() =
+  var sum: 0 .. 5100 = 0
+  for i in 1 .. Items:
+    let v = jobs.recv()
+    if sum <= 5000:
+      sum = sum + v
+  echo "sum ", sum

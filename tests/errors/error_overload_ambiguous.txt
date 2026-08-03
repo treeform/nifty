@@ -1,0 +1,1 @@
+error_overload_ambiguous.nifty:4: ambiguous overload: 'f' declared at line 1 also takes an int first

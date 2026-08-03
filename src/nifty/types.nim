@@ -7,6 +7,7 @@ type
   TypKind* = enum
     IntType, BoolType, StringLitType, LockType, ArrayType, ObjectType, SeqType, StringType, SetType,
     QueueType, DenseMapType, SparseMapType, # dense map[range, V]; sorted sparse map[N, K, V]
+    ChannelType, # channel[N, T]: a blocking bounded queue (the semaphore system)
     TypeVarType, # a generic $T waiting to be bound at instantiation
     FloatType # IEEE float32/float64: data values, outside the proof engine
   Field* = object
@@ -90,6 +91,8 @@ type
     kind*: RoutineKind
     name*: string
     line*: int
+    count*: int                # threads: instances declared (thread 4 w());
+                               # 0 or 1 means one
     params*: seq[Param]
     ret*: Typ # nil = no return value
     body*: seq[Stmt]
@@ -120,7 +123,19 @@ type
     routines*: seq[Routine]
 
 const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
-  "put", "remove", "setLen", "addByte", "addNum", "copyRange"]
+  "put", "remove", "setLen", "addByte", "addNum", "copyRange",
+  "send", "recv"]
+
+# Names the container/optional method system owns. A routine with one
+# of these names is still callable the classic way, but never through
+# uniform call syntax - builtins keep their meaning on every type.
+const builtinMethods* = @mutMethods & @["or", "get", "contains",
+  "startsWith", "endsWith", "find", "findByte", "toInt",
+  "len", "ok", "lo", "hi"]
+
+proc instances*(r: Routine): int =
+  ## How many OS threads a thread declaration starts (thread 4 w()).
+  max(1, r.count)
 
 proc deOpt*(t: Typ): Typ =
   ## The base type of an optional (a copy with the flag cleared).
@@ -201,6 +216,10 @@ proc typeSize*(t: Typ): int64 =
     sizeAdd(8, (t.setSize + 63) div 64 * 8)
   of QueueType:
     (sizeAdd(16, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
+  of ChannelType:
+    # Ring (len + head + data) plus the embedded mutex and two condition
+    # variables (Darwin sizes: 64 + 2 x 48).
+    (sizeAdd(176, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
   of DenseMapType:
     (sizeAdd(sizeAdd(8, (t.setSize + 63) div 64 * 8),
       sizeMul(t.setSize, typeSize(t.val))) + 7) div 8 * 8
@@ -243,6 +262,8 @@ proc typeEq*(a, b: Typ): bool =
       typeEq(a.val, b.val) and a.val.width == b.val.width
   if a.kind == ObjectType:
     return a.name == b.name
+  if a.kind == ChannelType:
+    return false # channels are never copied or compared
   true
 
 proc sizeStr(t: Typ): string =
@@ -267,6 +288,7 @@ proc `$`*(t: Typ): string =
   of StringType: "string[" & t.sizeStr & "]"
   of SetType: "set[" & $t.elem & "]"
   of QueueType: "queue[" & t.sizeStr & ", " & $t.elem & "]"
+  of ChannelType: "channel[" & t.sizeStr & ", " & $t.elem & "]"
   of DenseMapType: "map[" & $t.elem & ", " & $t.val & "]"
   of SparseMapType: "map[" & $t.len & ", " & $t.elem & ", " & $t.val & "]"
   of ObjectType: t.name

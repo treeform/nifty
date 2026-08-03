@@ -1,0 +1,235 @@
+# A tiny HTTP server shaped like a real one, all of it provable, and
+# every wakeup is a channel: nifty's semaphore system. One io thread
+# owns the sockets - it polls the listener and the idle connections,
+# reads and parses each request into a Request object, and sends it
+# down the requests channel. The worker pool (thread Workers worker())
+# sleeps at OS level in recv until the kernel hands one of them a
+# request, builds the response, and sends it back; the writer thread
+# sleeps on the responses channel and puts each answer on its socket.
+# send blocks while full and recv blocks while empty (condition
+# variables, not spinning), the capacities are the backpressure, and
+# the checker proves the rest: the one remaining lock is taken on
+# every access to the shared connection table, both channels have a
+# sender and a receiver, and nothing can block while holding a lock.
+#
+#   nifty build examples/httpd.nifty
+#   cd examples && ./httpd        # then open http://localhost:8080/
+
+const Port = 8080
+const MaxConnections = 8    # open connections the io thread juggles
+const PollSlots = MaxConnections + 1  # plus the listener
+const Workers = 4
+const RequestMax = 2048     # request buffer and page buffer, one read each
+const ResponseMax = 4096    # headers plus a full page, proven to fit below
+const PathMax = 128
+
+object PollEntry =          # one row of the poll set (C's struct pollfd)
+  socket: int32
+  events: int16             # what we wait for (1 = readable)
+  returned: int16           # what actually happened
+
+object Connection =         # one connection slot; socket 0 means free
+  socket: int32
+  busy: bool                # request handed to a worker, answer pending
+
+object Request =
+  slot: 0 ..< MaxConnections
+  path: string[PathMax]?    # none = the request line did not parse
+
+object Response =
+  slot: 0 ..< MaxConnections
+  data: string[ResponseMax]
+
+# The C names stop at this boundary: nifty declares its own names and
+# the string after each one is the C symbol the linker resolves.
+extern "libc":
+  proc openSocket "socket" (domain: int32, kind: int32, protocol: int32): int32
+  proc setSocketOption "setsockopt" (socket: int32, level: int32, option: int32, value: var int32, size: int32): int32
+  proc bindSocket "bind" (socket: int32, address: array[16, uint8], addressSize: int32): int32
+  proc listen(socket: int32, backlog: int32): int32
+  proc acceptConnection "accept" (socket: int32, address: int64, addressSize: int64): int32
+  proc poll(entries: var array[PollSlots, PollEntry], count: int32, timeoutMs: int32): int32
+  proc read(descriptor: int32, buffer: var string[RequestMax], capacity: int64): int64
+  proc write(descriptor: int32, buffer: string[ResponseMax], size: int64): int64
+  proc openFile "open" (path: string[16], flags: int32): int32
+  proc close(descriptor: int32): int32
+  proc onSignal "signal" (signalNumber: int32, handler: int64): int64
+
+# The pipeline: io -> requests -> workers -> responses -> writer.
+# A channel is a bounded blocking queue with the semaphore built in -
+# it needs no lock and no handshake, and it works from the first
+# instruction, so there is no startup dance at all.
+var requests: channel[MaxConnections, Request]
+var responses: channel[MaxConnections, Response]
+
+# The connection table is real shared state (io fills it, the writer
+# empties it), so it is a plain global under a lock, and the checker
+# holds every access to that.
+var connections: array[MaxConnections, Connection]
+var connectionsLock: Lock
+
+# The tiny HTTP parser: "GET /path HTTP/..." gives the path, anything
+# else gives none. Total string operations make hostile input safe -
+# find returns an optional and copyRange clamps, so there is no index
+# to get wrong and no request that can trap.
+func parsePath(request: string[RequestMax]): string[PathMax]? =
+  if not request.startsWith("GET "):
+    return none
+  let pathEnd = request.find(" HTTP/")
+  if not pathEnd.ok:
+    return none
+  var path: string[PathMax]
+  path.copyRange(request, 4, pathEnd)
+  return path
+
+# The two URLs this server has. A length test plus startsWith is
+# string equality spelled with total operations.
+func isPage(path: string[PathMax]): bool =
+  if path.len == 1 and path.startsWith("/"):
+    return true
+  return path.len == 11 and path.startsWith("/index.html")
+
+# Read index.html fresh from disk - no cache, no cross-request state.
+proc loadPage(page: var string[RequestMax]): bool =
+  var fileName: string[16] = "index.html"
+  fileName.addByte(0)                 # C's open wants a NUL terminator
+  let file = openFile(fileName, 0)    # O_RDONLY
+  if file < 0:
+    return false
+  let bytesRead = file.read(page, RequestMax)
+  discard file.close()
+  if bytesRead < 0 or bytesRead > RequestMax:
+    return false                      # untrusted until proven
+  page.setLen(bytesRead)
+  return true
+
+# Build one response. Every add is priced at compile time: the
+# worst-case headers plus a full page must fit ResponseMax or this
+# does not compile. A func returning a big value compiles to
+# destination passing - the caller's variable is filled in place,
+# zero copies.
+func buildResponse(status: string[32], body: string[RequestMax]): string[ResponseMax] =
+  var response: string[ResponseMax]
+  response.add("HTTP/1.1 ")
+  response.add(status)
+  response.add("\r\nContent-Type: text/html\r\nContent-Length: ")
+  response.addNum(body.len)
+  response.add("\r\nConnection: close\r\n\r\n")
+  response.add(body)
+  return response
+
+# The one listening socket, owned by the io thread.
+proc listenSocket(): int32? =
+  let socket = openSocket(2, 1, 0)    # AF_INET, SOCK_STREAM
+  if socket < 0:
+    return none
+  var enable: int32 = 1
+  discard setSocketOption(socket, 65535, 4, enable, 4)  # SOL_SOCKET, SO_REUSEADDR
+  var address: array[16, uint8]
+  address[1] = 2                      # Darwin: sin_family at byte 1
+  address[2] = Port / 256             # sin_port, big-endian
+  address[3] = Port % 256             # sin_addr 0.0.0.0 is already zero
+  if bindSocket(socket, address, 16) != 0:
+    discard socket.close()
+    return none
+  if listen(socket, 16) != 0:
+    discard socket.close()
+    return none
+  return socket
+
+# The io thread: accepts, reads, parses, dispatches. Note where the
+# send sits: after the lock block, never inside one - the checker
+# rejects blocking while holding a lock outright.
+thread io() =
+  discard onSignal(13, 1)             # SIGPIPE -> SIG_IGN: a dead peer must not kill us
+  var serverSocket: int32 = -1
+  let opened = listenSocket()
+  if opened.ok:
+    serverSocket = opened
+    echo "serving http://localhost:", Port, "/"
+  loop:
+    if serverSocket < 0:
+      break
+    var pollSet: array[PollSlots, PollEntry]
+    pollSet[0].socket = serverSocket
+    pollSet[0].events = 1             # readable
+    with connectionsLock:
+      for i in 0 ..< MaxConnections:
+        if connections[i].socket > 0 and not connections[i].busy:
+          pollSet[i + 1].socket = connections[i].socket
+        else:
+          pollSet[i + 1].socket = -1  # poll ignores negative descriptors
+        pollSet[i + 1].events = 1
+    if poll(pollSet, PollSlots, 200) > 0:
+      # The listener: take the connection into a free slot, or shed it.
+      if pollSet[0].returned != 0:
+        let client = acceptConnection(serverSocket, 0, 0)
+        if client > 0:
+          var placed = false
+          with connectionsLock:
+            for i in 0 ..< MaxConnections:
+              if not placed and connections[i].socket == 0:
+                connections[i].socket = client
+                connections[i].busy = false
+                placed = true
+          if not placed:
+            discard client.close()          # full house
+      # Readable connections: read the request, parse it, and send it
+      # into the pool - the kernel stands exactly one worker up.
+      for i in 0 ..< MaxConnections:
+        if pollSet[i + 1].returned != 0:
+          var clientSocket: int32 = 0
+          with connectionsLock:
+            if connections[i].socket > 0 and not connections[i].busy:
+              clientSocket = connections[i].socket
+          if clientSocket > 0:
+            var requestText: string[RequestMax]
+            let bytesRead = clientSocket.read(requestText, RequestMax)
+            if bytesRead > 0 and bytesRead <= RequestMax:
+              requestText.setLen(bytesRead)
+              var request: Request
+              request.slot = i
+              request.path = requestText.parsePath()
+              with connectionsLock:
+                connections[i].busy = true
+              requests.send(request)
+            else:                     # closed or unreadable: drop it
+              with connectionsLock:
+                connections[i].socket = 0
+              discard clientSocket.close()
+
+# The worker pool: four OS threads asleep in recv until there is work.
+thread Workers worker() =
+  loop:
+    let request = requests.recv()
+    var text: string[ResponseMax]
+    if not request.path.ok:
+      text = buildResponse("400 Bad Request", "<h1>400 bad request</h1>")
+    elif request.path.isPage():
+      var page: string[RequestMax]
+      if loadPage(page):
+        text = buildResponse("200 OK", page)
+      else:
+        text = buildResponse("404 Not Found", "<h1>404 not found</h1>")
+    else:
+      text = buildResponse("404 Not Found", "<h1>404 not found</h1>")
+    var response: Response
+    response.slot = request.slot
+    response.data = text
+    responses.send(response)
+
+# The writer: asleep in recv until an answer is ready, then puts it
+# on the socket and frees the slot.
+thread writer() =
+  loop:
+    let response = responses.recv()
+    var socket: int32 = 0
+    with connectionsLock:
+      if connections[response.slot].socket > 0 and connections[response.slot].busy:
+        socket = connections[response.slot].socket
+    if socket > 0:
+      discard socket.write(response.data, response.data.len)
+      with connectionsLock:
+        connections[response.slot].socket = 0
+        connections[response.slot].busy = false
+      discard socket.close()

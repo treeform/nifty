@@ -56,6 +56,7 @@ proc mangle(t: Typ): string =
   of StringType: "s" & $t.len
   of SetType: "t" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi)
   of QueueType: "u" & $t.len & "_" & mangle(t.elem)
+  of ChannelType: "c" & $t.len & "_" & mangle(t.elem)
   of DenseMapType: "d" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi) &
     "_" & mangle(t.val)
   of SparseMapType: "m" & $t.len & "_" & mangle(t.elem) & "_" & mangle(t.val)
@@ -72,7 +73,8 @@ proc cBase(t: Typ): string =
     if t.width == 0 or (t.width == 8 and t.rlo < 0): "int64_t"
     else: (if t.rlo >= 0: "uint" else: "int") & $(t.width * 8) & "_t"
   of ObjectType: "S_" & t.name
-  of SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType: "NS_" & mangle(t)
+  of SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType,
+      ChannelType: "NS_" & mangle(t)
   else: "int64_t"
 
 proc cDecl(name: string, t: Typ): string =
@@ -1066,6 +1068,47 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       "s->m_head = (s->m_head + 1) % " & cap & "; s->m_len -= 1; return v; }"
     g.put "static void " & n & "_clear(" & n &
       " *s) { s->m_len = 0; s->m_head = 0; }"
+  of ChannelType:
+    # The semaphore system: a ring buffer with an embedded mutex and
+    # two condition variables. send blocks while full, recv blocks
+    # while empty - a real OS-level sleep, not a spin - and each op
+    # wakes exactly one waiter on the other side.
+    g.emitTypeDefs(t.elem)
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    let n = "NS_" & key
+    let e = cBase(t.elem)
+    let cap = $t.len & "LL"
+    g.put ""
+    g.put "typedef struct {"
+    g.put "  pthread_mutex_t m_mtx;"
+    g.put "  pthread_cond_t m_free; /* a slot opened */"
+    g.put "  pthread_cond_t m_item; /* an item arrived */"
+    g.put "  int64_t m_len;"
+    g.put "  int64_t m_head;"
+    g.put "  " & e & " m_data[" & $t.len & "];"
+    g.put "} " & n & ";"
+    g.put "static void " & n & "_send(" & n & " *c, " & e & " v) {"
+    g.put "  pthread_mutex_lock(&c->m_mtx);"
+    g.put "  while (c->m_len >= " & cap &
+      ") pthread_cond_wait(&c->m_free, &c->m_mtx);"
+    g.put "  c->m_data[(c->m_head + c->m_len) % " & cap & "] = v;"
+    g.put "  c->m_len += 1;"
+    g.put "  pthread_cond_signal(&c->m_item);"
+    g.put "  pthread_mutex_unlock(&c->m_mtx);"
+    g.put "}"
+    g.put "static " & e & " " & n & "_recv(" & n & " *c) {"
+    g.put "  pthread_mutex_lock(&c->m_mtx);"
+    g.put "  while (c->m_len == 0) pthread_cond_wait(&c->m_item, &c->m_mtx);"
+    g.put "  " & e & " v = c->m_data[c->m_head];"
+    g.put "  c->m_head = (c->m_head + 1) % " & cap & ";"
+    g.put "  c->m_len -= 1;"
+    g.put "  pthread_cond_signal(&c->m_free);"
+    g.put "  pthread_mutex_unlock(&c->m_mtx);"
+    g.put "  return v;"
+    g.put "}"
   of DenseMapType:
     g.emitTypeDefs(t.val)
     let key = mangle(t)
@@ -1251,14 +1294,27 @@ proc generate*(m: Module, src: string): string =
     for gd in m.globals:
       if gd.typ.kind == LockType:
         g.put "static pthread_mutex_t g_" & gd.name & " = PTHREAD_MUTEX_INITIALIZER;"
+      elif gd.typ.kind == ChannelType:
+        # A zeroed pthread mutex/cond is not valid on every platform
+        # (Darwin's initializers carry a signature); the ring stays zero.
+        g.put "static " & cBase(gd.typ) & " g_" & gd.name &
+          " = { .m_mtx = PTHREAD_MUTEX_INITIALIZER, " &
+          ".m_free = PTHREAD_COND_INITIALIZER, " &
+          ".m_item = PTHREAD_COND_INITIALIZER };"
       else:
         g.put "static " & cDecl("g_" & gd.name, gd.typ) & ";"
   if anyArena:
     g.put ""
     for r in m.routines:
       if r.kind == ThreadRoutine and g.needOf[r.name] > 0:
-        g.put "static _Alignas(16) uint8_t ni_arena_" & r.name & "[" &
-          $g.needOf[r.name] & "];"
+        if r.instances > 1:
+          # One arena row per instance, rows padded to keep 16-alignment.
+          let row = (g.needOf[r.name] + 15) div 16 * 16
+          g.put "static _Alignas(16) uint8_t ni_arena_" & r.name & "[" &
+            $r.instances & "][" & $row & "];"
+        else:
+          g.put "static _Alignas(16) uint8_t ni_arena_" & r.name & "[" &
+            $g.needOf[r.name] & "];"
   for r in m.routines:
     if r.externLib != "":
       # Binary FFI: our own prototype in our own plain types; the
@@ -1286,7 +1342,8 @@ proc generate*(m: Module, src: string): string =
       inc g.ind
       g.put "(void)ni_arg;"
       if g.needOf[r.name] > 0:
-        g.put "ni_sp = ni_arena_" & r.name & ";"
+        # Each instance gets its own arena; main passes the base pointer.
+        g.put "ni_sp = (uint8_t *)ni_arg;"
       if g.curFrame > 0:
         g.put "uint8_t *ni_base = ni_sp;"
         g.put "ni_sp += " & $g.curFrame & "LL;"
@@ -1336,16 +1393,30 @@ proc generate*(m: Module, src: string): string =
       dec g.ind
       g.put "}"
   let threads = m.routines.filterIt(it.kind == ThreadRoutine)
+  var total = 0
+  for t in threads:
+    total += t.instances
   g.put ""
   g.put "int main(void) {"
   inc g.ind
-  g.put "pthread_t ni_threads[" & $threads.len & "];"
-  for i, t in threads:
-    g.put "if (pthread_create(&ni_threads[" & $i & "], NULL, t_" & t.name &
-      ", NULL) != 0) { fprintf(stderr, \"nifty: failed to start thread " &
+  g.put "pthread_t ni_threads[" & $total & "];"
+  var base = 0
+  for t in threads:
+    let fail = " { fprintf(stderr, \"nifty: failed to start thread " &
       t.name & "\\n\"); return 1; }"
-  for i, t in threads:
-    g.put "pthread_join(ni_threads[" & $i & "], NULL);"
+    if t.instances > 1:
+      let arg = if g.needOf[t.name] > 0: "ni_arena_" & t.name & "[ni_i]"
+        else: "NULL"
+      g.put "for (int ni_i = 0; ni_i < " & $t.instances & "; ++ni_i)"
+      g.put "  if (pthread_create(&ni_threads[" & $base & " + ni_i], " &
+        "NULL, t_" & t.name & ", " & arg & ") != 0)" & fail
+    else:
+      let arg = if g.needOf[t.name] > 0: "ni_arena_" & t.name else: "NULL"
+      g.put "if (pthread_create(&ni_threads[" & $base & "], NULL, t_" &
+        t.name & ", " & arg & ") != 0)" & fail
+    base += t.instances
+  g.put "for (int ni_i = 0; ni_i < " & $total & "; ++ni_i)"
+  g.put "  pthread_join(ni_threads[ni_i], NULL);"
   g.put "return 0;"
   dec g.ind
   g.put "}"

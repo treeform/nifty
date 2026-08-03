@@ -1,0 +1,1 @@
+error_command_unknown.nifty:2: unknown func or proc: 'frob'

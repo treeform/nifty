@@ -1,0 +1,1 @@
+error_channel_under_lock.nifty:6: cannot send on channel 'c' while holding lock 'l': blocking while holding a lock can deadlock; move the channel operation outside the with block

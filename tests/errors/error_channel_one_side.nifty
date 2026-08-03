@@ -1,0 +1,7 @@
+var c: channel[2, int]
+
+thread a() =
+  c.send(1)
+
+thread b() =
+  c.send(2)

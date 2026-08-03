@@ -176,6 +176,11 @@ proc collectCalls(body: seq[Stmt], globals: Table[string, Typ],
 
 ## The Report
 
+proc threadLabel(r: Routine): string =
+  ## thread 4 worker() reports as "worker x4" - the numbers that follow
+  ## are per instance.
+  if r.instances > 1: r.name & " x" & $r.instances else: r.name
+
 proc buildReport*(m: Module, src: string): string =
   var globals: Table[string, Typ]
   for gd in m.globals:
@@ -246,7 +251,8 @@ proc buildReport*(m: Module, src: string): string =
     if r.kind != ThreadRoutine:
       continue
     let d = deepest[r.name]
-    lines.add "  " & r.name & ": " & $d.bytes & " bytes (" & d.chain & ")"
+    lines.add "  " & threadLabel(r) & ": " & $d.bytes & " bytes (" &
+      d.chain & ")"
 
   # Arenas: exact, allocated at that size, so overflow is impossible.
   var aframes: Table[string, int64]
@@ -272,7 +278,10 @@ proc buildReport*(m: Module, src: string): string =
         continue
       let d = adeep[r.name]
       if d.bytes > 0:
-        lines.add "  " & r.name & ": " & $d.bytes & " bytes (" & d.chain & ")"
+        var line = "  " & threadLabel(r) & ": " & $d.bytes & " bytes"
+        if r.instances > 1:
+          line.add " each"
+        lines.add line & " (" & d.chain & ")"
 
   # Ops: for a thread with top-level loops, report the cost of one pass
   # of each loop plus everything outside them; otherwise the total.
@@ -289,9 +298,10 @@ proc buildReport*(m: Module, src: string): string =
       else:
         outside = sadd(outside, stmtOps(s, costs))
     if passes.len == 0:
-      lines.add "  " & r.name & ": " & $outside & " ops total"
+      lines.add "  " & threadLabel(r) & ": " & $outside & " ops total"
     else:
-      var line = "  " & r.name & ": " & $outside & " ops outside the loop"
+      var line = "  " & threadLabel(r) & ": " & $outside &
+        " ops outside the loop"
       for i, p in passes:
         line.add ", " & $p & " ops per loop pass"
       lines.add line

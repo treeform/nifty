@@ -51,6 +51,7 @@ type
     instStack: seq[string]              # generics being instantiated (recursion)
     lockOrder: Table[string, int]       # lock name -> declaration position
     routineLocks: Table[string, HashSet[string]] # routine -> locks it may take
+    overloads: Table[string, seq[string]] # shared name -> unique routine names
 
 const
   IntLow = low(int64)
@@ -648,6 +649,26 @@ proc containsIdent(e: Expr, v: string): bool =
     if containsIdent(k, v):
       return true
 
+proc dispatchKey(t: Typ): string =
+  ## The "kind" of a first parameter or argument, for overload
+  ## resolution: overloads of one name must differ in this, so a call
+  ## picks its routine by what its first argument is. Coarse on
+  ## purpose - ranges, capacities, and widths never take part.
+  if t == nil or t.opt:
+    return ""
+  case t.kind
+  of IntType: "an int"
+  of FloatType: "a float"
+  of BoolType: "a bool"
+  of StringType, StringLitType: "a string"
+  of ArrayType: "an array"
+  of SeqType: "a seq"
+  of QueueType: "a queue"
+  of SetType: "a set"
+  of DenseMapType, SparseMapType: "a map"
+  of ObjectType: t.name
+  else: ""
+
 proc declTypeOf(c: Ctx, e: Expr): Typ =
   ## The type of a value expression from declarations only (no checking).
   case e.kind
@@ -1217,6 +1238,17 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     else:
       err(e.line, "'.' needs an object, seq, or string, got " & $base)
   of MethodExpr:
+    # Uniform call syntax: b.a(c, d) is a(b, c, d) for any routine a.
+    # Decided by name alone, before anything is checked - builtin
+    # method names keep their meaning on every type, so the rewrite is
+    # unambiguous and nothing gets type-checked twice. The kids of a
+    # MethodExpr are already [base, args...], which is exactly a
+    # CallExpr's argument layout.
+    if e.sval notin builtinMethods and
+        (e.sval in c.routineTab or e.sval in c.generics or
+         e.sval in c.overloads):
+      e.kind = CallExpr
+      return c.checkExpr(e)
     var bt = c.expectVal(e.kids[0])
     let nArgs = e.kids.len - 1
     if e.sval == "or":
@@ -1337,6 +1369,45 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         e.typ = nil
       else:
         err(e.line, $bt & " has no method '" & e.sval & "'")
+    of ChannelType:
+      # The semaphore system: send blocks until there is room, recv
+      # blocks until there is an item - a real OS-level sleep
+      # (pthread condition variables), fused with the data it hands
+      # over. No proofs needed: blocking IS the backpressure, and the
+      # channel synchronizes itself (no with, no lock).
+      case e.sval
+      of "send":
+        if nArgs != 1:
+          err(e.line, "send takes one argument")
+        var at: Typ = nil
+        if e.kids[1].kind == NoneExpr:
+          if not bt.elem.opt:
+            err(e.kids[1].line, "none needs an optional destination")
+          e.kids[1].typ = bt.elem
+          at = bt.elem
+        else:
+          at = c.expectVal(e.kids[1])
+          if c.coerceOpt(e.kids[1], bt.elem):
+            at = bt.elem
+          elif c.coerceStrLit(e.kids[1], bt.elem):
+            at = bt.elem
+          elif coerceFloatLit(e.kids[1], bt.elem):
+            at = bt.elem
+        if not typeEq(at, bt.elem):
+          err(e.kids[1].line, "cannot send " & $at & " into " & $bt)
+        if bt.elem.kind == IntType and not exprFact(e.kids[1]).fits(bt.elem):
+          err(e.kids[1].line, "cannot prove value (" &
+            rangeStr(exprFact(e.kids[1])) & ") fits element range " &
+            $bt.elem & "; guard or clamp first")
+        e.typ = nil
+      of "recv":
+        if nArgs != 0:
+          err(e.line, "recv takes no arguments")
+        e.typ = bt.elem
+        e.setFact typeFact(bt.elem)
+      else:
+        err(e.line, $bt & " has no method '" & e.sval &
+          "' (channels have exactly send and recv)")
     of StringType:
       case e.sval
       of "add":
@@ -1666,6 +1737,31 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     for i, arg in e.kids:
       if arg.kind != NoneExpr:
         ats[i] = c.expectVal(arg)
+    if name in c.overloads:
+      # Overload resolution: the first argument's kind picks the
+      # routine, and from here on the call is the plain one.
+      if e.kids.len == 0 or ats[0] == nil:
+        err(e.line, "cannot resolve overloaded '" & name &
+          "': it needs a first argument to pick an overload by")
+      let key = dispatchKey(ats[0])
+      if key == "":
+        err(e.line, "cannot resolve overloaded '" & name & "': " &
+          $ats[0] & " does not pick an overload")
+      var found = ""
+      for cn in c.overloads[name]:
+        if c.routineTab[cn].params.len > 0 and
+            dispatchKey(c.routineTab[cn].params[0].typ) == key:
+          found = cn
+      if found == "":
+        err(e.line, "no overload of '" & name & "' takes " & key &
+          " as its first argument")
+      e.sval = found
+      name = found
+      if name == c.cur.name:
+        err(e.line, "recursion is not allowed: '" & name & "' calls itself")
+      if name notin c.checked:
+        err(e.line, "'" & name & "' is called before its declaration " &
+          "(declare-before-use keeps the call graph recursion-free)")
     if name in c.generics:
       name = c.instantiate(e, ats)
     let r = c.routineTab[name]
@@ -1776,8 +1872,9 @@ proc checkBody(c: var Ctx, body: seq[Stmt]) =
 proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
   case s.kind
   of VarStmt, LetStmt:
-    if s.typ != nil and s.typ.kind == LockType:
-      err(s.line, "a Lock must be a global")
+    if s.typ != nil and s.typ.kind in {LockType, ChannelType}:
+      err(s.line, "a " & (if s.typ.kind == LockType: "Lock" else: "channel") &
+        " must be a global")
     var t = s.typ
     var initFact = Fact(lo: 0, hi: 0, notZero: false)
     if s.init != nil and s.init.kind == NoneExpr:
@@ -1786,8 +1883,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           "(e.g. var x: int? = none)")
       s.init.typ = t
     elif s.init != nil:
-      if s.init.kind == CallExpr:
-        c.allowBigRet = true
+      if s.init.kind in {CallExpr, MethodExpr}:
+        c.allowBigRet = true # MethodExpr: may become a call via uniform syntax
       var it = c.expectVal(s.init)
       if c.coerceOpt(s.init, t):
         it = t
@@ -1920,6 +2017,9 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     let lt =
       if s.lhs.kind == IdentExpr: s.lhs.typ
       else: c.expectVal(s.lhs)
+    if lt != nil and lt.kind == ChannelType:
+      err(s.lhs.line, "a channel cannot be assigned or copied; " &
+        "use send and recv")
     let root = s.lhs.rootIdent
     if root.kind != IdentExpr:
       err(s.lhs.line, "cannot assign to this expression")
@@ -1940,7 +2040,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       s.rhs.typ = lt
       rt = lt
     else:
-      if s.rhs.kind == CallExpr:
+      if s.rhs.kind in {CallExpr, MethodExpr}:
         c.allowBigRet = true
       rt = c.expectVal(s.rhs)
       if c.coerceOpt(s.rhs, lt):
@@ -2203,6 +2303,9 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       err(s.line, "with is not allowed in func (start/end are side effects)")
     c.markModified(s.name) # start/end write the target through var
     c.delFacts s.name
+    if s.name in c.globals and c.globals[s.name].kind == ChannelType:
+      err(s.line, "a channel is not a with resource; it synchronizes " &
+        "itself (use send and recv)")
     if s.name in c.globals and c.globals[s.name].kind == LockType:
       # Builtin protocol: start = acquire the mutex, end = release it.
       s.typ = c.globals[s.name]
@@ -2291,7 +2394,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         s.value.typ = c.cur.ret
         t = c.cur.ret
       else:
-        if s.value.kind == CallExpr:
+        if s.value.kind in {CallExpr, MethodExpr}:
           c.allowBigRet = true
         t = c.expectVal(s.value)
         if c.coerceOpt(s.value, c.cur.ret):
@@ -2534,8 +2637,9 @@ proc checkRoutine(c: var Ctx, r: Routine) =
     discard
   var paramScope = initTable[string, Sym]()
   for pm in r.params:
-    if pm.typ.kind == LockType:
-      err(r.line, "a Lock cannot be a parameter")
+    if pm.typ.kind in {LockType, ChannelType}:
+      err(r.line, "a " & (if pm.typ.kind == LockType: "Lock" else: "channel") &
+        " cannot be a parameter; name the global directly")
     if pm.isVar and r.kind == FuncRoutine:
       err(r.line, "func parameters are read-only; var parameters are not allowed")
     if pm.name in paramScope or pm.name in c.usedNames:
@@ -2858,7 +2962,37 @@ proc check*(m: Module) =
   var anyThread = false
   for r in m.routines:
     if r.name in used:
-      err(r.line, "duplicate name: '" & r.name & "'")
+      # Overloading: routines may share a name when each one can be
+      # told apart by the kind of its first parameter - close(file)
+      # and close(socket) are two routines with one good name. The
+      # later declarations get unique internal names; calls resolve
+      # by their first argument and are rewritten to those.
+      let src = r.name
+      let first = if src in c.routineTab: c.routineTab[src] else: nil
+      if first == nil or first.kind == ThreadRoutine or first.generic or
+          r.kind == ThreadRoutine or r.generic or src in ["start", "end"]:
+        err(r.line, "duplicate name: '" & r.name & "'")
+      if src notin c.overloads:
+        c.overloads[src] = @[src]
+      if r.params.len == 0:
+        err(r.line, "cannot overload '" & src & "': an overload needs a " &
+          "first parameter to be picked by")
+      let key = dispatchKey(r.params[0].typ)
+      if key == "":
+        err(r.line, "cannot overload '" & src & "' on a first parameter " &
+          "of type " & $r.params[0].typ)
+      for cn in c.overloads[src]:
+        let other = c.routineTab[cn]
+        if other.params.len == 0:
+          err(r.line, "cannot overload '" & src & "': the declaration at " &
+            "line " & $other.line & " takes no parameters")
+        if dispatchKey(other.params[0].typ) == key:
+          err(r.line, "ambiguous overload: '" & src & "' declared at " &
+            "line " & $other.line & " also takes " & key & " first")
+      if r.externLib != "" and r.cname == "":
+        r.cname = src # keep linking against the C symbol, not our suffix
+      r.name = src & "__" & $(c.overloads[src].len + 1)
+      c.overloads[src].add r.name
     used.incl r.name
     c.allRoutines.incl r.name
     if r.generic:
@@ -2892,8 +3026,12 @@ proc check*(m: Module) =
   var lockEcho: HashSet[string]                   # locks held around an echo
   var routineEcho: Table[string, bool]
   var routineLocks: Table[string, HashSet[string]]
+  var routineSends: Table[string, HashSet[string]] # channels it may send on
+  var routineRecvs: Table[string, HashSet[string]] # channels it may recv on
   var curEcho = false
   var curLocks: HashSet[string]
+  var curSends: HashSet[string]
+  var curRecvs: HashSet[string]
 
   proc note(g: string, held: HashSet[string]) =
     if g in acc:
@@ -2908,7 +3046,23 @@ proc check*(m: Module) =
     for lk in held:
       lockEcho.incl lk
 
-  proc mergeCallee(callee: string, held: HashSet[string]) =
+  proc noteBlock(ch: string, op: string, held: HashSet[string], line: int) =
+    # Blocking never happens while a lock is held: a blocked thread
+    # would keep every signaler out of the lock - the lock/channel
+    # deadlock, excluded statically the way lock order excludes the
+    # lock/lock one.
+    if held.len > 0:
+      for hl in held:
+        err(line, "cannot " & op & " on channel '" & ch & "' while " &
+          "holding lock '" & hl & "': blocking while holding a lock " &
+          "can deadlock; move the channel operation outside the with " &
+          "block")
+    if op == "send":
+      curSends.incl ch
+    else:
+      curRecvs.incl ch
+
+  proc mergeCallee(callee: string, held: HashSet[string], line: int) =
     if callee in access:
       for g, ls in access[callee]:
         note(g, held + ls)
@@ -2918,6 +3072,20 @@ proc check*(m: Module) =
       noteEcho(held)
     for lk in routineLocks.getOrDefault(callee, initHashSet[string]()):
       curLocks.incl lk
+    for ch in routineSends.getOrDefault(callee, initHashSet[string]()):
+      if held.len > 0:
+        for hl in held:
+          err(line, "'" & callee & "' may block sending on channel '" &
+            ch & "' and lock '" & hl & "' is held here; blocking while " &
+            "holding a lock can deadlock")
+      curSends.incl ch
+    for ch in routineRecvs.getOrDefault(callee, initHashSet[string]()):
+      if held.len > 0:
+        for hl in held:
+          err(line, "'" & callee & "' may block receiving on channel '" &
+            ch & "' and lock '" & hl & "' is held here; blocking while " &
+            "holding a lock can deadlock")
+      curRecvs.incl ch
 
   proc scanE(e: Expr, held: HashSet[string]) =
     if e.isNil:
@@ -2929,15 +3097,28 @@ proc check*(m: Module) =
       if root.kind == IdentExpr and isPlainGlobal(root.sval):
         note(root.sval, held)
         wr.incl root.sval
-    if e.kind == CallExpr and e.sval in c.routineTab:
-      mergeCallee(e.sval, held)
-      let r2 = c.routineTab[e.sval]
-      for i, arg in e.kids:
-        if i < r2.params.len and r2.params[i].isVar:
-          let root = arg.rootIdent
-          if root.kind == IdentExpr and isPlainGlobal(root.sval):
-            note(root.sval, held)
-            wr.incl root.sval
+        if e.sval in ["send", "recv"] and root.sval in c.globals and
+            c.globals[root.sval].kind == ChannelType:
+          noteBlock(root.sval, e.sval, held, e.line)
+    if e.kind == CallExpr and
+        (e.sval in c.routineTab or e.sval in c.overloads):
+      # This pass runs before types are known, so an overloaded call
+      # merges every candidate - an over-approximation, which is the
+      # sound direction for ownership, locks, and blocking.
+      var callees = @[e.sval]
+      if e.sval in c.overloads:
+        callees = c.overloads[e.sval]
+      for callee in callees:
+        if callee notin c.routineTab:
+          continue
+        mergeCallee(callee, held, e.line)
+        let r2 = c.routineTab[callee]
+        for i, arg in e.kids:
+          if i < r2.params.len and r2.params[i].isVar:
+            let root = arg.rootIdent
+            if root.kind == IdentExpr and isPlainGlobal(root.sval):
+              note(root.sval, held)
+              wr.incl root.sval
     for k in e.kids:
       scanE(k, held)
 
@@ -2963,8 +3144,8 @@ proc check*(m: Module) =
         if isPlainGlobal(s.name):
           note(s.name, held)
           wr.incl s.name
-        mergeCallee("start", held)
-        mergeCallee("end", held)
+        mergeCallee("start", held, s.line)
+        mergeCallee("end", held, s.line)
     else:
       discard
     for st in s.body:
@@ -2981,12 +3162,16 @@ proc check*(m: Module) =
     wr = initHashSet[string]()
     curEcho = false
     curLocks = initHashSet[string]()
+    curSends = initHashSet[string]()
+    curRecvs = initHashSet[string]()
     for st in r.body:
       scanS(st, initHashSet[string]())
     access[r.name] = acc
     writes[r.name] = wr
     routineEcho[r.name] = curEcho
     routineLocks[r.name] = curLocks
+    routineSends[r.name] = curSends
+    routineRecvs[r.name] = curRecvs
   c.routineLocks = routineLocks
   c.routineWrites = writes
   for rname, accTab in access:
@@ -2996,6 +3181,7 @@ proc check*(m: Module) =
     c.routineAccess[rname] = names
 
   var accThreads: Table[string, seq[string]]
+  var accInstances: Table[string, int] # thread 4 w() counts as 4 accessors
   var lockProt: Table[string, HashSet[string]]
   var writeThreads: Table[string, HashSet[string]]
   for r in m.routines:
@@ -3004,19 +3190,44 @@ proc check*(m: Module) =
     for g, ls in access[r.name]:
       if g notin accThreads:
         accThreads[g] = @[]
+        accInstances[g] = 0
         lockProt[g] = ls
       else:
         lockProt[g] = lockProt[g] * ls
-      accThreads[g].add r.name
+      accThreads[g].add (if r.instances > 1: r.name & " x" & $r.instances
+        else: r.name)
+      accInstances[g] = accInstances[g] + r.instances
     for g in writes[r.name]:
       if g notin writeThreads:
         writeThreads[g] = initHashSet[string]()
       writeThreads[g].incl r.name
+  # Channels synchronize themselves, so they are exempt from the lock
+  # rule - but they must have both sides: a thread that sends and a
+  # thread that receives (a counted thread's instances count separately).
+  var sendInst: Table[string, int]
+  var recvInst: Table[string, int]
+  for r in m.routines:
+    if r.kind != ThreadRoutine:
+      continue
+    for ch in routineSends[r.name]:
+      sendInst[ch] = sendInst.getOrDefault(ch, 0) + r.instances
+    for ch in routineRecvs[r.name]:
+      recvInst[ch] = recvInst.getOrDefault(ch, 0) + r.instances
   for gd in m.globals:
+    if gd.typ.kind == ChannelType:
+      if sendInst.getOrDefault(gd.name, 0) == 0 or
+          recvInst.getOrDefault(gd.name, 0) == 0 or
+          accInstances.getOrDefault(gd.name, 0) < 2:
+        err(gd.line, "channel '" & gd.name & "' needs a thread that " &
+          "sends and a thread that receives (" &
+          $sendInst.getOrDefault(gd.name, 0) & " sending, " &
+          $recvInst.getOrDefault(gd.name, 0) & " receiving); a channel " &
+          "without both sides waits forever")
+      continue
     if gd.typ.kind == LockType:
       continue
     let g = gd.name
-    if g in accThreads and accThreads[g].len >= 2 and g in writeThreads:
+    if g in accThreads and accInstances[g] >= 2 and g in writeThreads:
       if lockProt[g].len == 0:
         err(gd.line, "shared global '" & g & "' is accessed by threads " &
           accThreads[g].join(", ") & " but not consistently protected; " &
@@ -3078,7 +3289,9 @@ proc check*(m: Module) =
       for u in users:
         rn = u
       let rr = c.routineTab[rn]
-      if rr.kind == ThreadRoutine:
+      # A counted thread (thread 4 w()) is several threads: a global or
+      # lock used only by it is still shared between its instances.
+      if rr.kind == ThreadRoutine and rr.instances == 1:
         if gd.typ.kind == LockType:
           err(gd.line, "lock '" & gd.name & "' is only used by thread '" &
             rn & "'; a lock held by a single thread protects nothing - " &
@@ -3091,7 +3304,11 @@ proc check*(m: Module) =
           err(gd.line, "global '" & gd.name & "' is only used by '" & rn &
             "', which always overwrites it before reading; declare it " &
             "as a local there")
-    if gd.typ.kind == LockType and users.len >= 2:
+    var effUsers = 0
+    for u in users:
+      let ur = c.routineTab[u]
+      effUsers += (if ur.kind == ThreadRoutine: ur.instances else: 1)
+    if gd.typ.kind == LockType and effUsers >= 2:
       # A lock earns its place by guarding shared state (or, at minimum,
       # serializing output). Otherwise it only costs cycles.
       var guards: seq[string]

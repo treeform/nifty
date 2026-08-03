@@ -1,0 +1,2 @@
+thread main() =
+  frob 1, 2

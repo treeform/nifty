@@ -1,0 +1,12 @@
+var c: channel[2, int]
+var l: Lock
+
+thread a() =
+  with l:
+    c.send(1)
+
+thread b() =
+  let v = c.recv()
+  echo v
+  with l:
+    echo v

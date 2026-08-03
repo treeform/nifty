@@ -1,0 +1,53 @@
+# Uniform call syntax: b.a(c, d) is a(b, c, d) for any routine, and
+# when a call is the whole statement the parens are optional too -
+# "bump counter" is bump(counter). Builtin container methods keep
+# their names on every type (a routine named add or find is still
+# callable, just not through the dot), so the rewrite is decided by
+# name alone and every proof runs on the plain call.
+
+func double(x: 0 .. 100): 0 .. 200 =
+  return x * 2
+
+func half(x: 0 .. 400): 0 .. 200 =
+  return x / 2
+
+func plus(x: 0 .. 400, y: 0 .. 400): 0 .. 800 =
+  return x + y
+
+func score(s: string[20]): int =
+  var total = 0
+  for b in s:
+    total = total + b
+  return total
+
+func banner(s: string[20]): string[300] =
+  var text: string[300]
+  text.add("== ")
+  text.add(s)
+  text.add(" ==")
+  return text
+
+proc bump(x: var 0 .. 10) =
+  let seen = x                  # var params carry no facts; snapshot first
+  if seen < 10:
+    x = seen + 1
+
+proc show(a: int, b: int) =
+  echo a, " ", b
+
+thread main() =
+  echo double(5)                # the classic spelling
+  echo 5.double()               # uniform: first argument out front
+  echo 20.double().half()       # chains left to right, ranges and all
+  echo 7.double().plus(6.double())  # 14 + 12
+  show 1, 2                     # command: parens optional as a statement
+  show 3.double(), 4            # command and uniform together
+  var counter: 0 .. 10 = 0
+  bump counter                  # command with a var argument
+  counter.bump()                # uniform with a var argument
+  echo counter
+  let greeting: string[20] = "hi"
+  echo greeting.score()         # uniform over a routine, not a method
+  echo greeting.contains("h")   # builtin methods still win their names
+  let loud = greeting.banner()  # a big return (destination passing) too
+  echo loud

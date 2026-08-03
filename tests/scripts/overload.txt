@@ -1,0 +1,5 @@
+closed file 3
+closed socket 4 port 8080
+closed file 3
+42
+hoho

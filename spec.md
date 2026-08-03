@@ -16,9 +16,11 @@ proven does not compile; what compiles cannot trap.
   declarations of fixed size. There is no allocator, no `alloc`/`free`, no
   hidden allocation anywhere. Globals are zero-initialized.
 - **Threads are declared, not created.** Every `thread name() =` declaration
-  is one OS thread. All threads start at program start. There is no
-  `createThread`, no teardown logic; a program is "start once, run until
-  done (or forever)". The program exits when every thread returns.
+  is one OS thread — and `thread 4 name() =` is four of them running the
+  same body: a thread pool is one declaration. All threads start at
+  program start. There is no `createThread`, no teardown logic; a program
+  is "start once, run until done (or forever)". The program exits when
+  every thread returns.
 - **No recursion.** Declare-before-use with no forward declarations makes
   the call graph a DAG by construction; a routine calling itself is
   rejected. Stack use is therefore statically bounded — and big locals
@@ -39,8 +41,7 @@ proven does not compile; what compiles cannot trap.
   included.** C leaves subexpression order unspecified; nifty does not
   inherit that (see Evaluation order).
 - **No pointers.** `var` parameters cover mutable arguments. Long-lived
-  references are array indices. (Planned: `index arr` types — indices
-  bound to a specific global array, born in-range and never dangling.)
+  references are array indices.
 
 ## Imports
 
@@ -110,7 +111,14 @@ transparent — and, with the termination proof, *total*: same arguments,
 same result, always returns, never fails.
 
 A `thread` takes no parameters, returns nothing, and cannot be called.
-Its body is the life of one OS thread.
+Its body is the life of one OS thread. A count before the name —
+`thread 4 worker() =`, an int literal or a `const`, at least 1 —
+declares that many identical threads: the whole thread pool in one
+line. The instances are honest separate threads: each gets its own
+arena, a global used only by a counted thread is still *shared*
+between its instances (the ordinary lock rules apply, and the
+single-thread scope errors do not fire), and the report prints
+`worker x4` with per-instance numbers.
 
 Recursion is rejected in all three: routines must be declared before use,
 there are no forward declarations, and a routine may not call itself.
@@ -129,6 +137,48 @@ expression, because there would be nowhere for the result to live.
 Assigning one straight into a global the callee itself accesses is
 rejected (the callee would be writing its own input); store to a local
 first.
+
+## Uniform call syntax and overloading
+
+Three spellings of the same call, chosen for the reader:
+
+```nim
+close(clientSocket)        # classic
+clientSocket.close()       # uniform: the first argument moves out front
+close clientSocket         # command: parens optional as a statement
+```
+
+- **Uniform call syntax.** `b.a(c, d)` is `a(b, c, d)` for any
+  routine `a` — funcs, procs, generics, and externs alike. The
+  rewrite is decided by name alone, before anything is type-checked,
+  so nothing is ever checked twice: builtin container methods (`add`,
+  `pop`, `find`, `send`, ...) own their names on every type, and a
+  routine with such a name is callable only the classic way. Chains
+  read left to right (`x.double().half()`), and a big return through
+  a dot call still compiles to destination passing. Parens are
+  required — a bare `b.a` stays a field access.
+- **Command syntax.** When a call is the entire statement, parens are
+  optional: `bump counter` is `bump(counter)`. The token after the
+  name must begin an argument (a name or a literal), so operators
+  keep their meaning: `a - 1` is arithmetic, not a call.
+- **Overloading.** Routines may share a name when each can be told
+  apart by the *kind* of its first parameter: `close(file: File)` and
+  `close(socket: Socket)` are two routines with one good name, and
+  `file.close()` picks by what `file` is. Kinds are coarse on
+  purpose — int, float, bool, string, array, seq, queue, set, map, or
+  a specific object type; ranges, capacities, and widths never take
+  part, and two overloads on the same kind are an error at the
+  declaration. Resolution happens once at the call site from the
+  first argument's checked type, the call is rewritten to the one
+  routine picked, and every proof (purity, ownership, locks,
+  recursion, declare-before-use) runs on that routine. The ownership
+  pre-pass, which runs before types are known, soundly
+  over-approximates an overloaded call as "any of them". `start`,
+  `end`, threads, and generics cannot be overloaded.
+
+The point is names: without this, every routine drags its type into
+its name (`closeSocket`, `closeFile`); with it, the type stays in the
+argument where it belongs and the good short word is enough.
 
 ## FFI: binary bindings
 
@@ -349,6 +399,10 @@ fine zero-initialized. `.len` reads create flow facts exactly like ints
 - **One iteration law**: `set` and both maps iterate **ascending by
   key** — iteration order is a function of contents, never of insertion
   history. Seq/string/queue iterate in element order.
+- `channel[N, T]` — a bounded *blocking* queue for handing work
+  between threads: `send` blocks while full, `recv` blocks while
+  empty, at OS level. Not a container in the value sense (global-only,
+  never copied, no iteration) — see Channels below.
 
 ### Optionals
 
@@ -482,6 +536,45 @@ must hold its one common lock). Two more lock rules close the story:
 `nifty report` prints the lock story it proved: each lock, what it
 protects, and which routines take it
 (`qLock: protects q; used by consumer, producer`).
+
+## Channels: the semaphore system
+
+`var jobs: channel[N, T]` is a bounded blocking queue — nifty's
+wakeup primitive. `jobs.send(v)` blocks while the channel is full;
+`jobs.recv()` blocks while it is empty. Blocking is a real OS-level
+sleep on a condition variable (the generated C embeds a mutex and two
+condvars in the channel struct), not a spin: a waiting thread costs
+zero CPU until the other side hands it work.
+
+A channel *is* a counting semaphore — but fused with the data it
+counts, so the token and the payload cannot drift apart: you cannot
+signal without an item, the counter is bounded by `N` (the capacity
+IS the backpressure), and `recv` returns the element type with its
+declared range intact, feeding the ordinary proofs.
+
+Channels mirror `Lock`'s discipline: only a global, never copied,
+never a parameter, field, or element; `send` and `recv` are the whole
+interface (no `len`, no iteration — any peek would race). They
+synchronize themselves, so they are exempt from the shared-global
+lock rule and need no `with`; being internally locked, they work from
+the first instruction of every thread — no startup handshake. Two
+static rules keep the story provable:
+
+- **Both sides must exist.** Some thread must send and some thread
+  must (transitively) receive — a counted thread's instances count
+  separately. A channel with one side missing waits forever: compile
+  error.
+- **Never block while holding a lock.** `send`/`recv` while any lock
+  is held — lexically or through any call chain — is a compile error:
+  a blocked holder would keep every signaler out of the lock. This
+  closes the lock/channel deadlock the same way declaration order
+  closes the lock/lock one.
+
+What remains honest: waiting time is not bounded (a channel whose
+peer never delivers is a quiet program, not a trap — the same
+category as a socket peer that never writes), and channel-only cycles
+(A waits on a channel B fills only after waiting on A's) are not yet
+excluded statically.
 
 ## Evaluation order
 
@@ -670,6 +763,35 @@ no forward prototypes — definitions appear in call order. The host
 compiles; the target only executes. The runtime is libc + pthreads —
 there are no trap helpers, because nothing can trap.
 
+## The undefined-behavior ledger
+
+C is the compilation target, and C's undefined behavior is a contract:
+"the compiler may assume X never happens." A language suffers when its
+semantics *need* X to happen; nifty instead **proves** X never happens,
+so every assumption C's optimizer makes is a theorem we already hold.
+The ledger, clause by clause:
+
+| C undefined behavior | Discharged by |
+| --- | --- |
+| signed overflow | the overflow proofs |
+| division by zero, `INT64_MIN / -1` | the division proofs (both cases) |
+| out-of-bounds access | the index proofs |
+| unsequenced side effects | strict left-to-right lowering |
+| integer promotion traps | operands cast-widened to int64 |
+| uninitialized reads | zero-initialization everywhere |
+| null / dangling pointers | no pointers exist |
+| data races (C11) | the ownership and lock proofs; mutexes are the barriers |
+| float-to-int overflow / NaN casts | the saturating `ni_ftoi`, the only cast emitted |
+| strict aliasing at the arena | compiled with `-fno-strict-aliasing` (the kernel's choice) |
+| FP contraction nondeterminism | compiled with `-ffp-contract=off` |
+| effect-free infinite loops assumed to terminate | `while` is proven terminating; `loop` bodies have effects |
+| mismatched extern prototypes | the binary FFI's explicit trust boundary — the one asterisk |
+
+Alternatives considered: LLVM IR does not remove undefined behavior
+(it has more, explicitly - poison, undef, nsw/nuw); C keeps the three
+things nifty needs - a compiler for every microcontroller ever made, a
+single readable auditable output file, and cc everywhere.
+
 ## The report
 
 `nifty report file.nifty` prints the program's static resource
@@ -698,7 +820,7 @@ constDecl   = "const" ident "=" constExpr NL
 globalDecl  = "var" ident ":" type NL
 objectDecl  = "object" ident "=" NL INDENT { fieldDecl } DEDENT
 fieldDecl   = ident { "," ident } ":" type NL
-routineDecl = ("func" | "proc" | "thread") ident "(" [params] ")" [":" type] "=" body
+routineDecl = ("func" | "proc" | "thread" [cap]) ident "(" [params] ")" [":" type] "=" body
 params      = param { "," param }
 param       = ident { "," ident } ":" ["var"] type
 type        = baseType ["?"]
@@ -706,6 +828,7 @@ baseType    = "int" | "bool" | "Lock"
             | "array" "[" cap "," type "]"
             | "seq" "[" cap "," type "]"
             | "queue" "[" cap "," type "]"
+            | "channel" "[" cap "," type "]"
             | "string" "[" cap "]"
             | "set" "[" rangeType "]"
             | "map" "[" rangeType "," type "]"
@@ -717,8 +840,10 @@ body        = simpleStmt NL | NL INDENT { stmt } DEDENT
 stmt        = simpleStmt NL | ifStmt | whileStmt | forStmt | loopStmt | withStmt
 whileStmt   = "while" expr ["max" constExpr] ":" body
 forStmt     = "for" ident ["," ident] "in" (expr (".." | "..<") expr | expr) ":" body
-simpleStmt  = varDecl | assign | callStmt | "return" [expr] | "break"
+simpleStmt  = varDecl | assign | callStmt | commandStmt
+            | "return" [expr] | "break"
             | "echo" expr { "," expr } | "discard" expr
+commandStmt = ident expr { "," expr }   (next token starts an argument)
 expr        = orExpr; standard precedence:
               or < and < not < (== != < <= > >=) < (+ -) < (* / %) < unary - < postfix
 postfix     = atom { "[" expr "]" | "." ident | "." ident "(" [args] ")" | "(" [args] ")" }
@@ -751,7 +876,13 @@ with real storage widths, char, IEEE float32/float64 sealed off from
 the proofs, saturating .toInt); binary FFI (extern "lib" blocks,
 symbol aliases, proven arguments / untrusted returns, string buffers
 with setLen, link flags);
-`echo`/`discard`; C output
+`echo`/`discard`; counted threads (`thread 4 worker()` — per-instance
+arenas, instance-aware sharing and scope rules, `x4` report lines);
+channels (`channel[N, T]` with blocking `send`/`recv` on embedded
+condvars; both-sides and no-block-under-lock proofs);
+uniform call syntax, command statements, and first-parameter-kind
+overloading;
+C output
 with zero runtime checks; generated `main` with thread spawn/join;
 `nifty report` (globals / stack / arena / ops); splice-once imports with
 cycle rejection and file-tagged errors; gold-master test suite.
