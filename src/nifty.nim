@@ -93,8 +93,11 @@ options:
   var link = ""
   for lib in lastExternLibs:
     link.add " -l" & lib
-  if execShellCmd("cc -O2 -pthread -o " & quoteShell(bin) & " " &
-      quoteShell(cPath) & link) != 0:
+  # -fno-strict-aliasing: the arena's typed views into its byte array
+  # are formally UB under C's effective-type rules; this flag makes the
+  # kernel's choice. -ffp-contract=off: determinism means no silent FMA.
+  if execShellCmd("cc -O2 -pthread -fno-strict-aliasing -ffp-contract=off " &
+      "-o " & quoteShell(bin) & " " & quoteShell(cPath) & link) != 0:
     quit("nifty: C compilation failed", 1)
   echo "built ", bin
   if cmd == "run":

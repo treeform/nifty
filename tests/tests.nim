@@ -74,7 +74,8 @@ proc runTestsInDir(dir, label: string, mode: TestMode, workDir: string) =
       let cPath = workDir / testName & ".c"
       writeFile(cPath, cCode)
       let bin = workDir / testName
-      if execShellCmd("cc -O2 -pthread -o " & quoteShell(bin) & " " &
+      if execShellCmd("cc -O2 -pthread -fno-strict-aliasing " &
+          "-ffp-contract=off -o " & quoteShell(bin) & " " &
           quoteShell(cPath)) != 0:
         echo "  FAIL: " & label & "/" & testName & " (cc failed)"
         testsFailed += 1
