@@ -1,5 +1,9 @@
 ## Checks thread startup rollback and stdout failure diagnostics.
-import std/[os, osproc, streams, strutils]
+import std/[os, osproc, strutils]
+when defined(windows):
+  import std/winlean
+else:
+  import std/streams
 import ../src/nifty
 import ../src/nifty/[ctoolchains, lowering, nativeplatforms,
   nativeruntime]
@@ -50,6 +54,70 @@ proc injectedStart(handle: var ThreadHandle, start: NativeThreadStart,
     return 1
   startNativeThread(handle, start, argument)
 
+when defined(windows):
+  proc closeWinHandle(handle: var winlean.Handle) =
+    ## Closes one owned Windows handle exactly once.
+    if handle != 0 and handle != INVALID_HANDLE_VALUE:
+      doAssert winlean.closeHandle(handle) != 0
+      handle = 0
+
+  proc runBrokenPipe(executable: string): tuple[status: int,
+      diagnostic: string] =
+    ## Starts a child with an inherited stdout pipe that has no reader.
+    var
+      attributes = SECURITY_ATTRIBUTES(
+        nLength: int32(sizeof(SECURITY_ATTRIBUTES)), bInheritHandle: 1)
+      inputRead, inputWrite: winlean.Handle
+      outputRead, outputWrite: winlean.Handle
+      errorRead, errorWrite: winlean.Handle
+      process: PROCESS_INFORMATION
+    try:
+      doAssert createPipe(inputRead, inputWrite, attributes, 0) != 0
+      doAssert createPipe(outputRead, outputWrite, attributes, 0) != 0
+      doAssert createPipe(errorRead, errorWrite, attributes, 0) != 0
+      closeWinHandle(inputWrite)
+      closeWinHandle(outputRead)
+      var startup = STARTUPINFO(
+        cb: int32(sizeof(STARTUPINFO)),
+        dwFlags: STARTF_USESTDHANDLES,
+        hStdInput: inputRead,
+        hStdOutput: outputWrite,
+        hStdError: errorWrite)
+      let
+        application = newWideCString(executable)
+        command = newWideCString(quoteShellWindows(executable))
+      doAssert createProcessW(application, command, nil, nil, 1,
+        NORMAL_PRIORITY_CLASS, nil, nil, startup, process) != 0
+      closeWinHandle(inputRead)
+      closeWinHandle(outputWrite)
+      closeWinHandle(errorWrite)
+      let waited = waitForSingleObject(process.hProcess, 5000)
+      if waited == WAIT_TIMEOUT:
+        discard terminateProcess(process.hProcess, 1)
+        discard waitForSingleObject(process.hProcess, 5000)
+      doAssert waited == WAIT_OBJECT_0,
+        "broken pipe child exceeded five seconds"
+      var code: int32
+      doAssert getExitCodeProcess(process.hProcess, code) != 0
+      result.status = int(code)
+      var buffer: array[512, char]
+      while true:
+        var count: int32
+        if winlean.readFile(errorRead, addr buffer[0],
+            int32(buffer.len), addr count, nil) == 0 or count == 0:
+          break
+        for i in 0 ..< int(count):
+          result.diagnostic.add buffer[i]
+    finally:
+      closeWinHandle(inputRead)
+      closeWinHandle(inputWrite)
+      closeWinHandle(outputRead)
+      closeWinHandle(outputWrite)
+      closeWinHandle(errorRead)
+      closeWinHandle(errorWrite)
+      closeWinHandle(process.hThread)
+      closeWinHandle(process.hProcess)
+
 let target = when defined(arm64): Arm64Target else: Amd64Target
 let checked = checkedModule(StartupSource, "startup.nifty")
 let program = buildNativeProgram(lowerNative(checked, "startup"), target)
@@ -99,14 +167,19 @@ try:
         let outputProgram = buildNativeProgram(
           lowerNative(checkedOutput, "output"), target)
         writeStandalone(outputProgram, path)
-    let child = startProcess(pipeBinary, options = {})
-    outputStream(child).close()
-    let status = waitForExit(child, 5000)
+    let (status, diagnostic) = when defined(windows):
+        runBrokenPipe(pipeBinary)
+      else:
+        block:
+          let child = startProcess(pipeBinary, options = {})
+          outputStream(child).close()
+          let status = waitForExit(child, 5000)
+          let diagnostic = errorStream(child).readAll()
+          close(child)
+          (status, diagnostic)
     doAssert status != 0 and status != -1,
       backend & " closed pipe status " & $status
-    let diagnostic = errorStream(child).readAll()
     doAssert "nifty: stdout write failed" in diagnostic, diagnostic
-    close(child)
     when not defined(windows):
       let diagnosticPath = directory / (backend & "-flush.txt")
       let command = "exec 1>&-; exec " & quoteShell(binary) &
