@@ -13,6 +13,8 @@ import ../src/nifty/[common, types, lexer, parser, checker, codegen,
 
 const
   Source = """
+extern "libc":
+  proc foreignPuts "puts"(text: string[16]): int32
 proc argument(value: int): int =
   echo "arg", value
   return value
@@ -20,6 +22,8 @@ proc change(value: var int, next: int): int =
   value = next
   return next
 thread main() =
+  discard foreignPuts("first\0")
+  echo "second"
   echo "prefix", argument(1), argument(2)
   var value: int = 0
   echo change(value, 1), " ", value, " ", change(value, 2)
@@ -31,8 +35,19 @@ thread main() =
   echo -9223372036854775807 - 1, " ", 9223372036854775807
   echo ""
 """
-  Expected = "arg1\narg2\nprefix12\n1 1 2\na\0b\0A true false 1.25 -2.5\n" &
+  Expected = "first\nsecond\narg1\narg2\nprefix12\n1 1 2\na\0b\0A true false 1.25 -2.5\n" &
     "-9223372036854775808 9223372036854775807\n\n"
+  InteropSource = """
+import console
+extern "libc":
+  proc foreignPuts "puts"(text: string[16]): int32
+thread main() =
+  discard foreignPuts("first\0")
+  discard write("write\n")
+  discard foreignPuts("third\0")
+  echo "echo"
+"""
+  InteropExpected = "first\nwrite\nthird\necho\n"
   AtomicSource = """
 thread 4 first() =
   var text: string[9000]
@@ -97,11 +112,13 @@ proc assertAtomic(output: string) =
   doAssert first == 4 and second == 4
 
 try:
-  for (name, text) in [("values", Source), ("atomic", AtomicSource)]:
+  for (name, text) in [("values", Source), ("interop", InteropSource),
+      ("atomic", AtomicSource)]:
     # These APIs intentionally bypass the facade and its import loader.
     srcFiles = @[name & ".nifty"]
-    let module = parse(tokenize(text))
-    check(module)
+    let module = if name == "interop": checkedModule(text, name & ".nifty")
+      else: parse(tokenize(text))
+    if name != "interop": check(module)
     let original = module.routines[0]
     let bindings = module.semantics.bindings.len
     for optimization in NativeOptimization:
@@ -132,12 +149,19 @@ try:
       let target = when defined(arm64): Arm64Target else: Amd64Target
       let program = buildNativeProgram(plan, target, optimization = optimization)
       let noutput = capture(decodeNative(encodeNative(program)))
-      if name == "values":
-        doAssert coutput == Expected, coutput.escape()
-        doAssert noutput == Expected, noutput.escape()
-      else:
+      if name == "atomic":
         assertAtomic(coutput)
         assertAtomic(noutput)
+      else:
+        let expected = if name == "values": Expected else: InteropExpected
+        doAssert coutput == expected, coutput.escape()
+        when defined(windows):
+          # Foreign puts runs before the first console write selects binary
+          # descriptor mode. Its initial newline may therefore be CRLF.
+          doAssert noutput in [expected, "first\r\n" & expected[6 .. ^1]],
+            noutput.escape()
+        else:
+          doAssert noutput == expected, noutput.escape()
       doAssert module.routines[0] == original
       doAssert module.semantics.bindings.len == bindings
       doAssert srcFiles[0] == name & ".nifty"

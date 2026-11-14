@@ -21,6 +21,12 @@ proc consoleWrite(text: string): bool =
   return true
 
 
+type ConsoleStream = opaque
+
+extern "libc":
+  proc consoleFlush "fflush"(stream: ConsoleStream): int32
+
 extern "nifty":
+  proc consoleStream "nifty_stdout_stream"(): ConsoleStream
   proc consoleLock "nifty_stdout_lock"()
   proc consoleUnlock "nifty_stdout_unlock"()

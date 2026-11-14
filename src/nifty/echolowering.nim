@@ -90,6 +90,8 @@ proc lowerEcho*(source: Module, filename = ""): Module =
       inc serial
       result = "niftyEchoSupport" & $serial & "_" & name
     used.incl(result)
+  for definition in library.types:
+    renamed[definition.name] = unique(definition.name)
   for routine in library.routines:
     renamed[routine.name] = unique(routine.name)
   for constant in library.consts:
@@ -116,11 +118,17 @@ proc lowerEcho*(source: Module, filename = ""): Module =
     renameBody(routine.body)
   for constant in library.consts.mitems:
     constant.name = renamed[constant.name]
+  for definition in library.types.mitems:
+    definition.name = renamed[definition.name]
+    definition.typ.name = definition.name
 
   new(result)
   result[] = source[]
   result.globals = @[]
   for global in source.globals: result.globals.add(global)
+  result.types = @[]
+  result.types.add(source.types)
+  result.types.add(library.types)
   result.consts = @[]
   result.consts.add(source.consts)
   result.consts.add(library.consts)

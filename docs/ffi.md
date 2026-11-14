@@ -121,10 +121,10 @@ to right, before starting the line. The backends expand it into ordinary Nifty
 procedures from `std/_echo.nifty`; those procedures use the same bounded foreign
 byte writes as `console`. Integer, character, boolean, and float formatting
 use fixed storage. Dynamic strings are borrowed for output. The standard ABI
-bridge supplies only stdout synchronization and a format-only float adapter;
+bridge supplies only stdout lookup, synchronization, and a format-only float adapter;
 it contains no output routine.
 
-Console output uses unbuffered descriptor writes. When mixing it with foreign
-buffered stdio such as `printf`, callers must flush the foreign stream before
-calling `write` or `echo` to preserve output order. The foreign declaration's
-stream lifetime and synchronization contracts remain the caller's responsibility.
+Console output uses unbuffered descriptor writes. Under the stdout stream lock,
+`write` and `echo` first call ordinary foreign `fflush` to preserve the order of
+preceding buffered stdio such as `puts` and `printf`. Native Windows stream
+lookup and synchronization use the same UCRT instance as ordinary libc FFI.

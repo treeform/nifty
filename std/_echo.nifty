@@ -17,6 +17,8 @@ proc echoFailure() =
 
 proc echoStart() =
   consoleLock()
+  if consoleFlush(consoleStream()) != 0:
+    echoFailure()
 
 proc echoText(text: string) =
   let written = consoleWrite(text)
