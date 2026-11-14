@@ -1,0 +1,57 @@
+# Wrapping preserves the source storage width before converting the payload.
+object Small =
+  value: int8
+
+var global: int8
+
+proc globalValue(): int? =
+  return global
+
+func returned(value: int8): int? =
+  return value
+
+proc borrowed(value: var int8): int? =
+  let output: int? = value
+  value = 0
+  return output
+
+func argument(value: int?): int =
+  return value.or(0)
+
+thread main() =
+  let plain: int8 = -9
+  let wrapped: int? = plain
+  echo wrapped.or(0)
+  var changed: int?
+  changed = plain
+  echo changed.or(0)
+  echo returned(plain).or(0)
+  echo argument(plain)
+
+  var small: Small
+  small.value = -17
+  let field: int? = small.value
+  echo field.or(0)
+  var items: array[2, int8]
+  items[0] = -23
+  items[1] = 42
+  let indexed: int? = items[0]
+  echo indexed.or(0)
+  echo borrowed(items[0]).or(0)
+
+  global = -31
+  echo globalValue().or(0)
+  let narrow: int8? = -47
+  if narrow.ok:
+    let wide: int? = narrow
+    echo wide.or(0)
+
+  let medium: int16 = -1234
+  let wideMedium: int? = medium
+  echo wideMedium.or(0)
+  let large: int32 = -12345678
+  let wideLarge: int? = large
+  echo wideLarge.or(0)
+  let unsigned: uint8 = 255
+  let wideUnsigned: int? = unsigned
+  echo wideUnsigned.or(0)

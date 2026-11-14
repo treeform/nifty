@@ -207,6 +207,7 @@ proc coerceOpt(c: var Ctx, e: Expr, target: Typ): bool =
       err(e.line, "cannot prove value (" & rangeStr(exprFact(e)) &
         ") fits " & $deOpt(target) & "; guard or clamp first")
     e.wrapOpt = true
+    e.wrapSource = e.typ
     e.typ = target
     return true
   false
