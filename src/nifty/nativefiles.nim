@@ -11,7 +11,7 @@ const
 
 type
   NativePlatform* = enum
-    MacosPlatform, LinuxPlatform
+    MacosPlatform, LinuxPlatform, WindowsPlatform
   NativeProgram* = object
     image*: NativeImage
     plan*: NativePlan
@@ -30,7 +30,8 @@ type
 
 const NativeHostPlatform* = when defined(macosx): MacosPlatform
   elif defined(linux): LinuxPlatform
-  else: {.error: "Native runtime supports macOS and Linux".}
+  elif defined(windows): WindowsPlatform
+  else: {.error: "Native runtime supports macOS, Linux, and Windows".}
 
 proc putNumber(data: var string, number: uint64) =
   ## Appends one unsigned little endian integer.

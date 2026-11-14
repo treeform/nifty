@@ -11,8 +11,8 @@
 
 import
   std/[algorithm, os, osproc, strutils],
-  ../src/nifty,
-  test_memory
+  ../src/nifty, ../src/nifty/ctoolchains,
+  test_memory, fixtures
 
 var testsPassed* = 0
 var testsFailed* = 0
@@ -33,6 +33,9 @@ proc runTestsInDir(dir, label: string, mode: TestMode, workDir: string) =
       paths.add path
   paths.sort()
   for path in paths:
+    if not supportsFixture(path):
+      echo "  SKIP: " & label & "/" & path.extractFilename & " (platform)"
+      continue
     if path.extractFilename().startsWith("_"):
       continue # helper module for an import test, not a test itself
     let testName = path.extractFilename().changeFileExt("")
@@ -48,7 +51,7 @@ proc runTestsInDir(dir, label: string, mode: TestMode, workDir: string) =
     except NiftyError as e:
       # The compiler prints complete paths; golds keep just the file
       # names, so strip the directory we are standing in.
-      compileError = e.msg.replace(path.parentDir & "/", "")
+      compileError = e.msg.replace(path.parentDir & DirSep, "")
 
     case mode
     of tmCompileError:
@@ -74,14 +77,13 @@ proc runTestsInDir(dir, label: string, mode: TestMode, workDir: string) =
         continue
       let cPath = workDir / testName & ".c"
       writeFile(cPath, cCode)
-      let bin = workDir / testName
-      if execShellCmd("cc -O2 -pthread -fno-strict-aliasing " &
-          "-ffp-contract=off -o " & quoteShell(bin) & " " &
-          quoteShell(cPath)) != 0:
+      let bin = workDir / (testName &
+        (when defined(windows): ".exe" else: ""))
+      if execShellCmd(cCompileCommand(cPath, bin, lastExternLibs)) != 0:
         echo "  FAIL: " & label & "/" & testName & " (cc failed)"
         testsFailed += 1
         continue
-      let (output, code) = execCmdEx(quoteShell(bin))
+      let (output, code) = runFixture(bin)
       let actual = output.replace("\r\n", "\n").strip()
       if mode == tmRun:
         if code == 0 and actual == expected:
@@ -121,7 +123,7 @@ proc runReportTests(dir, label: string) =
     let expected = readFile(expectedPath).replace("\r\n", "\n").strip()
     try:
       let actual = reportFor(readFile(path), path,
-        path.parentDir).strip().replace(path.parentDir & "/", "")
+        path.parentDir).strip().replace(path.parentDir & DirSep, "")
       if actual == expected:
         echo "  PASS: " & label & "/" & testName
         testsPassed += 1

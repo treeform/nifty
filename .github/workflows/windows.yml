@@ -1,0 +1,46 @@
+name: Windows AMD64
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: treeform/setup-nim-action@v6
+      - name: Check and build the compiler
+        run: |
+          nim check src/nifty.nim
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          nim r tools/build.nim
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Run language and memory golden tests
+        run: nim r tests/tests.nim
+      - name: Run native component tests
+        run: |
+          $checks = Get-ChildItem tests/test_*.nim | Where-Object { $_.BaseName -notin @('test_native', 'test_windowscli', 'test_memory') }
+          foreach ($check in $checks) {
+            nim r $check.FullName
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - name: Verify C and AMD64 parity in both optimization modes
+        run: |
+          nim r tests/test_native.nim "$PWD/nifty.exe" --opt:none
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          nim r tests/test_native.nim "$PWD/nifty.exe" --opt:speed
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Verify Windows CLI output paths
+        run: nim r tests/test_windowscli.nim "$PWD/nifty.exe"
+      - name: Check benchmark tooling
+        run: |
+          python benchmarks/test_runner.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tests/test_optimization_benchmark.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

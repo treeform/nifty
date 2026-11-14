@@ -2,6 +2,7 @@
 ## Run: nim r tests/test_native.nim /path/to/nifty [--opt:none|speed].
 import
   std/[algorithm, json, os, osproc, streams, strtabs, strutils, times]
+import fixtures
 
 type
   Result = tuple[output: string, code: int]
@@ -10,7 +11,8 @@ type
 
 proc run(executable: string, args: seq[string], isolated = false): Result =
   ## Run with a deadline, optionally removing compilers from PATH.
-  var environment = newStringTable(modeCaseSensitive)
+  var environment = newStringTable(
+    when defined(windows): modeCaseInsensitive else: modeCaseSensitive)
   for key, value in envPairs():
     environment[key] = value
   if isolated:
@@ -48,7 +50,7 @@ proc copyFixtures(source, destination: string) =
       copyFile(path, destination / path.extractFilename)
 
 proc executableTarget(path, target: string): bool =
-  ## Confirm emitted Darwin executables have the requested machine type.
+  ## Confirms emitted Mach-O, ELF, or PE executables have the requested CPU.
   let bytes = readFile(path)
   if bytes.len < 8:
     return false
@@ -59,6 +61,17 @@ proc executableTarget(path, target: string): bool =
     if bytes[0 .. 3] == "\x7fELF" and bytes.len >= 20:
       let cpu = if target == "arm64": '\xb7' else: '\x3e'
       return bytes[18] == cpu and bytes[19] == '\x00'
+  when defined(windows):
+    if bytes.len >= 64 and bytes[0 ..< 2] == "MZ":
+      var pe = 0'u64
+      for i in 0 ..< 4:
+        pe = pe or (uint64(byte(bytes[60 + i])) shl (8 * i))
+      if pe <= uint64(bytes.len - 26):
+        let offset = int(pe)
+        let machine = if target == "arm64": "\x64\xaa" else: "\x64\x86"
+        return bytes[offset ..< offset + 4] == "PE\0\0" and
+          bytes[offset + 4 ..< offset + 6] == machine and
+          bytes[offset + 24 ..< offset + 26] == "\x0b\x02"
   false
 
 proc imageTarget(path, target: string): bool =
@@ -117,7 +130,7 @@ proc main() =
       "_" & $int(epochTime()))
   doAssert fileExists(compiler), "Compiler does not exist: " & compiler
   createDir(work)
-  var passed, failed, emitted = 0
+  var passed, failed, emitted, images, skipped = 0
   for name in ["scripts", "runtime", "errors", "syntax", "native"]:
     if dirExists(root / name):
       copyFixtures(root / name, work / name)
@@ -130,17 +143,27 @@ proc main() =
         elif name == "runtime": Trap
         else: Run
       for path in fixtures(work / name):
+        if not supportsFixture(path):
+          echo "SKIP ", target, "/", name, "/", path.extractFilename,
+            ": fixture requires another operating system"
+          inc skipped
+          continue
         let
           label = target & "/" & name & "/" & path.extractFilename
           expectedPath = path.changeFileExt(".txt")
         doAssert fileExists(expectedPath), "Missing golden: " & expectedPath
         let
           expected = normalized(readFile(expectedPath))
-          binary = path.changeFileExt("." & target)
-        var buildArgs = @["build", path, "--backend:" & target, "-o", binary]
+          imageOnly = target != "c" and not runnable
+          binary = path.changeFileExt("." & target &
+            (if imageOnly: ".niftybin"
+             else: (when defined(windows): ".exe" else: ".bin")))
+        var arguments = @["build", path, "--backend:" & target, "-o", binary]
+        if imageOnly:
+          arguments.add "--emit-native"
         if target != "c":
-          buildArgs.add optimizationArgs
-        let built = run(compiler, buildArgs, isolated = target != "c")
+          arguments.add optimizationArgs
+        let built = run(compiler, arguments, isolated = target != "c")
         if mode == Reject:
           var actual = normalized(built.output)
             .replace(path.parentDir & DirSep, "")
@@ -157,6 +180,13 @@ proc main() =
           inc failed
           continue
         if target != "c":
+          if imageOnly:
+            if imageTarget(binary, target):
+              inc images
+            else:
+              echo "FAIL ", label, ": wrong native image architecture"
+              inc failed
+            continue
           if not executableTarget(binary, target):
             echo "FAIL ", label, ": wrong executable architecture"
             inc failed
@@ -218,9 +248,32 @@ proc main() =
       echo "FAIL report/", target, ": ", reported.output
       inc failed
 
+  # Do not normalize this output: CR, LF, and zero bytes are language data.
+  let binarySource = work / "binary_output.nifty"
+  writeFile(binarySource, "thread main() =\n  echo \"a\\0b\\r\\nc\\nd\"\n")
+  for target in ["c", "arm64", "amd64"]:
+    if target != "c" and not canExecute(target):
+      continue
+    let binary = work / ("binary_output_" & target &
+      (when defined(windows): ".exe" else: ".bin"))
+    var arguments = @["build", binarySource, "--backend:" & target,
+      "-o", binary]
+    if target != "c":
+      arguments.add optimizationArgs
+    let built = run(compiler, arguments, isolated = target != "c")
+    if built.code == 0:
+      let command = executionArgs(binary, target)
+      let executed = run(command.exe, command.args, isolated = true)
+      if executed.code == 0 and executed.output == "a\0b\r\nc\nd\n":
+        inc passed
+        continue
+    echo "FAIL ", target, "/binary_output: bytes were not preserved"
+    inc failed
+
   echo "Native backend tests (opt=", optimization, "): ",
     passed, " passed, ", failed,
-    " failed, ", emitted, " native executables inspected"
+    " failed, ", emitted, " native executables inspected, ", images,
+    " cross-target images inspected, ", skipped, " platform skips"
   if failed > 0:
     echo "Artifacts retained at ", work
     quit(1)

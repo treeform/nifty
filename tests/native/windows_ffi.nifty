@@ -1,0 +1,40 @@
+# platforms: windows
+# Exercise DLL symbols, integer widths, pointer arguments, and C math.
+object SystemTime =
+  year: uint16
+  month: uint16
+  weekday: uint16
+  day: uint16
+  hour: uint16
+  minute: uint16
+  second: uint16
+  millisecond: uint16
+
+extern "kernel32":
+  proc GetCurrentProcessId(): uint32
+  proc GetSystemTime(value: var SystemTime)
+  proc GetTickCount64(): uint64
+
+extern "libc":
+  proc memset(text: var string[32], value: int32, count: uint64): uint64
+
+extern "m":
+  proc sqrt(value: float64): float64
+  proc pow(base: float64, exponent: float64): float64
+  proc floor(value: float64): float64
+  proc round(value: float64): float64
+
+thread main() =
+  echo GetCurrentProcessId() > 0
+  var instant: SystemTime
+  GetSystemTime(instant)
+  echo instant.year >= 2020
+  echo instant.month >= 1 and instant.month <= 12
+  echo GetTickCount64() >= 0
+  var text: string[32]
+  discard memset(text, 120, 3)
+  text.setLen(3)
+  echo text
+  echo sqrt(2.25)
+  echo pow(2.0, 5.0)
+  echo floor(1.9).toInt, " ", round(-1.5).toInt

@@ -22,6 +22,8 @@ var
   towardZero {.importc: "FE_TOWARDZERO", header: "<fenv.h>".}: cint
 when defined(macosx):
   proc errnoLocation(): ptr cint {.importc: "__error", header: "<errno.h>".}
+elif defined(windows):
+  proc errnoLocation(): ptr cint {.importc: "_errno", header: "<errno.h>".}
 else:
   proc errnoLocation(): ptr cint
     {.importc: "__errno_location", header: "<errno.h>".}
@@ -51,9 +53,15 @@ verifyIr(module)
 let image = emitAmd64Ir(module, MaxNativeBytes)
 echo "AMD64 binary64 floor/round image: ", image.bytes.len, " bytes"
 
-when defined(amd64):
+when defined(windows):
+  # UCRT round preserves signaling NaNs; the native operation quiets them.
+  # Windows deliberately retains CRT calls in specializeNativeMaths.
+  echo "Windows CRT floor/round parity uses guarded host-call tests; " &
+    "native libm replacement stays disabled"
+elif defined(amd64):
   let
-    library = loadLib(when defined(macosx): "libm.dylib" else: "libm.so.6")
+    library = loadLib(when defined(windows): "ucrtbase.dll"
+      elif defined(macosx): "libm.dylib" else: "libm.so.6")
     floorLib = cast[Math64](symAddr(library, "floor"))
     roundLib = cast[Math64](symAddr(library, "round"))
   doAssert library != nil and floorLib != nil and roundLib != nil

@@ -24,6 +24,14 @@ bind private C identifiers to the requested external symbols. This keeps the
 declared binary shapes independent of prototypes in runtime headers and lets
 the C compiler provide the target's symbol prefix.
 
+On Windows AMD64, `nim r tools/build.nim` builds `nifty.exe`. Native builds
+use Windows threads, critical sections, condition variables, and executable
+memory; no pthread runtime or external build tools are needed to compile or
+run native programs. The C reference backend requires a MinGW GCC or Clang
+toolchain with pthread support. Set `CC` to choose a compiler; otherwise
+Nifty looks for `cc`, `gcc`, then `clang`. Windows C builds link their
+toolchain runtimes statically.
+
 ## Select a backend
 
 ```sh
@@ -174,15 +182,22 @@ runtime would, but requires no compiler during native program builds. A
 different-architecture template can be supplied with `NIFTY_RUNTIME_AMD64` or
 `NIFTY_RUNTIME_ARM64`, or placed beside the compiler under
 `nifty-runtime-amd64` or `nifty-runtime-arm64`.
+Windows runtime template filenames have an `.exe` suffix.
 
 Native images use the `NIFTYN02` format, which includes ownership metadata.
 Rebuild the compiler and runtime templates together after this update, and
 re-emit images created with the earlier format.
 
 macOS packaging uses `/usr/bin/codesign` for an ad-hoc signature. ARM64 and
-AMD64 execution are tested on macOS, with AMD64 run through Rosetta. Other OS
-targets need their own runtime validation; the native runtime currently uses
-POSIX threads.
+AMD64 execution are tested on macOS, with AMD64 run through Rosetta.
+Windows AMD64 packaging validates a PE32+ runtime and appends the native
+image to an ordinary Windows executable. Linux and macOS use POSIX threads;
+Windows uses the native OS synchronization APIs and CRT thread startup.
+
+Windows binary FFI resolves `libc` and `m` symbols from the system CRT DLLs,
+and other library names as DLLs, for example `extern "kernel32"`.
+Declarations must use the Windows ABI and available Windows symbols.
+POSIX calls and Darwin socket structures are not emulated.
 
 ## Validation
 
@@ -218,6 +233,15 @@ numeric, evaluation-order, and arena cases through C, ARM64, and AMD64.
 It verifies native executable architecture and builds and runs native programs
 with compiler tools removed from `PATH`. C remains a useful independent
 reference alongside the expected results.
+On Windows, use `nim r tests/test_native.nim "$PWD/nifty.exe"`.
+OS-specific FFI fixtures carry explicit platform markers and are reported
+as skipped on other systems. Windows has a DLL/CRT/math fixture of its own.
+Windows keeps `floor` and `round` as CRT calls: UCRT's signaling-NaN behavior
+differs from the native replacement. Guarded math tests check that Windows
+retains those calls, results, and floating exception behavior.
+Unavailable CPUs are checked by emitting and validating native images,
+without requiring a foreign runtime template. The harness also checks exact
+output bytes, including embedded zero bytes and explicit CR/LF sequences.
 
 ## Benchmarks
 

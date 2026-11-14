@@ -99,9 +99,15 @@ def testCCompiler():
       assert defaults.c_compiler == baseline
       selected = Comparison.parseArguments(arguments + ["--c-compiler", str(emitter)])
       assert selected.c_compiler == emitter
-      for invalid in (root / "missing", root / "not-executable"):
-        if invalid.name == "not-executable":
-          invalid.write_text("invalid")
+      invalidPaths = [root / "missing", root / "directory"]
+      invalidPaths[1].mkdir()
+      # Windows does not implement POSIX executable permission bits.
+      if Comparison.os.name != "nt":
+        notExecutable = root / "not-executable"
+        notExecutable.write_text("invalid")
+        notExecutable.chmod(0o600)
+        invalidPaths.append(notExecutable)
+      for invalid in invalidPaths:
         with redirect_stderr(io.StringIO()):
           try:
             Comparison.parseArguments(arguments + ["--c-compiler", str(invalid)])

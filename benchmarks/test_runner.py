@@ -2,6 +2,7 @@
 """Exercise benchmark protocol and artifact correctness without compiler builds."""
 
 from contextlib import redirect_stderr
+from unittest.mock import patch
 import io
 import hashlib
 import json
@@ -54,13 +55,16 @@ def testProtocol():
 def testConfiguration():
   """Require unique explicit constants and bounded command-line inputs."""
   source = "const ImageSize = 64\nconst Repetitions = 1\nconst EmitPixels = 0\nconst ClockId = 6\n"
-  changed = run.configuredSource(source, 4, 3)
-  assert changed == ("const ImageSize = 4\nconst Repetitions = 3\n"
-                     "const EmitPixels = 1\n"
-                     f"const ClockId = {run.time.CLOCK_MONOTONIC}\n")
-  assert source.startswith("const ImageSize = 64\n")
-  expectError(lambda: run.configuredSource(source + source, 4, 3))
-  expectError(lambda: run.configuredSource("const ImageSize = 64\n", 4, 3))
+  # Validate POSIX source substitution even when the tests run on Windows.
+  with patch.object(run.time, "CLOCK_MONOTONIC",
+                    getattr(run.time, "CLOCK_MONOTONIC", 1), create=True):
+    changed = run.configuredSource(source, 4, 3)
+    assert changed == ("const ImageSize = 4\nconst Repetitions = 3\n"
+                       "const EmitPixels = 1\n"
+                       f"const ClockId = {run.time.CLOCK_MONOTONIC}\n")
+    assert source.startswith("const ImageSize = 64\n")
+    expectError(lambda: run.configuredSource(source + source, 4, 3))
+    expectError(lambda: run.configuredSource("const ImageSize = 64\n", 4, 3))
   options = run.parseArguments(["--backend", "c,amd64", "--backend", "c"])
   assert options.backend == ["c", "amd64"]
   assert options.samples == 5 and options.warmups == 1 and options.size == 64

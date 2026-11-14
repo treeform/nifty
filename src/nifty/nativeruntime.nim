@@ -1,15 +1,12 @@
 ## Executes native code against bounded startup storage and host services.
-import std/[dynlib, os, posix]
-import common, types, nativefiles, nativecontainers, nativebundles
+import std/[dynlib, os]
+import common, types, nativefiles, nativecontainers, nativebundles,
+  nativeplatforms
 import backend/[context, memories]
 export nativefiles, nativebundles, nativecontainers
 
 type
   NativeEntry = proc(context, args, output, arena: pointer) {.cdecl.}
-  NativeMutex {.importc: "pthread_mutex_t", header: "<pthread.h>",
-    bycopy.} = object
-  NativeCondition {.importc: "pthread_cond_t", header: "<pthread.h>",
-    bycopy.} = object
   NativeChannel = object
     address: pointer
     mutex: NativeMutex
@@ -20,34 +17,26 @@ type
     memory: NativeMemory
     channels: ptr UncheckedArray[NativeChannel]
     channelCount: int
-  ThreadHandle = object
-    value: Pthread
   NativeThread = object
     entry: NativeEntry
     context: ptr NativeContext
     arena: pointer
 
-proc pthread_mutex_init(mutex: ptr NativeMutex, attributes: pointer): cint
-    {.importc, header: "<pthread.h>".}
-proc pthread_mutex_destroy(mutex: ptr NativeMutex): cint
-    {.importc, header: "<pthread.h>".}
-proc pthread_mutex_lock(mutex: ptr NativeMutex): cint
-    {.importc, header: "<pthread.h>".}
-proc pthread_mutex_unlock(mutex: ptr NativeMutex): cint
-    {.importc, header: "<pthread.h>".}
-proc pthread_cond_init(condition: ptr NativeCondition, attributes: pointer): cint
-    {.importc, header: "<pthread.h>".}
-proc pthread_cond_destroy(condition: ptr NativeCondition): cint
-    {.importc, header: "<pthread.h>".}
-proc pthread_cond_signal(condition: ptr NativeCondition): cint
-    {.importc, header: "<pthread.h>".}
-proc pthread_cond_wait(condition: ptr NativeCondition,
-    mutex: ptr NativeMutex): cint {.importc, header: "<pthread.h>".}
-
 var cStdout {.importc: "stdout", header: "<stdio.h>".}: File
 
-proc flockfile(file: File) {.importc, header: "<stdio.h>".}
-proc funlockfile(file: File) {.importc, header: "<stdio.h>".}
+when defined(windows):
+  proc flockfile(file: File)
+      {.importc: "_lock_file", header: "<stdio.h>".}
+  proc funlockfile(file: File)
+      {.importc: "_unlock_file", header: "<stdio.h>".}
+  proc fileNumber(file: File): cint
+      {.importc: "_fileno", header: "<stdio.h>".}
+  proc setMode(descriptor, mode: cint): cint
+      {.importc: "_setmode", header: "<io.h>".}
+  proc flush(file: File): cint {.importc: "fflush", header: "<stdio.h>".}
+else:
+  proc flockfile(file: File) {.importc, header: "<stdio.h>".}
+  proc funlockfile(file: File) {.importc, header: "<stdio.h>".}
 proc printf(format: cstring): cint {.importc, varargs, header: "<stdio.h>".}
 proc fwrite(data: pointer, size, count: csize_t, file: File): csize_t
     {.importc, header: "<stdio.h>".}
@@ -121,26 +110,26 @@ proc executeChannel(context: ptr NativeContext, host: NativeHost,
   let
     length = cast[ptr int64](receiver)
     head = cast[ptr int64](receiver.offset(8))
-  discard pthread_mutex_lock(addr channel.mutex)
+  discard lockMutex(addr channel.mutex)
   if host.operation == "send":
     while length[] >= layout.capacity:
-      discard pthread_cond_wait(addr channel.vacant, addr channel.mutex)
+      discard waitCondition(addr channel.vacant, addr channel.mutex)
     let index = (head[] + length[]) mod layout.capacity
     copyValue(receiver.offset(layout.dataOffset + int(index * element.bytes)),
       args.offset(host.paramOffsets[0]), element,
       context.plan.layouts[host.paramTypes[0]])
     inc length[]
-    discard pthread_cond_signal(addr channel.available)
+    discard signalCondition(addr channel.available)
   else:
     while length[] == 0:
-      discard pthread_cond_wait(addr channel.available, addr channel.mutex)
+      discard waitCondition(addr channel.available, addr channel.mutex)
     copyMem(output,
       receiver.offset(layout.dataOffset + int(head[] * element.bytes)),
       int(element.bytes))
     head[] = (head[] + 1) mod layout.capacity
     dec length[]
-    discard pthread_cond_signal(addr channel.vacant)
-  discard pthread_mutex_unlock(addr channel.mutex)
+    discard signalCondition(addr channel.vacant)
+  discard unlockMutex(addr channel.mutex)
 
 proc dispatch(context: pointer, hostId: int64,
     receiver, args, output: pointer) {.cdecl.} =
@@ -153,9 +142,9 @@ proc dispatch(context: pointer, hostId: int64,
   of LockHost:
     let mutex = cast[ptr ptr NativeMutex](receiver)[]
     if host.operation == "lock":
-      discard pthread_mutex_lock(mutex)
+      discard lockMutex(mutex)
     else:
-      discard pthread_mutex_unlock(mutex)
+      discard unlockMutex(mutex)
   of ContainerHost:
     if runtime.plan.layouts[host.receiverType].kind == ChannelType:
       executeChannel(runtime, host, receiver, args, output)
@@ -165,36 +154,55 @@ proc dispatch(context: pointer, hostId: int64,
   of ExternHost:
     quit("nifty: extern requires a direct ABI call", 1)
 
-proc threadStart(argument: pointer): pointer {.noconv.} =
+proc enterThread(argument: pointer) =
   ## Enters one native thread with its own preallocated arena.
   let thread = cast[ptr NativeThread](argument)
   thread.entry(thread.context, nil, nil, thread.arena)
-  nil
+
+when defined(windows):
+  proc threadStart(argument: pointer): uint32 {.stdcall.} =
+    ## Returns a Windows thread status after executing native code.
+    enterThread(argument)
+    0
+else:
+  proc threadStart(argument: pointer): pointer {.noconv.} =
+    ## Returns a POSIX thread result after executing native code.
+    enterThread(argument)
+    nil
 
 proc resolveExtern(host: NativeHost, libraries: var seq[LibHandle]): pointer =
   ## Resolves C symbols once before any program thread is started.
-  if host.library == "libc":
-    let library = loadLib()
-    if library == nil:
-      raise newException(NiftyError, "cannot open native process symbols")
-    libraries.add library
-    result = symAddr(library, host.symbol.cstring)
-  else:
-    let names = when defined(macosx):
+  when not defined(windows):
+    if host.library == "libc":
+      let library = loadLib()
+      if library == nil:
+        raise newException(NiftyError, "cannot open native process symbols")
+      libraries.add library
+      result = symAddr(library, host.symbol.cstring)
+      if result == nil:
+        raise newException(NiftyError, "cannot resolve native symbol: " & host.symbol)
+      return
+  let names = when defined(windows):
+      if host.library in ["libc", "m"]: @["ucrtbase.dll", "msvcrt.dll"]
+      else: @[host.library & ".dll", host.library]
+    elif defined(macosx):
       @["lib" & host.library & ".dylib", host.library]
     else:
       @["lib" & host.library & ".so", host.library]
-    var library: LibHandle
-    for name in names:
-      library = loadLib(name)
-      if library != nil:
-        break
+  var loaded = false
+  for name in names:
+    let library = loadLib(name)
     if library == nil:
-      raise newException(NiftyError, "cannot load native library: " & host.library)
-    libraries.add library
+      continue
+    loaded = true
     result = symAddr(library, host.symbol.cstring)
-  if result == nil:
-    raise newException(NiftyError, "cannot resolve native symbol: " & host.symbol)
+    if result != nil:
+      libraries.add library
+      return
+    unloadLib(library)
+  if not loaded:
+    raise newException(NiftyError, "cannot load native library: " & host.library)
+  raise newException(NiftyError, "cannot resolve native symbol: " & host.symbol)
 
 proc runNative*(program: NativeProgram,
     memory = NativeMemory()) =
@@ -212,6 +220,14 @@ proc runNative*(program: NativeProgram,
   when defined(arm64) or defined(amd64):
     if program.image.target != HostTarget:
       raise newException(NiftyError, "native image CPU does not match runtime")
+  when defined(windows):
+    discard flush(cStdout)
+    let previousMode = setMode(fileNumber(cStdout), 0x8000) # _O_BINARY.
+    if previousMode < 0:
+      raise newException(NiftyError, "cannot select binary native output")
+    defer:
+      discard flush(cStdout)
+      discard setMode(fileNumber(cStdout), previousMode)
   var
     code = initCodeBuffer(program.image.bytes)
     plan = program.plan
@@ -239,26 +255,26 @@ proc runNative*(program: NativeProgram,
   var initializedChannels = 0
   defer:
     for i in 0 ..< initializedLocks:
-      discard pthread_mutex_destroy(addr mutexes[i])
+      discard destroyMutex(addr mutexes[i])
     for i in 0 ..< initializedChannels:
-      discard pthread_cond_destroy(addr channels[i].available)
-      discard pthread_cond_destroy(addr channels[i].vacant)
-      discard pthread_mutex_destroy(addr channels[i].mutex)
+      discard destroyCondition(addr channels[i].available)
+      discard destroyCondition(addr channels[i].vacant)
+      discard destroyMutex(addr channels[i].mutex)
   for i, location in plan.lockOffsets:
-    if pthread_mutex_init(addr mutexes[i], nil) != 0:
+    if initMutex(addr mutexes[i]) != 0:
       raise newException(NiftyError, "cannot initialize native lock")
     inc initializedLocks
     cast[ptr pointer](addr globals[location])[] = addr mutexes[i]
   for i, location in plan.channelOffsets:
     channels[i].address = addr globals[location]
-    if pthread_mutex_init(addr channels[i].mutex, nil) != 0:
+    if initMutex(addr channels[i].mutex) != 0:
       raise newException(NiftyError, "cannot initialize native channel mutex")
-    if pthread_cond_init(addr channels[i].available, nil) != 0:
-      discard pthread_mutex_destroy(addr channels[i].mutex)
+    if initCondition(addr channels[i].available) != 0:
+      discard destroyMutex(addr channels[i].mutex)
       raise newException(NiftyError, "cannot initialize native channel condition")
-    if pthread_cond_init(addr channels[i].vacant, nil) != 0:
-      discard pthread_cond_destroy(addr channels[i].available)
-      discard pthread_mutex_destroy(addr channels[i].mutex)
+    if initCondition(addr channels[i].vacant) != 0:
+      discard destroyCondition(addr channels[i].available)
+      discard destroyMutex(addr channels[i].mutex)
       raise newException(NiftyError, "cannot initialize native channel condition")
     inc initializedChannels
   var runtime = NativeContext(
@@ -288,15 +304,15 @@ proc runNative*(program: NativeProgram,
       inc index
   var started = 0
   for i in 0 ..< count:
-    let status = pthread_create(addr threads[i].value, nil,
+    let status = startNativeThread(threads[i],
       threadStart, addr entries[i])
     if status != 0:
       for j in 0 ..< started:
-        discard pthread_join(threads[j].value, nil)
+        discard joinNativeThread(threads[j])
       raise newException(NiftyError, "cannot start native thread: " & $status)
     inc started
   for i in 0 ..< started:
-    if pthread_join(threads[i].value, nil) != 0:
+    if joinNativeThread(threads[i]) != 0:
       raise newException(NiftyError, "cannot join native thread")
 
 proc tryRunEmbedded*(): bool =

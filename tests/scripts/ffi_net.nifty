@@ -1,3 +1,4 @@
+# platforms: macosx
 # Every libc call a server needs, exercised end to end over loopback:
 # socket, bind, getsockname, listen, connect, accept, poll, read,
 # write, socketpair, signal, close. Constants and the sockaddr_in

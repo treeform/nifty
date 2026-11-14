@@ -2,7 +2,7 @@
 
 import
   std/[algorithm, os, osproc, strutils],
-  ../src/nifty
+  ../src/nifty, ../src/nifty/ctoolchains, fixtures
 
 const AllocatorHooks = """
 #include <assert.h>
@@ -233,7 +233,7 @@ proc runCase(name, source, expected, workDir: string,
   ## Run one generated C program with allocation and cleanup checks.
   let
     cPath = workDir / name & ".c"
-    binary = workDir / name
+    binary = workDir / (name & (when defined(windows): ".exe" else: ""))
   try:
     writeFile(cPath, AllocatorHooks & compileToC(source, name & ".nifty"))
   except NiftyError as error:
@@ -241,17 +241,17 @@ proc runCase(name, source, expected, workDir: string,
     return false
   let flags =
     if sanitize:
-      " -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+      @["-O1", "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
     else:
-      " -O2"
-  let build = execCmdEx("cc -std=c99 -pthread -fno-strict-aliasing " &
-    "-ffp-contract=off" & flags & " -o " & quoteShell(binary) & " " &
-    quoteShell(cPath))
+      @["-O2"]
+  let build = execCmdEx(cCompileCommand(cPath, binary,
+    options = @["-std=c99"] & flags))
   if build.exitCode != 0:
     echo "  FAIL: memory/", name, " (C compiler)\n", build.output
     return false
-  let execution = execCmdEx(quoteShell(binary))
-  if execution.exitCode != 0 or execution.output.strip() != expected.strip():
+  let execution = runFixture(binary)
+  if execution.exitCode != 0 or
+      execution.output.replace("\r\n", "\n").strip() != expected.strip():
     echo "  FAIL: memory/", name, " (exit ", execution.exitCode, ")"
     echo "    Expected: ", expected.strip()
     echo "    Actual: ", execution.output.strip()

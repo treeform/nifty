@@ -11,7 +11,7 @@ let program = NativeProgram(platform: NativeHostPlatform,
   image: NativeImage(target: target, bytes: bytes, offsets: @[0, 0]),
   plan: NativePlan(globalBytes: 64, initialData: @[7'u8],
     lockOffsets: @[0, 8, 16, 24], channelOffsets: @[32, 40, 48, 56],
-    hosts: @[NativeHost(kind: ExternHost, library: "libc", symbol: "getpid")],
+    hosts: @[NativeHost(kind: ExternHost, library: "libc", symbol: "strlen")],
     threads: @[
       ThreadPlan(name: "workers", count: 4, functionIndex: 1, arenaBytes: 32),
       ThreadPlan(name: "empty", count: 2, functionIndex: 1)]))
@@ -49,7 +49,8 @@ createDir(directory)
 try:
   let
     imagePath = directory / "program.nift"
-    executable = directory / "standalone"
+    executable = directory / (when defined(windows): "standalone.exe"
+      else: "standalone")
   writeNativeFile(program, imagePath)
   doAssert readNativeFile(imagePath).encodeNative() == encoded
   writeStandalone(program, executable)

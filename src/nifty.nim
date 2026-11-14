@@ -31,7 +31,10 @@ proc reportFor*(src: string, moduleName: string, dir = ""): string =
 
 when isMainModule:
   import std/[os, strutils]
-  import nifty/[lowering, nativeruntime, nativereports, nativeunroll]
+  when defined(windows):
+    import std/osproc
+  import nifty/[lowering, nativeruntime, nativereports, nativeunroll,
+    ctoolchains]
 
   try:
     if tryRunEmbedded():
@@ -127,7 +130,10 @@ options:
       quit("nifty: " & e.msg, 1)
     quit(0)
   let base = srcPath.changeFileExt("")
-  let bin = if outPath.len > 0: outPath else: base
+  let selected = if outPath.len > 0: outPath else: base
+  let bin = when defined(windows):
+      if selected.splitFile.ext.len == 0: selected & ".exe" else: selected
+    else: selected
   try:
     let source = readFile(srcPath)
     if backend == "c":
@@ -139,12 +145,7 @@ options:
       if emission == "--emit-c":
         echo cPath
         quit(0)
-      var link = ""
-      for lib in lastExternLibs:
-        link.add " " & quoteShell("-l" & lib)
-      if execShellCmd("cc -O2 -pthread -fno-strict-aliasing " &
-          "-ffp-contract=off -o " & quoteShell(bin) & " " &
-          quoteShell(cPath) & link) != 0:
+      if execShellCmd(cCompileCommand(cPath, bin, lastExternLibs)) != 0:
         quit("nifty: C compilation failed", 1)
     else:
       let target = if backend == "arm64": Arm64Target else: Amd64Target
@@ -171,6 +172,12 @@ options:
       when defined(macosx) and defined(arm64):
         if backend == "amd64":
           quit(execShellCmd("/usr/bin/arch -x86_64 " & quoteShell(exe)))
-      quit(execShellCmd(quoteShell(exe)))
+      when defined(windows):
+        let child = startProcess(exe, options = {poParentStreams})
+        let status = child.waitForExit()
+        child.close()
+        quit(status)
+      else:
+        quit(execShellCmd(quoteShell(exe)))
   except CatchableError as e:
     quit("nifty: " & e.msg, 1)

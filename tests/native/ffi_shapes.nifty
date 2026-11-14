@@ -1,3 +1,4 @@
+# platforms: posix
 # The binary shape is compatible with the host ABI without using its C type.
 object Timespec =
   seconds: int64

@@ -1,5 +1,12 @@
 ## Checks native growable storage, allocation failure, and scoped release.
-import std/[os, posix, strutils]
+import std/[os, strutils]
+when defined(windows):
+  proc dup(descriptor: cint): cint {.importc: "_dup", header: "<io.h>".}
+  proc dup2(source, destination: cint): cint
+    {.importc: "_dup2", header: "<io.h>".}
+  proc close(descriptor: cint): cint {.importc: "_close", header: "<io.h>".}
+else:
+  import std/posix
 import ../src/nifty/[checker, loader, lowering, nativecontainers,
   nativeoptimizations, nativeruntime, nativeunroll, parser]
 
@@ -266,10 +273,17 @@ proc runSource(source, name: string, optimization: NativeOptimization,
 
 let root = currentSourcePath().parentDir().parentDir()
 let scripts = root / "tests" / "scripts"
-let raySource = readFile(root / "benchmarks" / "raytracer.nifty")
+var raySource = readFile(root / "benchmarks" / "raytracer.nifty")
   .replace("const ImageSize = 64", "const ImageSize = 4")
   .replace("const ClockId = 6", when defined(macosx):
     "const ClockId = 6" else: "const ClockId = 1")
+when defined(windows):
+  # This test checks ownership and pixels; it does not measure render time.
+  raySource = raySource.replace(
+    "proc clock_gettime(clock: int32, value: var Timespec): int32",
+    "proc timespecGet \"_timespec64_get\"(value: var Timespec, base: int32): int32")
+    .replace("clock_gettime(ClockId, started)", "timespecGet(started, 1)")
+    .replace("clock_gettime(ClockId, finished)", "timespecGet(finished, 1)")
 let rayPixels = readFile(root / "benchmarks" / "reference" / "4.rgb")
 for optimization in NativeOptimization:
   for name in ["memory_cleanup", "memory_arena", "memory_nested",

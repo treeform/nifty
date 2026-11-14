@@ -11,7 +11,8 @@ type
 
 # Resolve libm at runtime so C optimizers cannot fold across rounding changes.
 let
-  mathLibrary = loadLib(when defined(macosx): "libm.dylib" else: "libm.so.6")
+  mathLibrary = loadLib(when defined(windows): "ucrtbase.dll"
+    elif defined(macosx): "libm.dylib" else: "libm.so.6")
   sqrtLib = cast[Math64](symAddr(mathLibrary, "sqrt"))
   sqrtfLib = cast[Math32](symAddr(mathLibrary, "sqrtf"))
   floorLib = cast[Math64](symAddr(mathLibrary, "floor"))
@@ -32,6 +33,8 @@ var
   towardZero {.importc: "FE_TOWARDZERO", header: "<fenv.h>".}: cint
 when defined(macosx):
   proc errnoLocation(): ptr cint {.importc: "__error", header: "<errno.h>".}
+elif defined(windows):
+  proc errnoLocation(): ptr cint {.importc: "_errno", header: "<errno.h>".}
 else:
   proc errnoLocation(): ptr cint
     {.importc: "__errno_location", header: "<errno.h>".}

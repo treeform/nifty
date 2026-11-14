@@ -15,7 +15,7 @@ proc build(output: string, options: seq[string]) =
   if execCmd(command) != 0:
     quit("Nifty build failed: " & output, 1)
 
-build("nifty", @[])
+build("nifty" & (when defined(windows): ".exe" else: ""), @[])
 when defined(macosx) and defined(arm64):
   build("nifty-runtime-amd64", @[
     "--cpu:amd64", "--passC:-arch", "--passC:x86_64",

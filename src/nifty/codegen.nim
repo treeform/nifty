@@ -1008,6 +1008,15 @@ const cPrelude = """
 #include <stdbool.h>
 #include <string.h>
 #include <pthread.h>
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#define flockfile _lock_file
+#define funlockfile _unlock_file
+#else
+extern void flockfile(FILE *);
+extern void funlockfile(FILE *);
+#endif
 
 // The one float -> int conversion: saturating, NaN-safe (NaN -> 0).
 // A bare C cast of an out-of-range or NaN value is undefined behavior,
@@ -1022,8 +1031,6 @@ static inline int64_t ni_ftoi(double f) {
 
 const cMemoryPrelude = """
 #include <stdlib.h>
-extern void flockfile(FILE *);
-extern void funlockfile(FILE *);
 #ifndef NIFTY_REALLOC
 #define NIFTY_REALLOC realloc
 #endif
@@ -1585,6 +1592,9 @@ proc generate*(m: Module, src: string): string =
   g.put ""
   g.put "int main(void) {"
   inc g.ind
+  g.put "#ifdef _WIN32"
+  g.put "_setmode(_fileno(stdout), _O_BINARY);"
+  g.put "#endif"
   g.put "pthread_t ni_threads[" & $total & "];"
   var base = 0
   for t in threads:

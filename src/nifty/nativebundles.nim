@@ -83,7 +83,8 @@ proc runtimeTemplate(target: NativeTarget): string =
   let name = if target == Arm64Target: "arm64" else: "amd64"
   let configured = getEnv("NIFTY_RUNTIME_" & name.toUpperAscii())
   result = if configured.len > 0: configured
-    else: getAppFilename().parentDir / "nifty-runtime-" & name
+    else: getAppFilename().parentDir / ("nifty-runtime-" & name &
+      (when defined(windows): ".exe" else: ""))
   if not fileExists(result):
     raise newException(NiftyError, "missing " & name &
       " runtime template; set NIFTY_RUNTIME_" & name.toUpperAscii())
@@ -108,6 +109,17 @@ proc validateTemplate(path: string, target: NativeTarget,
       header[5] == '\x01':
     let expected = if target == Arm64Target: 183'u64 else: 62'u64
     valid = header.number(18, 2) == expected
+  elif platform == WindowsPlatform and header.len == 64 and
+      header[0 ..< 2] == "MZ":
+    let peOffset = header.number(60, 4)
+    if peOffset <= uint64(getFileSize(path)) and
+        uint64(getFileSize(path)) - peOffset >= 26:
+      file.setFilePos(int64(peOffset))
+      var pe = newString(26)
+      if file.readBuffer(addr pe[0], pe.len) == pe.len:
+        let expected = if target == Arm64Target: 0xaa64'u64 else: 0x8664'u64
+        valid = pe[0 ..< 4] == "PE\0\0" and
+          pe.number(4, 2) == expected and pe.number(24, 2) == 0x20b
   if not valid:
     raise newException(NiftyError,
       "standalone runtime template CPU or operating system ABI mismatch")

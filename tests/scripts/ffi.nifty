@@ -1,3 +1,4 @@
+# platforms: posix
 # Binary FFI: we declare the shapes ourselves in plain sized types and
 # the linker resolves the symbols. No headers are ever read.
 extern "libc":

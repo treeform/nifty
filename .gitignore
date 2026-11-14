@@ -15,6 +15,7 @@
 /tests/nifty_t
 /nimcache/
 __pycache__/
+*.exe
 *.niftybin
 *.ir
 examples/*.c
