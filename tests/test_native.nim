@@ -133,7 +133,7 @@ proc main() =
           var actual = normalized(built.output)
             .replace(path.parentDir & DirSep, "")
           actual.removePrefix("nifty: ")
-          if built.code != 0 and actual == expected:
+          if built.code notin [0, -1] and actual == expected:
             inc passed
           else:
             echo "FAIL ", label, ": expected rejection: ", expected
@@ -157,7 +157,7 @@ proc main() =
           executed = run(command.exe, command.args, isolated = true)
           actual = normalized(executed.output)
           matches = if mode == Trap:
-              executed.code != 0 and expected in actual
+              executed.code notin [0, -1] and expected in actual
             else:
               executed.code == 0 and actual == expected
         if matches:
