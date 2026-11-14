@@ -1,0 +1,33 @@
+# Stored scalar widths are independent of argument widths.
+thread main() =
+  let negative: int8 = -128
+  var wide: seq[2, int]
+  wide.add(negative)
+  if wide.len > 0:
+    echo wide.pop()
+
+  var ring: queue[2, int]
+  ring.add(negative)
+  if ring.len > 0:
+    echo ring.pop()
+
+  var dense: map[0 .. 1, int]
+  dense.put(0, negative)
+  echo dense.get(0, 0)
+  echo dense.get(99, negative)
+
+  var sparse: map[2, uint8, int]
+  discard sparse.put(0, negative)
+  discard sparse.put(255, 77)
+  echo sparse.contains(255), " ", sparse.contains(254)
+  echo sparse.get(0, 0), " ", sparse.get(255, 0)
+  echo sparse.get(99, negative)
+  for key, value in sparse:
+    echo key, " ", value
+
+  var text: string[8] = "ABC"
+  text[1] = 'Z'
+  echo text
+  echo text[1]
+  for value in text:
+    echo value
