@@ -4,9 +4,9 @@
 extern "libc":
   proc usleep(usec: uint32): int32
   proc getpid(): int32
-  proc pipe(fds: var array[2, int32]): int32
-  proc writeFd "write" (fd: int32, buf: string[64], n: int64): int64
-  proc readFd "read" (fd: int32, buf: var string[64], cap: int64): int64
+  proc pipe(fds: var array[2, int32] boundedBy 2): int32
+  proc writeFd "write" (fd: int32, buf: string[64] boundedBy n, n: int64): int64
+  proc readFd "read" (fd: int32, buf: var string[64] boundedBy cap, cap: int64): int64
   proc closeFd "close" (fd: int32): int32
 
 thread main() =

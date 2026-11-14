@@ -1,0 +1,1 @@
+error_extern_refined_return.nifty:2: extern 'magnitude': result range is not guaranteed by the foreign ABI

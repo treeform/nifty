@@ -201,14 +201,13 @@ thread reader() =
 
 const ForeignSource = """
 extern "libc":
-  proc fill "probeFill"(text: var string, capacity: int64): int64
+  proc fill "probeFill"(text: var string boundedBy capacity, capacity: int64): int64
 
 proc work() =
   var text: string
   if not text.reserve(16):
     return
-  let capacity = text.cap
-  let count = fill(text, capacity)
+  let count = fill(text, 16)
   if count >= 0 and count <= 16:
     echo text.setLen(count)
     echo text

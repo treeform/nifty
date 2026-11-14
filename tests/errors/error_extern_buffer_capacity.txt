@@ -1,0 +1,1 @@
+error_extern_buffer_capacity.nifty:6: cannot prove foreign buffer 'buffer' has 100 accessible bytes or elements (available at least 0); resize or guard first

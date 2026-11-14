@@ -13,10 +13,10 @@ object SystemTime =
 extern "kernel32":
   proc GetCurrentProcessId(): uint32
   proc GetSystemTime(value: var SystemTime)
-  proc GetTickCount64(): uint64
+  proc GetTickCount64(): int64
 
 extern "libc":
-  proc memset(text: var string[32], value: int32, count: uint64): uint64
+  proc memset(text: var string[32] boundedBy count, value: int32, count: uint64): int64
 
 extern "m":
   proc sqrt(value: float64): float64

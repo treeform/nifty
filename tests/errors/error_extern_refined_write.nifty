@@ -1,0 +1,9 @@
+object Result =
+  value: 0 .. 0
+
+extern "libc":
+  proc fill "memset"(outcome: var Result): int64
+
+thread main() =
+  var outcome: Result
+  discard fill(outcome)

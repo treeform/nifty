@@ -1,0 +1,8 @@
+var values: array[1, int]
+
+proc inspect(input: array[1, int]) =
+  values[0] = 42
+  echo input[0]
+
+thread main() =
+  inspect(values)

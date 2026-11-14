@@ -118,7 +118,7 @@ thread reader() =
 """
   ForeignSource = """
 extern "libc":
-  proc fill "memset"(text: var string, value: int32, count: uint64): int64
+  proc fill "memset"(text: var string boundedBy count, value: int32, count: uint64): int64
 
 proc work() =
   var text: string

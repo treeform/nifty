@@ -1,0 +1,1 @@
+error_extern_missing_bound.nifty:2: extern 'read': writable buffer 'buffer' needs boundedBy count

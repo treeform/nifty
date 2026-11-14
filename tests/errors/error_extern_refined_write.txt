@@ -1,0 +1,1 @@
+error_extern_refined_write.nifty:5: extern 'fill': writable parameter 'outcome' has a range foreign code can violate

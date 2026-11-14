@@ -115,6 +115,7 @@ type
     name*: string
     typ*: Typ
     isVar*: bool
+    boundedBy*: string # Foreign buffer's named element or byte count.
     binding*: BindingId
   Routine* = ref object
     kind*: RoutineKind

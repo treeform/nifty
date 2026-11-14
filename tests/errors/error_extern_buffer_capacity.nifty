@@ -1,0 +1,6 @@
+extern "libc":
+  proc read(fd: int32, buffer: var string boundedBy count, count: int64): int64
+
+thread main() =
+  var buffer: string
+  discard read(0, buffer, 100)
