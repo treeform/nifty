@@ -1,0 +1,2 @@
+error_generic_callee_lock.nifty:6: generic 'work' calls 'locked', which acquires global locks; generic routines cannot access globals
+  while instantiating 'work' with $T = int at error_generic_callee_lock.nifty:9

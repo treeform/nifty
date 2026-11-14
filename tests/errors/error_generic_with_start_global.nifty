@@ -1,0 +1,19 @@
+object Resource =
+  value: int
+var index: 0 .. 1
+proc start(item: var Resource) =
+  index = 1
+  item.value = 1
+proc end(item: var Resource) =
+  item.value = 0
+proc work(value: $T) =
+  var item: Resource
+  item.value = value
+  with item:
+    echo item.value
+thread main() =
+  var values: array[1, int]
+  values[0] = 42
+  index = 0
+  work(1)
+  echo values[index]

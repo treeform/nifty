@@ -1,0 +1,16 @@
+object Resource =
+  value: int
+proc start(item: var Resource) =
+  item.value = 7
+proc end(item: var Resource) =
+  item.value = 9
+proc inner(value: $T) =
+  var item: Resource
+  item.value = value
+  with item:
+    echo item.value
+  echo item.value
+proc outer(value: $T) =
+  inner(value)
+thread main() =
+  outer(3)

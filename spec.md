@@ -304,6 +304,9 @@ routine may not touch globals, directly or through callees — the
 thread-ownership and lock proofs run before any instantiation exists,
 so a generic's global footprint must be empty. Pass values through
 parameters — which is what a reusable routine should do anyway.
+The restriction includes global locks and the implicit `start`/`end`
+calls of a custom `with` block. Hooks that only operate on the resource
+passed to them remain valid in generic routines.
 
 ## Types
 

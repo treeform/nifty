@@ -1,0 +1,9 @@
+var gate: Lock
+proc locked(value: int) =
+  with gate:
+    echo value
+proc work(value: $T) =
+  locked(value)
+thread 2 worker() =
+  with gate:
+    work(1)

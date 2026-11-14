@@ -1,0 +1,16 @@
+object Resource =
+  value: int
+var gate: Lock
+proc start(item: var Resource) =
+  with gate:
+    echo item.value
+proc end(item: var Resource) =
+  item.value = 0
+proc work(value: $T) =
+  var item: Resource
+  item.value = value
+  with item:
+    echo item.value
+thread 2 worker() =
+  with gate:
+    work(1)
