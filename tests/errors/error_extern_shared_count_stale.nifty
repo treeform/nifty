@@ -1,0 +1,18 @@
+var count: 0 .. 100
+var gate: Lock
+
+extern "libc":
+  proc fill "memset"(buffer: var string boundedBy n, value: int32, n: int64): int64
+
+thread writer() =
+  with gate:
+    count = 100
+
+thread main() =
+  var buffer: string
+  if buffer.reserve(8):
+    with gate:
+      if count <= buffer.cap:
+        echo "guarded"
+    with gate:
+      discard fill(buffer, 65, count)
