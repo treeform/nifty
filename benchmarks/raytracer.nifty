@@ -1,8 +1,9 @@
 # Ported from Nimkey's float64 vmath raytracer under the attached license.
-# The runner changes only these three constants for each workload.
+# The runner changes workload constants and the host monotonic clock ID.
 const ImageSize = 64
 const Repetitions = 1
 const EmitPixels = 1
+const ClockId = 6
 const MaxDepth = 5
 const PixelCount = ImageSize * ImageSize
 const ChannelCount = PixelCount * 3
@@ -285,10 +286,19 @@ thread main() =
   let camera = newCamera()
   var started: Timespec
   var finished: Timespec
-  let startStatus = clock_gettime(6, started)
+  var checksums: array[Repetitions, 0 .. ChannelCount * 255]
+  let startStatus = clock_gettime(ClockId, started)
   for repetition in 0 ..< Repetitions:
     render(pixels, camera)
-  let finishStatus = clock_gettime(6, finished)
+    # Consume every frame so repeated renders contribute observable work.
+    var frameChecksum: 0 .. ChannelCount * 255 = 0
+    for i in 0 ..< ChannelCount:
+      frameChecksum = frameChecksum + pixels[i]
+    checksums[repetition] = frameChecksum
+  let finishStatus = clock_gettime(ClockId, finished)
+  var batchChecksum: 0 .. Repetitions * ChannelCount * 255 = 0
+  for repetition in 0 ..< Repetitions:
+    batchChecksum = batchChecksum + checksums[repetition]
   var checksum: 0 .. ChannelCount * 255 = 0
   for i in 0 ..< ChannelCount:
     checksum = checksum + pixels[i]
@@ -301,6 +311,7 @@ thread main() =
   echo "end_nsec ", finished.nsec
   echo "clock_status ", startStatus, " ", finishStatus
   echo "checksum ", checksum
+  echo "batch_checksum ", batchChecksum
   if EmitPixels == 1:
     for pixel in 0 ..< PixelCount:
       let offset = pixel * 3
