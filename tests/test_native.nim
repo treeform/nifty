@@ -73,8 +73,8 @@ proc imageTarget(path, target: string): bool =
     return false
   let
     metadata = parseJson(bytes[40 ..< 40 + int(metadataSize)])
-    expected = if target == "arm64": "Arm64Target" else: "Amd64Target"
-  metadata["target"].getStr() == expected and
+    expected = if target == "arm64": 0 else: 1
+  metadata["target"].getInt() == expected and
     metadata["offsets"].len > 0 and bytes.len > 40 + int(metadataSize)
 
 proc executionArgs(binary, target: string): tuple[exe: string, args: seq[string]] =
