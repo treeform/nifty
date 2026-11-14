@@ -33,6 +33,14 @@ proc writeInteger*(base: pointer, layout: NativeLayout, value: int64) =
   of 4: cast[ptr uint32](base)[] = cast[uint32](value)
   else: cast[ptr int64](base)[] = value
 
+proc copyValue*(destination, source: pointer,
+    targetLayout, sourceLayout: NativeLayout) =
+  ## Convert scalar integer widths while copying fixed aggregate values.
+  if targetLayout.kind == IntType and not targetLayout.optional:
+    writeInteger(destination, targetLayout, integer(source, sourceLayout))
+  else:
+    copyMem(destination, source, int(targetLayout.bytes))
+
 proc bytesEqual(a, b: pointer, count: int64): bool =
   ## Compare raw bytes without constructing strings.
   let
@@ -139,7 +147,7 @@ proc addNumber(receiver: pointer, dataOffset: int, value: int64) =
     inc length(receiver)
 
 proc sparseFind(receiver, key: pointer, layout: NativeLayout,
-    keyLayout: NativeLayout): int64 =
+    keyLayout, argumentLayout: NativeLayout): int64 =
   ## Binary-search sorted fixed storage and encode the insertion position.
   var
     low = 0'i64
@@ -155,7 +163,7 @@ proc sparseFind(receiver, key: pointer, layout: NativeLayout,
     else:
       let
         left = integer(candidate, keyLayout)
-        right = integer(key, keyLayout)
+        right = integer(key, argumentLayout)
       comparison = if left < right: -1 elif left > right: 1 else: 0
     if comparison == 0:
       return middle
@@ -221,13 +229,13 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
       if host.operation == "push" and length(receiver) >= layout.capacity:
         boolean(false)
         return
-      if layout.kind == QueueType:
-        queueAdd(receiver, argument(0), layout, elementSize)
-      else:
-        copyMem(at(receiver,
-          int64(layout.dataOffset) + length(receiver) * elementSize),
-          argument(0), int(elementSize))
-        inc length(receiver)
+      let index = if layout.kind == QueueType:
+          (cast[ptr int64](at(receiver, 8))[] + length(receiver)) mod
+            layout.capacity
+        else: length(receiver)
+      copyValue(at(receiver, int64(layout.dataOffset) + index * elementSize),
+        argument(0), layouts[layout.elem], argumentLayout(0))
+      inc length(receiver)
       if host.operation == "push":
         boolean(true)
     of "pop":
@@ -310,7 +318,7 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
     if host.operation == "remove" and not inRange:
       return
     if host.operation == "get" and not inRange:
-      copyMem(output, argument(1), int(layouts[layout.val].bytes))
+      copyValue(output, argument(1), layouts[layout.val], argumentLayout(1))
       return
     let
       index = key - layout.lower
@@ -327,8 +335,8 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
         inc length(receiver)
       if layout.kind == DenseMapType:
         let valueSize = layouts[layout.val].bytes
-        copyMem(at(receiver, int64(layout.valOffset) + index * valueSize),
-          argument(1), int(valueSize))
+        copyValue(at(receiver, int64(layout.valOffset) + index * valueSize),
+          argument(1), layouts[layout.val], argumentLayout(1))
     of "excl", "remove":
       if present:
         word[] = word[] and not mask
@@ -347,7 +355,7 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
           at(receiver, int64(layout.valOffset) + index * valueSize),
           int(valueSize))
       else:
-        copyMem(output, argument(1), int(valueSize))
+        copyValue(output, argument(1), layouts[layout.val], argumentLayout(1))
     else:
       discard
   of SparseMapType:
@@ -355,7 +363,8 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
     let
       keySize = keyLayout.bytes
       valueSize = layouts[layout.val].bytes
-      index = sparseFind(receiver, argument(0), layout, keyLayout)
+      index = sparseFind(receiver, argument(0), layout, keyLayout,
+        argumentLayout(0))
     template keyAt(index: int64): pointer =
       at(receiver, int64(layout.keyOffset) + index * keySize)
     template valueAt(index: int64): pointer =
@@ -369,10 +378,11 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
       elif index >= 0:
         copyMem(output, valueAt(index), int(valueSize))
       elif host.operation == "get":
-        copyMem(output, argument(1), int(valueSize))
+        copyValue(output, argument(1), layouts[layout.val], argumentLayout(1))
     of "put":
       if index >= 0:
-        copyMem(valueAt(index), argument(1), int(valueSize))
+        copyValue(valueAt(index), argument(1),
+          layouts[layout.val], argumentLayout(1))
         if output != nil:
           boolean(true)
       elif length(receiver) >= layout.capacity:
@@ -385,8 +395,9 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
         moveMem(keyAt(position + 1), keyAt(position), int(remaining * keySize))
         moveMem(valueAt(position + 1), valueAt(position),
           int(remaining * valueSize))
-        copyMem(keyAt(position), argument(0), int(keySize))
-        copyMem(valueAt(position), argument(1), int(valueSize))
+        copyValue(keyAt(position), argument(0), keyLayout, argumentLayout(0))
+        copyValue(valueAt(position), argument(1),
+          layouts[layout.val], argumentLayout(1))
         inc length(receiver)
         if output != nil:
           boolean(true)

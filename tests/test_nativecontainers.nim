@@ -230,3 +230,54 @@ invoke("or", 2, receiver, args, output, @[0])
 doAssert getInt(output) == 0
 
 echo "Native optional fallback operations passed"
+
+let
+  signedByte = layouts.len
+  unsignedByte = signedByte + 1
+  narrowMap = signedByte + 2
+layouts.add NativeLayout(kind: IntType, bytes: 1, align: 1,
+  lower: -128, upper: 127)
+layouts.add NativeLayout(kind: IntType, bytes: 1, align: 1,
+  lower: 0, upper: 255)
+layouts.add NativeLayout(kind: SparseMapType, bytes: 40, align: 8,
+  capacity: 3, key: unsignedByte, val: 0, keyOffset: 8, valOffset: 16)
+for container in [4, 5]:
+  zeroMem(addr receiver, sizeof(receiver))
+  for value in [-128, -1, 127]:
+    for i in 0 ..< args.len:
+      args[i] = 0x5a
+    args[0] = cast[byte](int8(value))
+    invoke("add", container, receiver, args, output, @[signedByte])
+  for expected in (if container == 4: @[127, -1, -128]
+      else: @[-128, -1, 127]):
+    invoke("pop", container, receiver, args, output)
+    doAssert getInt(output) == expected
+for container in [7, 8]:
+  zeroMem(addr receiver, sizeof(receiver))
+  putInt(args, 0)
+  args[8] = cast[byte](-128'i8)
+  args[9] = 0x5a
+  invoke("put", container, receiver, args, output, @[0, signedByte], 1)
+  invoke("at", container, receiver, args, output, @[0])
+  doAssert getInt(output) == -128
+  putInt(args, 500)
+  args[8] = cast[byte](-1'i8)
+  invoke("get", container, receiver, args, output, @[0, signedByte])
+  doAssert getInt(output) == -1
+zeroMem(addr receiver, sizeof(receiver))
+putInt(args, 0)
+putInt(args, 123, 8)
+invoke("put", narrowMap, receiver, args, output, @[0, 0], 1)
+for key in [-256, 256, 0]:
+  putInt(args, key)
+  invoke("contains", narrowMap, receiver, args, output, @[0], 1)
+  doAssert (output[0] != 0) == (key == 0)
+putInt(args, 255)
+putInt(args, 456, 8)
+invoke("put", narrowMap, receiver, args, output, @[0, 0], 1)
+doAssert receiver[9] == 255
+args[0] = 255
+invoke("at", narrowMap, receiver, args, output, @[unsignedByte])
+doAssert getInt(output) == 456
+
+echo "Native scalar-width normalization passed"
