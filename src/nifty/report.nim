@@ -3,7 +3,7 @@
 ## Dynamic work is propagated through calls instead of given a false bound.
 
 import std/[strutils, tables, sets]
-import types, semantics
+import types, semantics, codegen
 
 const frameOverhead = 16'i64 # return address + saved frame pointer
 
@@ -144,6 +144,8 @@ proc runtimeStmt(s: Stmt, costs: Table[string, bool],
   ## Include implicit owner cleanup and dynamically bounded iteration.
   if s.kind in {VarStmt, LetStmt} and s.typ.hasOwned:
     return true
+  if s.kind == AssignStmt and s.lhs != nil and s.lhs.typ.hasOwned:
+    return true
   if s.kind in {WhileStmt, ForStmt, ForEachStmt} and s.tripBound < 0:
     return true
   if s.kind == ForEachStmt and s.value != nil and s.value.typ.hasOwned:
@@ -190,12 +192,30 @@ proc ownerLines*(m: Module): seq[string] =
       result.add "  local " & binding.routine & "." & binding.name & ": " &
         $binding.typ & " (declaration scope)"
 
+proc unionLines*(m: Module): seq[string] =
+  ## Describes checked union storage without counting heap payloads twice.
+  requireChecked(m)
+  for definition in m.types:
+    let typ = definition.typ
+    if typ.kind != UnionType:
+      continue
+    var members: seq[string]
+    for member in typ.members:
+      members.add($member)
+    result.add "  " & definition.name & ": " & $typeSize(typ) &
+      " bytes, alignment " & $typeAlign(typ) &
+      "; 8-byte type tag, payload offset " & $unionPayloadOffset(typ)
+    result.add "    alternatives: " & members.join(" or ")
+    if typ.hasOwned:
+      result.add "    active alternative owns its payload; heap size and " &
+        "cleanup work are runtime-dependent"
+
 ## Worst-Case Stack
 
 proc paramBytes(m: Module, p: Param): int64 =
   ## Counts the C ABI storage for a checked parameter mode.
-  if m.mode(p.binding).isBorrow:
-    8 # passed as a pointer
+  if m.mode(p.binding).isBorrow or bigRet(p.typ):
+    8 # Passed as a pointer.
   else:
     typeSize(p.typ)
 
@@ -216,34 +236,6 @@ proc localBytes(m: Module, body: seq[Stmt]): int64 =
     for br in s.elifs:
       result = sizeAdd(result, localBytes(m, br.body))
     result = sizeAdd(result, localBytes(m, s.elseBody))
-
-proc arenaWalk(body: seq[Stmt], off: var int64, hi: var int64) =
-  ## Mirrors codegen's collectBig: sequential 8-aligned allocation,
-  ## blocks rewind on exit, and the frame is the high-water mark.
-  for s in body:
-    if s.kind in {VarStmt, LetStmt}:
-      let sz = typeSize(s.typ)
-      if sz > arenaThreshold:
-        off = sizeAlign(off, 8, s.line)
-        off = sizeAdd(off, sz, s.line)
-        if off > hi:
-          hi = off
-    if s.kind == BlockStmt:
-      let entry = off
-      arenaWalk(s.body, off, hi)
-      off = entry
-    else:
-      arenaWalk(s.body, off, hi)
-    for br in s.elifs:
-      arenaWalk(br.body, off, hi)
-    arenaWalk(s.elseBody, off, hi)
-
-proc arenaBytes(body: seq[Stmt]): int64 =
-  ## Bytes of big locals: this routine's arena frame.
-  var off = 0'i64
-  var hi = 0'i64
-  arenaWalk(body, off, hi)
-  hi
 
 proc collectCallsExpr(e: Expr, into: var HashSet[string]) =
   if e.isNil:
@@ -304,6 +296,12 @@ proc buildReport*(m: Module, src: string): string =
     totalLine.add " + " & $locks & " lock" & (if locks > 1: "s" else: "") &
       " (platform-sized)"
   lines.add totalLine
+
+  let unions = unionLines(m)
+  if unions.len > 0:
+    lines.add ""
+    lines.add "unions (inline storage; one active alternative):"
+    lines.add unions
 
   let owners = ownerLines(m)
   if m.semantics.channelProgress.len > 0:
@@ -383,11 +381,10 @@ proc buildReport*(m: Module, src: string): string =
       d.chain & ")"
 
   # Arenas: exact, allocated at that size, so overflow is impossible.
-  var aframes: Table[string, int64]
+  let aframes = cArenaFrames(m)
   var adeep: Table[string, tuple[bytes: int64, chain: string]]
   var anyArena = false
   for r in m.routines:
-    aframes[r.name] = sizeAlign(arenaBytes(r.body), 16, r.line)
     var calls: HashSet[string]
     collectCalls(r.body, globals, calls)
     var best = (bytes: 0'i64, chain: "")

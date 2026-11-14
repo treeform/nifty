@@ -25,6 +25,8 @@ type
     mutable: bool
     isVarParam: bool
   Ctx = object
+    module: Module
+    namedTypes: Table[string, Typ]
     consts: Table[string, int64]
     globals: Table[string, Typ]
     routineTab: Table[string, Routine]
@@ -197,6 +199,25 @@ proc rejectOpt(t: Typ, e: Expr) =
 proc coerceOpt(c: var Ctx, e: Expr, target: Typ): bool =
   ## A plain value fits an optional destination (wrapped as ok); `none`
   ## fits any optional destination.
+  if target != nil and target.kind == UnionType and e.typ != nil and
+      not e.typ.opt:
+    let union = deOpt(target)
+    var injected = false
+    if e.kind == UnionProjectExpr and typeEq(e.kids[0].typ, union):
+      let child = e.kids[0]
+      e[] = child[]
+      injected = true
+    else:
+      for member in union.members:
+        if typeEq(member, e.typ):
+          let child = Expr()
+          child[] = e[]
+          e[] = Expr(kind: UnionWrapExpr, line: e.line,
+            kids: @[child], typ: union)[]
+          injected = true
+          break
+    if injected and not target.opt:
+      return true
   if target == nil or not target.opt:
     return false
   if e.kind == NoneExpr:
@@ -243,8 +264,22 @@ proc coerceFloatLit(e: Expr, want: Typ): bool =
     return true
   false
 
+proc stablePathName(c: Ctx, e: Expr): string
+
 proc expectVal(c: var Ctx, e: Expr): Typ =
   result = c.checkExpr(e)
+  if result != nil and result.kind == UnionType and not result.opt:
+    let path = c.stablePathName(e)
+    var remaining: seq[Typ]
+    for member in result.members:
+      if path == "" or path & "@union" & $member.typeId notin c.facts:
+        remaining.add member
+    if remaining.len == 1:
+      let child = Expr()
+      child[] = e[]
+      e[] = Expr(kind: UnionProjectExpr, line: e.line,
+        kids: @[child], typ: remaining[0])[]
+      result = e.typ
   if result.isNil:
     err(e.line, "'" & e.sval & "' does not return a value")
 
@@ -281,7 +316,7 @@ proc pathHasMapIndex(e: Expr): bool =
   ## Map elements are values, not places: m[k] cannot appear inside an
   ## lvalue path (var arguments, foreach bases, method targets).
   var cur = e
-  while cur.kind in {IndexExpr, FieldExpr}:
+  while cur.kind in {IndexExpr, FieldExpr, UnionProjectExpr}:
     if cur.kind == IndexExpr and cur.kids[0].typ != nil and
         cur.kids[0].typ.kind in {DenseMapType, SparseMapType}:
       return true
@@ -291,7 +326,7 @@ proc pathHasMapIndex(e: Expr): bool =
 proc pathHasProperty(e: Expr): bool =
   ## Computed properties and container metadata are never writable places.
   var current = e
-  while current.kind in {IndexExpr, FieldExpr}:
+  while current.kind in {IndexExpr, FieldExpr, UnionProjectExpr}:
     if current.kind == FieldExpr and (current.isOptOk or
         current.kids[0].typ == nil or
         current.kids[0].typ.kind != ObjectType):
@@ -304,7 +339,7 @@ proc markModified(c: var Ctx, name: string) =
 
 proc rootIdent(e: Expr): Expr =
   result = e
-  while result.kind in {IndexExpr, FieldExpr}:
+  while result.kind in {IndexExpr, FieldExpr, UnionProjectExpr}:
     result = result.kids[0]
 
 proc capacityBound(t: Typ): int64 =
@@ -312,38 +347,51 @@ proc capacityBound(t: Typ): int64 =
   if t.dynamic: IntHigh else: t.len
 
 proc containsType(container, item: Typ): bool =
-  ## A borrowed field or element may belong to a larger global owner.
-  if container == nil or item == nil:
-    return false
-  if typeEq(deOpt(container), deOpt(item)):
-    return true
-  if item.dynamic and container.kind == item.kind:
-    if item.kind == StringType:
+  ## Searches a possibly recursive owner layout for an aliased payload.
+  var visited: HashSet[pointer]
+  proc visit(t: Typ): bool =
+    if t == nil or item == nil or cast[pointer](t) in visited:
+      return false
+    visited.incl cast[pointer](t)
+    if typeEq(deOpt(t), deOpt(item)):
       return true
-    if item.kind == SeqType and typeEq(container.elem, item.elem) and
-        container.elem.width == item.elem.width:
+    if item.dynamic and t.kind == item.kind:
+      if item.kind == StringType:
+        return true
+      if item.kind == SeqType and typeEq(t.elem, item.elem) and
+          t.elem.width == item.elem.width:
+        return true
+    if visit(t.elem) or visit(t.val):
       return true
-  if containsType(container.elem, item) or containsType(container.val, item):
-    return true
-  for field in container.fields:
-    if containsType(field.typ, item):
-      return true
-  false
+    for field in t.fields:
+      if visit(field.typ):
+        return true
+    for member in t.members:
+      if visit(member):
+        return true
+    false
+  visit(container)
 
 proc validateOwnedType(t: Typ, line: int) =
-  ## Reject layouts whose existing operations cannot preserve ownership.
-  if t == nil:
-    return
-  if t.opt and hasOwned(t):
-    err(line, "an owning string or seq cannot be optional; use an empty owner")
-  if t.kind in {QueueType, ChannelType, DenseMapType, SparseMapType} and
-      hasOwned(t):
-    err(line, "owning strings and seqs cannot be stored in queues, channels, " &
-      "or maps; pass caller-owned storage instead")
-  validateOwnedType(t.elem, line)
-  validateOwnedType(t.val, line)
-  for field in t.fields:
-    validateOwnedType(field.typ, line)
+  ## Rejects unsupported ownership operations in recursive layouts.
+  var visited: HashSet[pointer]
+  proc visit(t: Typ) =
+    if t == nil or cast[pointer](t) in visited:
+      return
+    visited.incl cast[pointer](t)
+    if t.opt and hasOwned(t):
+      err(line, "an owning string or seq cannot be optional; use an empty owner")
+    if t.kind in {QueueType, ChannelType, DenseMapType, SparseMapType} and
+        hasOwned(t):
+      err(line, "owning strings and seqs cannot be stored in queues, channels, " &
+        "or maps; pass caller-owned storage instead")
+    visit(t.elem)
+    visit(t.val)
+    for field in t.fields:
+      visit(field.typ)
+    for member in t.members:
+      visit(member)
+  visit(t)
 
 proc foreignWritable(t: Typ): bool =
   ## Checks raw storage for range and container invariants.
@@ -466,7 +514,7 @@ proc factEligibleIdent(c: Ctx, e: Expr): bool =
   of LocalSym:
     true
   of ParamSym:
-    not e.isVarParam or hasOwned(e.typ)
+    not e.isVarParam or hasOwned(e.typ) or e.typ.kind == UnionType
   of GlobalSym:
     if e.sval notin c.sharedProt:
       true # thread-owned (or never written): sequential here
@@ -485,7 +533,6 @@ proc factName(c: Ctx, e: Expr): string =
   else:
     ""
 
-proc stablePathName(c: Ctx, e: Expr): string
 
 proc lenPathName(c: Ctx, e: Expr): string =
   ## "s.len" when e reads the length of a factable seq/string variable.
@@ -522,6 +569,17 @@ proc stablePathName(c: Ctx, e: Expr): string =
   case e.kind
   of IdentExpr:
     if c.factEligibleIdent(e): e.sval else: ""
+  of UnionProjectExpr:
+    c.stablePathName(e.kids[0])
+  of IndexExpr:
+    let
+      inner = c.stablePathName(e.kids[0])
+      index = c.tryConstEval(e.kids[1])
+    if inner != "" and index.known and
+        e.kids[0].typ.kind in {ArrayType, SeqType}:
+      inner & ".[" & $index.val & "]"
+    else:
+      ""
   of FieldExpr:
     let inner = c.stablePathName(e.kids[0])
     if inner != "" and not e.isOptOk: inner & "." & e.sval else: ""
@@ -630,6 +688,28 @@ proc collectAssignedExpr(c: Ctx, e: Expr, s: var HashSet[string])
 
 proc addCondFacts(c: var Ctx, e: Expr, negated = false) =
   ## Record what is proven when `e` is true (or false, if negated).
+  if e.kind == BinExpr and e.sval in ["==", "!="] and
+      e.kids[0].kind == TypeIdExpr and e.kids[1].kind == TypeIdExpr:
+    var touched: HashSet[string]
+    c.collectAssignedExpr(e, touched)
+    if touched.len > 0:
+      return
+    var left = e.kids[0]
+    var right = e.kids[1]
+    if left.kids.len == 0 and right.kids.len > 0:
+      swap(left, right)
+    if left.kids.len > 0 and right.ival != 0:
+      var value = left.kids[0]
+      if value.kind == UnionProjectExpr:
+        value = value.kids[0]
+      if value.typ != nil and value.typ.kind == UnionType:
+        let path = c.stablePathName(value)
+        if path != "":
+          let equal = (e.sval == "==") != negated
+          for member in value.typ.members:
+            if (member.typeId != right.ival) == equal:
+              c.facts[path & "@union" & $member.typeId] = Fact(lo: 1, hi: 1)
+    return
   if e.kind == NotExpr:
     c.addCondFacts(e.kids[0], not negated)
     return
@@ -866,7 +946,7 @@ proc dispatchKey(t: Typ): string =
   of QueueType: "a queue"
   of SetType: "a set"
   of DenseMapType, SparseMapType: "a map"
-  of ObjectType: t.name
+  of ObjectType, UnionType: t.name
   else: ""
 
 proc declTypeOf(c: Ctx, e: Expr): Typ =
@@ -1185,6 +1265,19 @@ proc typeRangeFits(a, b: Typ): bool =
     typeRangeFits(a.val, b.val)
   else: true
 
+proc freshOwnedValue(e: Expr): bool =
+  ## Allows construction of new owners while forbidding descriptor copies.
+  if not hasOwned(e.typ):
+    return true
+  if e.kind == UnionWrapExpr:
+    return freshOwnedValue(e.kids[0])
+  if e.kind == ObjectExpr:
+    for child in e.kids:
+      if not freshOwnedValue(child):
+        return false
+    return true
+  false
+
 proc checkCopyRange(e: Expr, target: Typ) =
   ## Copied payloads must preserve ranges; plain ints use flow facts instead.
   if (target.opt or target.kind != IntType) and
@@ -1209,7 +1302,8 @@ proc zeroOk(t: Typ): bool =
 proc rejectOwnerEffects(c: Ctx, owner, expr: Expr, borrowedView = false) =
   ## An evaluated address must stay valid while later expressions run.
   let root = owner.rootIdent
-  if root.kind != IdentExpr or (not hasOwned(root.typ) and not borrowedView):
+  if root.kind != IdentExpr or (not hasOwned(root.typ) and
+      root.typ.kind != UnionType and not borrowedView):
     return
   var touched: HashSet[string]
   c.collectAssignedExpr(expr, touched)
@@ -1227,7 +1321,7 @@ proc checkDynamicMethod(c: var Ctx, e: Expr, bt: Typ): Typ =
   if e.sval in mutMethods:
     if c.cur.kind == FuncRoutine:
       err(e.line, "growable storage can only be mutated in a proc or thread")
-    c.delFacts root.sval
+    c.delFacts (if path != "": path else: root.sval)
   template arity(n: int) =
     if count != n:
       err(e.line, e.sval & " takes " & $n & " argument(s)")
@@ -1364,8 +1458,32 @@ proc checkDynamicMethod(c: var Ctx, e: Expr, bt: Typ): Typ =
 
 ## Expression Checking
 
+include checker_dispatch
+
 proc checkExpr(c: var Ctx, e: Expr): Typ =
   case e.kind
+  of ObjectExpr:
+    let target = e.typ
+    if e.kids.len == 0:
+      return target
+    if e.kids.len != target.fields.len:
+      err(e.line, "object constructor needs one value per field")
+    for i, field in target.fields:
+      var actual = c.expectVal(e.kids[i])
+      if c.coerceOpt(e.kids[i], field.typ) or
+          c.coerceStrLit(e.kids[i], field.typ) or
+          coerceFloatLit(e.kids[i], field.typ):
+        actual = field.typ
+      if not typeEq(actual, field.typ):
+        err(e.line, "field '" & field.name & "' expects " & $field.typ)
+      if field.typ.kind == IntType and
+          not exprFact(e.kids[i]).fits(field.typ):
+        err(e.line, "cannot prove constructor value fits field '" & field.name & "'")
+      checkCopyRange(e.kids[i], field.typ)
+      if hasOwned(field.typ) and not freshOwnedValue(e.kids[i]):
+        err(e.line, "cannot copy owning field '" & field.name & "'")
+  of UnionWrapExpr, UnionProjectExpr, TypeIdExpr:
+    discard
   of FloatExpr:
     e.typ = floatType(8, "float64") # literals default to float64
   of IntExpr:
@@ -1380,6 +1498,13 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     if e.typ == nil or e.typ.kind != StringType:
       e.typ = Typ(kind: StringLitType)
   of IdentExpr:
+    if e.sval in c.namedTypes:
+      let target = c.namedTypes[e.sval]
+      e.kind = TypeIdExpr
+      e.ival = c.module.ensureTypeId(target)
+      e.typ = intType()
+      e.setFact Fact(lo: e.ival, hi: e.ival)
+      return e.typ
     c.resolveIdent(e)
     if e.typ != nil and e.typ.opt and c.factEligibleIdent(e) and
         (e.sval & "@ok") in c.facts:
@@ -1571,7 +1696,11 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       e.typ = if base.kind == SeqType: base.elem else: intType(0, 255)
     e.setFact typeFact(e.typ)
   of FieldExpr:
-    let base = c.expectVal(e.kids[0])
+    var base = c.expectVal(e.kids[0])
+    if e.sval == "ok" and e.kids[0].kind == UnionProjectExpr and
+        e.kids[0].kids[0].unwrapOpt:
+      e.kids[0] = e.kids[0].kids[0]
+      base = e.kids[0].typ
     if e.sval == "ok" and (base.opt or e.kids[0].unwrapOpt):
       # Reading the presence flag never needs a proof; undo any strip so
       # codegen reads the flag, not the value.
@@ -1654,6 +1783,10 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       # Total read of an optional: the value, or the fallback.
       if nArgs != 1:
         err(e.line, "or takes one fallback argument")
+      if e.kids[0].kind == UnionProjectExpr and
+          e.kids[0].kids[0].unwrapOpt:
+        e.kids[0] = e.kids[0].kids[0]
+        bt = e.kids[0].typ
       if e.kids[0].kind == IdentExpr and e.kids[0].unwrapOpt:
         # Already proven: undo the strip, or() still works.
         e.kids[0].unwrapOpt = false
@@ -1664,7 +1797,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       if hasOwned(bt):
         err(e.line, "or() cannot copy an owning value")
       var ft = c.expectVal(e.kids[1])
-      if c.coerceStrLit(e.kids[1], deOpt(bt)):
+      if c.coerceOpt(e.kids[1], deOpt(bt)) or
+          c.coerceStrLit(e.kids[1], deOpt(bt)):
         ft = deOpt(bt)
       if not typeEq(ft, deOpt(bt)):
         err(e.kids[1].line, "fallback must be " & $deOpt(bt) & ", got " & $ft)
@@ -2134,6 +2268,23 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     let bigOk = c.allowBigRet
     c.allowBigRet = false # arguments are not store targets
     var name = e.sval
+    if name in c.namedTypes and c.namedTypes[name].kind == ObjectType:
+      e.kind = ObjectExpr
+      e.typ = c.namedTypes[name]
+      return c.checkExpr(e)
+    if name == "type":
+      if e.kids.len != 1:
+        err(e.line, "type expects one value")
+      let target = c.expectVal(e.kids[0])
+      rejectOpt(target, e.kids[0])
+      if e.kids[0].kind == UnionProjectExpr:
+        e.kids[0] = e.kids[0].kids[0]
+      e.kind = TypeIdExpr
+      e.ival = (if target.kind == UnionType: 0
+        else: c.module.ensureTypeId(target))
+      e.typ = intType()
+      e.setFact fullFact()
+      return e.typ
     if name in ["float32", "float64"]:
       if e.kids.len != 1:
         err(e.line, name & "(x) takes exactly one argument")
@@ -2156,7 +2307,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     for i, arg in e.kids:
       if arg.kind != NoneExpr:
         ats[i] = c.expectVal(arg)
-    if name in c.overloads:
+    if name in c.overloads and not e.directCall:
       # Overload resolution: the first argument's kind picks the
       # routine, and from here on the call is the plain one.
       if e.kids.len == 0 or ats[0] == nil:
@@ -2171,7 +2322,19 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if c.routineTab[cn].params.len > 0 and
             dispatchKey(c.routineTab[cn].params[0].typ) == key:
           found = cn
+      if found == "" and ats[0].kind == ObjectType:
+        for candidate in c.overloads[name]:
+          let routine = c.routineTab[candidate]
+          if routine.params.len == 0 or routine.params[0].typ.kind != UnionType:
+            continue
+          for member in routine.params[0].typ.members:
+            if typeEq(member, ats[0]):
+              if found != "":
+                err(e.line, "ambiguous union overload of '" & name & "'")
+              found = candidate
       if found == "":
+        if ats[0].kind == UnionType:
+          err(e.line, c.unionDispatchProblem(name, ats[0]))
         err(e.line, "no overload of '" & name & "' takes " & key &
           " as its first argument")
       e.sval = found
@@ -2241,16 +2404,25 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           err(e.line, "cannot prove foreign buffer '" & pm.name &
             "' has " & rangeStr(count) & " accessible bytes or elements " &
             "(available at least " & $available & "); resize or guard first")
-    for i, arg in e.kids:
+    for i in 0 ..< e.kids.len:
       let pt = r.params[i]
-      var at: Typ = ats[i]
+      if pt.isVar and pt.typ.kind == UnionType and
+          e.kids[i].kind == UnionProjectExpr:
+        e.kids[i] = e.kids[i].kids[0]
+      let arg = e.kids[i]
+      if pt.isVar and pt.typ.opt and arg.unwrapOpt and
+          pt.typ.kind == UnionType:
+        arg.unwrapOpt = false
+        arg.typ = optOf(arg.typ)
+      var at: Typ = arg.typ
       if arg.kind == NoneExpr:
         if not pt.typ.opt:
           err(arg.line, "none needs an optional parameter")
         arg.typ = pt.typ
         at = pt.typ
       else:
-        if c.coerceOpt(arg, pt.typ):
+        if (not pt.isVar or pt.typ.kind != UnionType) and
+            c.coerceOpt(arg, pt.typ):
           at = pt.typ
         elif c.coerceStrLit(arg, pt.typ):
           at = pt.typ
@@ -2267,7 +2439,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         err(arg.line, "argument " & $(i + 1) & " of '" & name & "': expected " &
           $pt.typ & ", got " & $at)
       if pt.isVar:
-        if arg.kind notin {IdentExpr, IndexExpr, FieldExpr}:
+        if arg.kind notin {IdentExpr, IndexExpr, FieldExpr, UnionProjectExpr}:
           err(arg.line, "argument for var parameter '" & pt.name &
             "' must be a variable")
         if pathHasMapIndex(arg):
@@ -2346,7 +2518,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
               "' is also accessed through another path by '" & name & "'")
           if root.symKind == ParamSym and
               (hasOwned(c.globals[global]) or hasOwned(root.typ) or
-                root.typ.kind == ArrayType) and
+                root.typ.kind in {ArrayType, UnionType}) and
               containsType(c.globals[global], root.typ):
             err(e.line, "borrowed parameter '" & root.sval &
               "' might alias owning global '" & global &
@@ -2442,9 +2614,18 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         err(s.line, "'" & s.name & "' is zero-initialized, but 0 is not in " &
           $t & "; add an initializer")
     validateOwnedType(t, s.line)
-    if hasOwned(t) and s.init != nil:
+    if hasOwned(t) and s.init != nil and not freshOwnedValue(s.init):
       err(s.line, "owning strings and seqs cannot be copied or initialized " &
         "from a value; declare empty storage and use copyFrom")
+    if t.kind == UnionType and (not t.opt or
+        (s.init != nil and (s.init.wrapOpt or s.init.unwrapOpt))):
+      let selected = if s.init == nil: t.members[0]
+        elif s.init.kind == UnionWrapExpr: s.init.kids[0].typ
+        else: nil
+      if selected != nil:
+        for member in t.members:
+          if not typeEq(member, selected):
+            c.facts[s.name & "@union" & $member.typeId] = Fact(lo: 1, hi: 1)
     if c.isDeclared(s.name):
       err(s.line, "'" & s.name & "' is already declared (shadowing is not allowed)")
     s.typ = t
@@ -2537,19 +2718,19 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           c.facts[pk] = Fact(lo: 1, hi: 1)
         s.lhs.typ = bt.val
         return
-    if s.lhs.kind == IdentExpr:
-      # An assignment target is a place, not a value: undo any ok-strip.
-      discard c.expectVal(s.lhs)
-      if s.lhs.unwrapOpt:
-        s.lhs.unwrapOpt = false
-        s.lhs.typ = c.declTypeOf(s.lhs)
-    let lt =
-      if s.lhs.kind == IdentExpr: s.lhs.typ
-      else: c.expectVal(s.lhs)
+    # An assignment target denotes the whole place, including its tag.
+    discard c.expectVal(s.lhs)
+    if s.lhs.kind == UnionProjectExpr:
+      s.lhs = s.lhs.kids[0]
+    if s.lhs.kind == IdentExpr and s.lhs.unwrapOpt:
+      s.lhs.unwrapOpt = false
+      s.lhs.typ = c.declTypeOf(s.lhs)
+    let lt = s.lhs.typ
     if pathHasProperty(s.lhs):
       err(s.line, "container properties are read-only; use container methods")
-    if hasOwned(lt):
-      err(s.line, "owning strings and seqs cannot be assigned; use copyFrom")
+    # A fresh constructor replaces storage after the old owner is dropped.
+    # Descriptor copies still require an explicit copyFrom operation.
+
     if lt != nil and lt.kind == ChannelType:
       err(s.lhs.line, "a channel cannot be assigned or copied; " &
         "use send and recv")
@@ -2600,6 +2781,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
                 "into var parameter '" & root.sval & "': '" & callee &
                 "' accesses global '" & gname & "' of the same type, " &
                 "which '" & root.sval & "' might alias; store to a local first")
+    if hasOwned(lt) and not freshOwnedValue(s.rhs):
+      err(s.line, "owning strings and seqs cannot be assigned; use copyFrom")
     if not typeEq(lt, rt):
       err(s.line, "type mismatch: cannot assign " & $rt & " to " & $lt)
     if lt.kind in {ArrayType, SeqType, QueueType, DenseMapType,
@@ -2617,6 +2800,10 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     c.markModified(root.sval)
     if s.lhs.kind == IdentExpr:
       c.delFacts s.lhs.sval
+      if lt.kind == UnionType and s.rhs.kind == UnionWrapExpr:
+        for member in lt.members:
+          if not typeEq(member, s.rhs.kids[0].typ):
+            c.facts[s.lhs.sval & "@union" & $member.typeId] = Fact(lo: 1, hi: 1)
       if lt != nil and lt.opt and c.factEligibleIdent(s.lhs):
         # A definite value (wrapped plain or a proven optional) grants ok.
         if s.rhs.wrapOpt or s.rhs.unwrapOpt:
@@ -2626,22 +2813,23 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       elif c.factName(s.lhs) != "":
         c.facts[s.lhs.sval] = exprFact(s.rhs)
     else:
-      # A store through a FIELD path invalidates facts under its root
-      # (field ok-facts live there); a pure element store (s[i] = v)
-      # changes no lengths and carries no facts, so nothing dies.
-      var hasField = false
-      var cur = s.lhs
-      while cur.kind in {IndexExpr, FieldExpr}:
-        if cur.kind == FieldExpr:
-          hasField = true
-        cur = cur.kids[0]
-      if hasField:
+      # Indexed writes can overlap any constant-index tag proof, while
+      # element replacement leaves the container's length unchanged.
+      let path = c.stablePathName(s.lhs)
+      if path != "":
+        c.delFacts path
+      elif s.lhs.kind == IndexExpr:
+        var stale: seq[string]
+        for key in c.facts.keys:
+          if key.startsWith(root.sval & ".") and "@union" in key:
+            stale.add key
+        for key in stale:
+          c.facts.del key
+      else:
         c.delFacts root.sval
-        if lt != nil and lt.opt and s.lhs.kind == FieldExpr:
-          # A definite store into an optional field grants its path.
-          let pn = c.stablePathName(s.lhs)
-          if pn != "" and (s.rhs.wrapOpt or s.rhs.unwrapOpt):
-            c.facts[pn & "@ok"] = Fact(lo: 1, hi: 1)
+      if lt != nil and lt.opt and s.lhs.kind == FieldExpr:
+        if path != "" and (s.rhs.wrapOpt or s.rhs.unwrapOpt):
+          c.facts[path & "@ok"] = Fact(lo: 1, hi: 1)
   of IfStmt:
     var negAcc = c.facts
     var branchFacts: seq[Table[string, Fact]]
@@ -3593,7 +3781,16 @@ proc check*(m: Module) =
   ## Check the module and publish its shared semantic plan on success.
   m.semantics = nil
   var lockReport: seq[LockProof]
-  var c = Ctx()
+  var c = Ctx(module: m)
+  m.assignTypeIds()
+  c.namedTypes["int"] = intType()
+  c.namedTypes["bool"] = Typ(kind: BoolType)
+  c.namedTypes["float64"] = floatType(8, "float64")
+  c.namedTypes["float32"] = floatType(4, "float32")
+  for name, typ in c.namedTypes:
+    discard m.ensureTypeId(typ)
+  for definition in m.types:
+    c.namedTypes[definition.name] = definition.typ
   var used: HashSet[string]
   for td in m.types:
     validateOwnedType(td.typ, td.line)
@@ -3661,6 +3858,7 @@ proc check*(m: Module) =
       c.routineTab[r.name] = r
     if r.kind == ThreadRoutine:
       anyThread = true
+  c.synthesizeUnionDispatchers(m, used)
   c.usedNames = used
   if not anyThread:
     err(1, "a nifty program needs at least one thread (thread name() = ...)")
@@ -4017,6 +4215,7 @@ proc check*(m: Module) =
         us.add u
       us.sort()
       lockReport.add LockProof(name: gd.name, guards: guards, users: us)
+  m.assignTypeIds()
   let channelProgress = checkProgress(m)
   prepareSemantics(m)
   m.semantics.locks = lockReport

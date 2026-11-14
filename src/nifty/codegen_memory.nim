@@ -6,7 +6,7 @@ proc putLines(g: var Gen, source: string) =
     g.put line
 
 proc emitOwnedHelpers(g: var Gen, t: Typ) =
-  ## Emit recursive destruction and transactional copying for an owner.
+  ## Emits bounded-stack destruction and transactional copying for an owner.
   if not hasOwned(t) or (t.dynamic and not t.opt):
     return
   let
@@ -18,94 +18,24 @@ proc emitOwnedHelpers(g: var Gen, t: Typ) =
   let
     drop = "ni_drop_" & key
     copy = "ni_copy_" & key
-    heapTemp = typeSize(t) > arenaThreshold
-    tmp = if heapTemp: "(*tmp)" else: "tmp"
-    tmpPtr = "&" & tmp
   g.put "static void " & drop & "(" & cDecl("(*s)", t) & ") {"
-  if t.opt:
-    g.put "  if (s->m_ok) ni_drop_" & mangle(deOpt(t)) &
-      "(&s->m_val);"
-  else:
-    case t.kind
-    of ObjectType:
-      for field in t.fields:
-        if hasOwned(field.typ):
-          g.put "  ni_drop_" & mangle(field.typ) &
-            "(&s->m_" & field.name & ");"
-    of ArrayType:
-      g.put "  for (int64_t i = " & $t.len & "LL; i > 0; --i)"
-      g.put "    ni_drop_" & mangle(t.elem) & "(&(*s)[i - 1]);"
-    of SeqType:
-      g.put "  for (int64_t i = s->m_len; i > 0; --i)"
-      g.put "    ni_drop_" & mangle(t.elem) & "(&s->m_data[i - 1]);"
-    else:
-      discard
+  g.put "  ni_frame *stack = NULL;"
+  g.put "  ni_walk_" & key & "(s, &stack);"
+  g.put "  ni_drain(&stack);"
   g.put "  memset(s, 0, sizeof(*s));"
   g.put "}"
   g.put "static bool " & copy & "(" & cDecl("(*s)", t) &
     ", const " & cDecl("(*d)", t) & ") {"
   g.put "  if (s == d) return true;"
-  if heapTemp:
-    g.put "  " & cDecl("(*tmp)", t) &
-      " = ni_realloc(NULL, sizeof(*tmp));"
-    g.put "  if (tmp == NULL) return false;"
-    g.put "  memset(tmp, 0, sizeof(*tmp));"
-  else:
-    g.put "  " & cDecl("tmp", t) & " = {0};"
-  if t.opt:
-    g.put "  if (d->m_ok) {"
-    g.put "    if (!ni_copy_" & mangle(deOpt(t)) &
-      "(&" & tmp & ".m_val, &d->m_val)) {"
-    if heapTemp:
-      g.put "      ni_free(tmp);"
-    g.put "      return false;"
-    g.put "    }"
-    g.put "    " & tmp & ".m_ok = true;"
-    g.put "  }"
-  else:
-    case t.kind
-    of ObjectType:
-      for field in t.fields:
-        let path = "m_" & field.name
-        if hasOwned(field.typ):
-          g.put "  if (!ni_copy_" & mangle(field.typ) &
-            "(&" & tmp & "." & path & ", &d->" & path & ")) {"
-          g.put "    " & drop & "(" & tmpPtr & ");"
-          if heapTemp:
-            g.put "    ni_free(tmp);"
-          g.put "    return false;"
-          g.put "  }"
-        else:
-          g.put "  memcpy(&" & tmp & "." & path & ", &d->" & path &
-            ", sizeof(" & tmp & "." & path & "));"
-    of ArrayType:
-      g.put "  for (int64_t i = 0; i < " & $t.len & "LL; ++i) {"
-      g.put "    if (!ni_copy_" & mangle(t.elem) &
-        "(&" & tmp & "[i], &(*d)[i])) {"
-      g.put "      " & drop & "(" & tmpPtr & ");"
-      if heapTemp:
-        g.put "      ni_free(tmp);"
-      g.put "      return false;"
-      g.put "    }"
-      g.put "  }"
-    of SeqType:
-      g.put "  for (int64_t i = 0; i < d->m_len; ++i) {"
-      g.put "    if (!ni_copy_" & mangle(t.elem) &
-        "(&" & tmp & ".m_data[i], &d->m_data[i])) {"
-      g.put "      " & drop & "(" & tmpPtr & ");"
-      if heapTemp:
-        g.put "      ni_free(tmp);"
-      g.put "      return false;"
-      g.put "    }"
-      g.put "    ++" & tmp & ".m_len;"
-      g.put "  }"
-    else:
-      discard
-  g.put "  " & drop & "(s);"
-  g.put "  memcpy(s, " & tmpPtr & ", sizeof(*s));"
-  if heapTemp:
-    g.put "  ni_free(tmp);"
-  g.put "  return true;"
+  g.put "  " & cDecl("(*tmp)", t) & " = ni_realloc(NULL, sizeof(*tmp));"
+  g.put "  if (tmp == NULL) return false;"
+  g.put "  memset(tmp, 0, sizeof(*tmp));"
+  g.put "  ni_task *tasks = NULL;"
+  g.put "  bool ok = ni_clone_" & key & "(tmp, d, &tasks) && ni_clone_drain(&tasks);"
+  g.put "  ni_tasks_clear(&tasks);"
+  g.put "  if (ok) { " & drop & "(s); memcpy(s, tmp, sizeof(*s)); }"
+  g.put "  else " & drop & "(tmp);"
+  g.put "  ni_free(tmp); return ok;"
   g.put "}"
 
 proc emitDynamicType(g: var Gen, t: Typ) =
@@ -122,23 +52,18 @@ proc emitDynamicType(g: var Gen, t: Typ) =
     drop = "ni_drop_" & key
     copy = "ni_copy_" & key
   g.put ""
-  g.put "typedef struct {"
-  g.put "  int64_t m_len;"
-  g.put "  int64_t m_cap;"
-  g.put "  " & elem & " *m_data;"
-  g.put "} " & n & ";"
   g.putLines("""
 static bool $N_reserve($N *s, int64_t k) {
   if (k < 0) return false;
   if (k <= s->m_cap) return true;
-  if ((uint64_t)k > SIZE_MAX / sizeof(*s->m_data)) return false;
+  if ((uint64_t)k > (SIZE_MAX - sizeof(ni_frame)) / sizeof(*s->m_data)) return false;
   int64_t cap = s->m_cap > 0 ? s->m_cap : 8;
   while (cap < k) {
     if (cap > INT64_MAX / 2) { cap = k; break; }
     cap *= 2;
   }
-  if ((uint64_t)cap > SIZE_MAX / sizeof(*s->m_data)) cap = k;
-  void *data = ni_realloc(s->m_data, (size_t)cap * sizeof(*s->m_data));
+  if ((uint64_t)cap > (SIZE_MAX - sizeof(ni_frame)) / sizeof(*s->m_data)) cap = k;
+  void *data = ni_realloc(s->m_data, (size_t)cap * sizeof(*s->m_data) + sizeof(ni_frame));
   if (data == NULL) return false;
   memset(($E *)data + s->m_cap, 0,
     (size_t)(cap - s->m_cap) * sizeof(*s->m_data));
@@ -156,8 +81,8 @@ static bool $N_reserve($N *s, int64_t k) {
   g.put "  s->m_len = 0;"
   g.put "}"
   g.put "static void " & drop & "(" & n & " *s) {"
-  g.put "  " & n & "_clear(s);"
-  g.put "  ni_free(s->m_data);"
+  g.put "  ni_frame *stack = NULL;"
+  g.put "  ni_walk_" & key & "(s, &stack); ni_drain(&stack);"
   g.put "  memset(s, 0, sizeof(*s));"
   g.put "}"
   g.put "static bool " & n & "_resize(" & n & " *s, int64_t k) {"
@@ -166,9 +91,13 @@ static bool $N_reserve($N *s, int64_t k) {
   if ownsElements:
     g.put "  for (int64_t i = s->m_len; i > k; --i)"
     g.put "    ni_drop_" & child & "(&s->m_data[i - 1]);"
-  g.put "  if (k > s->m_len)"
-  g.put "    memset(s->m_data + s->m_len, 0,"
-  g.put "      (size_t)(k - s->m_len) * sizeof(*s->m_data));"
+  if t.kind == SeqType and needsDefault(t.elem):
+    g.put "  for (int64_t i = s->m_len; i < k; ++i)"
+    g.put "    ni_init_" & mangle(t.elem) & "(&s->m_data[i]);"
+  else:
+    g.put "  if (k > s->m_len)"
+    g.put "    memset(s->m_data + s->m_len, 0,"
+    g.put "      (size_t)(k - s->m_len) * sizeof(*s->m_data));"
   g.put "  s->m_len = k; return true;"
   g.put "}"
   g.put "static bool " & n & "_setLen(" & n & " *s, int64_t k) {"
@@ -176,27 +105,18 @@ static bool $N_reserve($N *s, int64_t k) {
   if ownsElements:
     g.put "  for (int64_t i = s->m_len; i > k; --i)"
     g.put "    ni_drop_" & child & "(&s->m_data[i - 1]);"
+  if t.kind == SeqType and needsDefault(t.elem):
+    g.put "  for (int64_t i = s->m_len; i < k; ++i)"
+    g.put "    ni_init_" & mangle(t.elem) & "(&s->m_data[i]);"
   g.put "  s->m_len = k; return true;"
   g.put "}"
   g.put "static bool " & copy & "(" & n & " *s, const " & n & " *d) {"
   g.put "  if (s == d) return true;"
-  g.put "  " & n & " tmp = {0};"
-  g.put "  if (!" & n & "_reserve(&tmp, d->m_len)) return false;"
-  if ownsElements:
-    g.put "  for (int64_t i = 0; i < d->m_len; ++i) {"
-    g.put "    memset(&tmp.m_data[i], 0, sizeof(*tmp.m_data));"
-    g.put "    if (!ni_copy_" & child &
-      "(&tmp.m_data[i], &d->m_data[i])) {"
-    g.put "      " & drop & "(&tmp); return false;"
-    g.put "    }"
-    g.put "    ++tmp.m_len;"
-    g.put "  }"
-  else:
-    g.put "  if (d->m_len > 0)"
-    g.put "    memcpy(tmp.m_data, d->m_data,"
-    g.put "      (size_t)d->m_len * sizeof(*tmp.m_data));"
-    g.put "  tmp.m_len = d->m_len;"
-  g.put "  " & drop & "(s); *s = tmp; return true;"
+  g.put "  " & n & " tmp = {0}; ni_task *tasks = NULL;"
+  g.put "  bool ok = ni_clone_" & key & "(&tmp, d, &tasks) && ni_clone_drain(&tasks);"
+  g.put "  ni_tasks_clear(&tasks);"
+  g.put "  if (ok) { " & drop & "(s); *s = tmp; } else " & drop & "(&tmp);"
+  g.put "  return ok;"
   g.put "}"
   if t.kind == SeqType:
     g.put "static bool " & n & "_copyFrom(" & n & " *s, const " &
@@ -367,3 +287,131 @@ static NS_pi $N_get(const $N *s, int64_t i) {
   return out;
 }
 """.replace("$N", n).replace("$DROP", drop))
+
+proc emitWalkers(g: var Gen) =
+  ## Uses allocation tail frames to release arbitrary depth without allocating.
+  let owned = g.pendingOwners & g.pendingDynamics
+  if owned.len == 0:
+    return
+  g.put "typedef struct ni_frame { struct ni_frame *next; void *owner; int64_t kind; } ni_frame;"
+  for t in owned:
+    g.put "static void ni_walk_" & mangle(t) & "(" & cDecl("(*s)", t) & ", ni_frame **stack);"
+  for index, t in owned:
+    g.put "static void ni_walk_" & mangle(t) & "(" & cDecl("(*s)", t) & ", ni_frame **stack) {"
+    if t.opt:
+      g.put "  if (s->m_ok) ni_walk_" & mangle(deOpt(t)) & "(&s->m_val, stack);"
+    else:
+      case t.kind
+      of UnionType:
+        g.put "  switch (s->m_tag) {"
+        for member in t.members:
+          if hasOwned(member):
+            g.put "  case " & $member.typeId & "ULL: ni_walk_" & mangle(member) &
+              "(&s->m_payload.m_" & member.name & ", stack); break;"
+        g.put "  default: break; }"
+      of ObjectType:
+        for field in t.fields:
+          if hasOwned(field.typ):
+            g.put "  ni_walk_" & mangle(field.typ) & "(&s->m_" & field.name & ", stack);"
+      of ArrayType:
+        g.put "  for (int64_t i = 0; i < " & $t.len & "LL; ++i)"
+        g.put "    ni_walk_" & mangle(t.elem) & "(&(*s)[i], stack);"
+      of SeqType:
+        if t.dynamic:
+          if hasOwned(t.elem):
+            g.put "  if (s->m_data != NULL) {"
+            g.put "    ni_frame *frame = (ni_frame *)(s->m_data + s->m_cap);"
+            g.put "    *frame = (ni_frame){*stack, s, " & $index & "}; *stack = frame;"
+            g.put "  }"
+          else:
+            g.put "  ni_free(s->m_data);"
+        elif hasOwned(t.elem):
+          g.put "  for (int64_t i = 0; i < s->m_len; ++i)"
+          g.put "    ni_walk_" & mangle(t.elem) & "(&s->m_data[i], stack);"
+      of StringType:
+        if t.dynamic:
+          g.put "  ni_free(s->m_data);"
+      else:
+        discard
+    g.put "}"
+  g.put "static void ni_drain(ni_frame **stack) {"
+  g.put "  while (*stack != NULL) {"
+  g.put "    ni_frame *frame = *stack;"
+  g.put "    switch (frame->kind) {"
+  for index, t in owned:
+    if t.dynamic and t.kind == SeqType and hasOwned(t.elem):
+      g.put "    case " & $index & ": {"
+      g.put "      " & cBase(t) & " *s = frame->owner;"
+      g.put "      if (s->m_len > 0) {"
+      g.put "        --s->m_len; ni_walk_" & mangle(t.elem) & "(&s->m_data[s->m_len], stack);"
+      g.put "      } else {"
+      g.put "        *stack = frame->next; ni_free(s->m_data);"
+      g.put "      } break; }"
+  g.put "    default: abort();"
+  g.put "    }"
+  g.put "  }"
+  g.put "}"
+  g.put "typedef struct ni_task { struct ni_task *next; void *dst; const void *src; int64_t kind; } ni_task;"
+  g.put "static void ni_tasks_clear(ni_task **tasks) { while (*tasks) { ni_task *t = *tasks; *tasks = t->next; ni_free(t); } }"
+  for t in owned:
+    g.put "static bool ni_clone_" & mangle(t) & "(" & cDecl("(*s)", t) & ", const " & cDecl("(*d)", t) & ", ni_task **tasks);"
+  for index, t in owned:
+    g.put "static bool ni_clone_" & mangle(t) & "(" & cDecl("(*s)", t) & ", const " & cDecl("(*d)", t) & ", ni_task **tasks) {"
+    if t.opt:
+      g.put "  s->m_ok = d->m_ok;"
+      g.put "  if (d->m_ok && !ni_clone_" & mangle(deOpt(t)) & "(&s->m_val, &d->m_val, tasks)) return false;"
+    else:
+      case t.kind
+      of ObjectType:
+        for field in t.fields:
+          let path = "m_" & field.name
+          if hasOwned(field.typ):
+            g.put "  if (!ni_clone_" & mangle(field.typ) & "(&s->" & path & ", &d->" & path & ", tasks)) return false;"
+          else:
+            g.put "  memcpy(&s->" & path & ", &d->" & path & ", sizeof(s->" & path & "));"
+      of UnionType:
+        g.put "  s->m_tag = d->m_tag; switch (d->m_tag) {"
+        for member in t.members:
+          let path = "m_payload.m_" & member.name
+          g.put "  case " & $member.typeId & "ULL:"
+          if hasOwned(member):
+            g.put "    if (!ni_clone_" & mangle(member) & "(&s->" & path & ", &d->" & path & ", tasks)) return false;"
+          else:
+            g.put "    memcpy(&s->" & path & ", &d->" & path & ", sizeof(s->" & path & "));"
+          g.put "    break;"
+        g.put "  default: break; }"
+      of ArrayType:
+        g.put "  for (int64_t i = 0; i < " & $t.len & "LL; ++i)"
+        g.put "    if (!ni_clone_" & mangle(t.elem) & "(&(*s)[i], &(*d)[i], tasks)) return false;"
+      of SeqType, StringType:
+        if t.dynamic:
+          g.put "  if (d->m_len > 0) {"
+          g.put "    if ((uint64_t)d->m_len > (SIZE_MAX - sizeof(ni_frame)) / sizeof(*s->m_data)) return false;"
+          g.put "    s->m_data = ni_realloc(NULL, (size_t)d->m_len * sizeof(*s->m_data) + sizeof(ni_frame));"
+          g.put "    if (s->m_data == NULL) return false;"
+          g.put "    s->m_cap = s->m_len = d->m_len;"
+          g.put "    memset(s->m_data, 0, (size_t)s->m_len * sizeof(*s->m_data));"
+        else:
+          g.put "  { s->m_len = d->m_len;"
+        if t.kind == SeqType and hasOwned(t.elem):
+          g.put "    ni_task *task = ni_realloc(NULL, sizeof(*task));"
+          g.put "    if (task == NULL) return false;"
+          g.put "    *task = (ni_task){*tasks, s, d, " & $index & "}; *tasks = task;"
+        else:
+          g.put "    if (d->m_len > 0) memcpy(s->m_data, d->m_data, (size_t)d->m_len * sizeof(*s->m_data));"
+        g.put "  }"
+      else:
+        discard
+    g.put "  return true; }"
+  g.put "static bool ni_clone_drain(ni_task **tasks) {"
+  g.put "  while (*tasks) { ni_task *task = *tasks; *tasks = task->next;"
+  g.put "    bool ok = true; switch (task->kind) {"
+  for index, t in owned:
+    if t.kind == SeqType and hasOwned(t.elem):
+      g.put "    case " & $index & ": {"
+      g.put "      " & cBase(t) & " *s = task->dst; const " & cBase(t) & " *d = task->src;"
+      g.put "      for (int64_t i = 0; ok && i < d->m_len; ++i)"
+      g.put "        ok = ni_clone_" & mangle(t.elem) & "(&s->m_data[i], &d->m_data[i], tasks);"
+      g.put "      break; }"
+  g.put "    default: abort(); } ni_free(task); if (!ok) return false;"
+  g.put "  } return true; }"

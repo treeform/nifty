@@ -1,0 +1,47 @@
+object Number =
+  value: int
+
+object Text =
+  value: string
+
+type Value = Number or Text
+
+proc fill(value: var Value): bool =
+  value = Text()
+  if type(value) == Text:
+    return value.value.add("owned")
+  return false
+
+proc show(value: Number) =
+  echo value.value
+
+proc show(value: Text) =
+  echo value.value
+
+proc leave() =
+  var value: Value = Text()
+  if type(value) == Text:
+    discard value.value.add("early")
+  show(value)
+  return
+
+thread main() =
+  var value: Value = Number(3)
+  show(value)
+  echo fill(value)
+  show(value)
+  value = Number(8)
+  show(value)
+  block:
+    var inner: Value = Text()
+    if type(inner) == Text:
+      discard inner.value.add("block")
+    show(inner)
+  leave()
+  var values: seq[Value]
+  echo values.push(Number(4))
+  echo values.push(Text())
+  for item in values:
+    show(item)
+  values.clear()
+  echo values.len

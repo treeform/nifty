@@ -1,0 +1,59 @@
+# JSON values use distinct nominal types and a hidden union discriminator.
+# Growable fields belong to the node and are released with its scope.
+
+object NumNode =
+  value: float64
+
+object StrNode =
+  value: string
+
+object ArrNode =
+  items: seq[JsonNode]
+
+object JsonField =
+  name: string
+  value: JsonNode
+
+object ObjNode =
+  fields: seq[JsonField]
+
+type JsonNode = NumNode or StrNode or ArrNode or ObjNode
+
+proc describe(node: NumNode) =
+  echo "number ", node.value
+
+proc describe(node: StrNode) =
+  echo "string ", node.value
+
+proc describe(node: ArrNode) =
+  echo "array with ", node.items.len, " elements"
+
+proc describe(node: ObjNode) =
+  echo "object with ", node.fields.len, " fields"
+
+proc appendNumber(node: var JsonNode, value: float64): bool =
+  if type(node) == ArrNode:
+    return node.items.push(NumNode(value))
+  return false
+
+thread main() =
+  var node: JsonNode = NumNode(9.0)
+  describe(node)
+  node = StrNode()
+  if type(node) == StrNode:
+    discard node.value.add("hello")
+  describe(node)
+  node = ArrNode()
+  echo appendNumber(node, 3.0)
+  echo appendNumber(node, 5.0)
+  describe(node)
+  if type(node) == ArrNode:
+    for child in node.items:
+      describe(child)
+  node = ObjNode()
+  if type(node) == ObjNode:
+    discard node.fields.resize(1)
+    if node.fields.len > 0:
+      discard node.fields[0].name.add("answer")
+      node.fields[0].value = NumNode(42.0)
+  describe(node)

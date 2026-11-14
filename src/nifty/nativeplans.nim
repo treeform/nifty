@@ -9,6 +9,8 @@ type
     kind*: TypKind
     bytes*, align*, capacity*: int64
     dynamic*, owned*: bool
+    typeId*: int64
+    members*: seq[int]
     elem*, key*, val*: int
     lower*, upper*: int64
     dataOffset*, keyOffset*, valOffset*, okOffset*: int

@@ -363,22 +363,78 @@ passed to them remain valid in generic routines.
   ```
 
   The struct layout is fixed. Fields may own growable storage. A type can
-  only refer to types declared *above* it — declare-before-use for types —
-  so recursive layouts and unknown descriptor sizes are impossible by
-  construction.
+  refer to a later named type when recursion passes through a growable
+  sequence. Inline recursive layouts remain invalid: every object and
+  union must have a finite statically known size.
   Objects without owned fields have C value semantics: assignment and
   non-`var` parameters copy (a fixed, compile-time-known cost), `var`
   parameters pass by pointer. Objects with owned fields cannot be copied
   or returned and are borrowed by parameters. Field access `a.b` nests
-  freely with indexing (`particles[i].pos.x`). Zero-initialized; no
-  constructors or literals
-  in v0: declare, then assign fields.
+  freely with indexing (`particles[i].pos.x`). `Vec2(x, y)` initializes
+  fields in declaration order; `Vec2()` uses their defaults. Owned fields
+  begin empty, and union fields select their first declared member.
 - `Lock` — a mutex. Only allowed as a global; only usable via `with`.
 - String literals appear as `echo` arguments and anywhere a `string[N]`
   is expected (they must fit, checked at compile time). They can also be
   borrowed by read-only `string` parameters and passed to growable string
   methods. A growable local starts empty; fill it with a checked operation
   instead of an allocating literal initializer.
+
+### Tagged unions
+
+Declare a union from distinct nominal object types:
+
+```nim
+object NumNode =
+  value: int
+object StrNode =
+  value: string
+object ArrNode =
+  items: seq[JsonNode]
+type JsonNode = NumNode or StrNode or ArrNode
+```
+
+A union stores one active member inline. Its hidden 64-bit discriminator
+identifies the concrete object type across the entire program, independent
+of the order of members in a union declaration. The payload has room and
+alignment for the largest member. `type(value)` reads that discriminator;
+for an ordinary object it identifies its nominal type. Inferred scalar
+values can also be inspected, for example `type(17) == int`. Type
+expressions are comparable with `==` and `!=` in either operand order;
+they do not expose a numeric tag API.
+
+A union without owned storage may be optional (`JsonLeaf?`). Prove
+presence with `.ok` before inspecting its active member with `type()`.
+Optional unions containing owned storage remain prohibited.
+
+Member values convert to their declared union at initialization,
+assignment, argument, return, and container element boundaries. An
+uninitialized union selects the first declared member with its default
+payload, including inside objects, arrays, and resized sequences. Choose
+member order deliberately when that default matters.
+
+Field access requires a concrete active member proven by assignment or
+control flow. For example, `if type(node) == NumNode:` permits
+`node.value` within that branch. An `else` excludes the tested member;
+after all other members are excluded, the remaining member is concrete.
+A write or a call that can replace a union invalidates prior facts.
+Identical field names on different members do not make access safe
+without a proof of the active member.
+
+Overloads use the proven concrete member when available. For an unknown
+union, an explicitly declared union overload takes precedence. Otherwise,
+the compiler synthesizes a dispatcher on the first parameter only when
+every member has a matching overload with consistent remaining parameters
+and result type. Missing coverage or incompatible signatures is a compile
+error; dispatch never silently drops an alternative.
+
+Unions inherit ownership from their members. Replacing an owned member
+releases its active payload, and scope exit releases the active member
+recursively. Borrowing a union follows the ordinary exclusive mutable
+borrow rules. Growable sequences make recursive trees possible without
+inline recursive storage. Ordinary assignment and initialization do not
+copy owned trees. Explicit container insertion and `copyFrom` follow their
+existing deep-copy rules. Borrowed references cannot escape their scope.
 
 ### Containers
 

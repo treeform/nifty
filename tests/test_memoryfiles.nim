@@ -103,6 +103,8 @@ doAssert decodeNative(generated.encodeNative()).plan.ownedGlobals ==
 var oldVersion = encoded
 oldVersion[0 ..< 8] = "NIFTYN01"
 rejected(oldVersion)
+oldVersion[0 ..< 8] = "NIFTYN02"
+rejected(oldVersion)
 
 var changed = encoded.metadata()
 changed["layouts"][1].delete("owned")

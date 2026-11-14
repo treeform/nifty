@@ -4,7 +4,7 @@ import common, types, nativeplans, nativeoptimizations, backend/engine
 export nativeplans, nativeoptimizations, engine
 
 const
-  NativeMagic* = "NIFTYN02"
+  NativeMagic* = "NIFTYN03"
   NativeHeader = 40
   MaxNativeFile = 128 * 1024 * 1024
   MaxNativeStorage = 1024 * 1024 * 1024
@@ -94,7 +94,7 @@ proc validateNative*(program: NativeProgram) =
           (layout.bytes != 32 or layout.okOffset != 24))):
       raise newException(NiftyError, "invalid native dynamic layout")
     if layout.owned and layout.kind notin
-        {StringType, SeqType, ArrayType, ObjectType}:
+        {StringType, SeqType, ArrayType, ObjectType, UnionType}:
       raise newException(NiftyError, "unsupported native ownership layout")
     if layout.kind in {ArrayType, SeqType, QueueType, ChannelType} and
         (layout.elem < 0 or layout.elem >= plan.layouts.len):
@@ -107,6 +107,16 @@ proc validateNative*(program: NativeProgram) =
     if layout.kind in {DenseMapType, SparseMapType} and
         layout.val >= 0 and layout.val < plan.layouts.len:
       owned = owned or plan.layouts[layout.val].owned
+    if layout.kind == UnionType:
+      if layout.members.len < 2 or layout.dataOffset < 8 or
+          layout.dataOffset > layout.bytes:
+        raise newException(NiftyError, "invalid native union layout")
+      for member in layout.members:
+        if member < 0 or member >= plan.layouts.len or
+            plan.layouts[member].typeId <= 0 or
+            plan.layouts[member].bytes > layout.bytes - layout.dataOffset:
+          raise newException(NiftyError, "invalid native union member")
+        owned = owned or plan.layouts[member].owned
     for field in layout.fields:
       if field.typ < 0 or field.typ >= plan.layouts.len or
           field.offset < 0 or field.offset > layout.bytes or
@@ -171,7 +181,7 @@ proc encodeNative*(program: NativeProgram): string =
   result.add code
 
 proc decodeNative*(data: string): NativeProgram =
-  ## Decodes and validates a complete version two native image.
+  ## Decodes and validates a complete version three native image.
   if data.len < NativeHeader or data.len > MaxNativeFile or
       data[0 ..< 8] != NativeMagic:
     raise newException(NiftyError, "unrecognized or truncated native image")

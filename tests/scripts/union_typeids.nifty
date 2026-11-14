@@ -1,0 +1,30 @@
+object First =
+  value: int
+object Second =
+  value: int
+object Third =
+  value: int
+
+type Forward = First or Second
+type Reverse = Second or First
+type Other = Third or First
+
+proc inspect(a: Forward, b: Reverse, c: Other) =
+  echo type(a) == type(b)
+  echo type(a) == type(c)
+  echo type(a) == First
+  echo type(b) == Second
+  echo type(c) == Third
+  if First == type(a):
+    echo a.value
+
+thread main() =
+  inspect(First(1), First(2), First(3))
+  inspect(First(1), Second(2), Third(3))
+  let integer = 17
+  let real = 2.5
+  let flag = true
+  echo type(integer) == int
+  echo type(real) == float64
+  echo type(flag) == bool
+  echo type(integer) == type(flag)

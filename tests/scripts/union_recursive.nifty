@@ -1,0 +1,45 @@
+object Number =
+  value: int
+
+object Array =
+  items: seq[Node]
+
+object Field =
+  name: string
+  value: Node
+
+object Object =
+  fields: seq[Field]
+
+type Node = Number or Array or Object
+
+proc show(value: Number) =
+  echo "number ", value.value
+
+proc show(value: Array) =
+  echo "array ", value.items.len
+
+proc show(value: Object) =
+  echo "object ", value.fields.len
+
+proc append(value: var Node, number: int): bool =
+  if type(value) == Array:
+    return value.items.push(Number(number))
+  return false
+
+thread main() =
+  var value: Node = Array()
+  echo append(value, 3)
+  echo append(value, 5)
+  show(value)
+  if type(value) == Array:
+    for child in value.items:
+      show(child)
+  value = Object()
+  if type(value) == Object:
+    echo value.fields.resize(1)
+    for field in value.fields:
+      show(field.value)
+  show(value)
+  value = Number(11)
+  show(value)

@@ -1,0 +1,37 @@
+object A =
+  value: int
+object B =
+  value: int
+type U = A or B
+var messages: channel[2, U]
+proc show(value: A) =
+  echo value.value
+proc show(value: B) =
+  echo value.value
+thread producer() =
+  messages.send(A(42))
+  messages.send(B(43))
+thread consumer() =
+  show(messages.recv())
+  show(messages.recv())
+  var queue: queue[2, U]
+  echo queue.push(A(1))
+  echo queue.push(B(2))
+  if queue.len > 0:
+    show(queue.pop())
+  if queue.len > 0:
+    show(queue.pop())
+  var dense: map[0 .. 2, U]
+  dense.put(0, A(3))
+  show(dense.get(0, B(4)))
+  show(dense.get(1, B(4)))
+  dense[1] = B(5)
+  show(dense[1])
+  var sparse: map[2, int, U]
+  echo sparse.put(0, A(6))
+  if sparse.contains(0):
+    show(sparse[0])
+  if sparse.len < 2:
+    sparse[1] = B(7)
+    show(sparse[1])
+  show(sparse.get(9, A(8)))

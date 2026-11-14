@@ -1,0 +1,30 @@
+object Pair =
+  left: int
+  right: int
+
+object Empty =
+  discard
+
+type Value = Pair or Empty
+
+proc next(counter: var 0 .. 10): int =
+  let current = counter
+  if current < 10:
+    counter = current + 1
+  return counter
+
+proc make(counter: var 0 .. 10): Pair =
+  return Pair(next(counter), next(counter))
+
+thread main() =
+  var counter: 0 .. 10
+  var value: Value = Pair(next(counter), next(counter))
+  if type(value) == Pair:
+    echo value.left, " ", value.right, " ", counter
+  value = make(counter)
+  if type(value) == Pair:
+    echo value.left, " ", value.right, " ", counter
+  echo type(make(counter)) == Pair
+  echo counter
+  value = Empty()
+  echo type(value) == Empty

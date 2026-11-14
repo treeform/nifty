@@ -192,7 +192,8 @@ different-architecture template can be supplied with `NIFTY_RUNTIME_AMD64` or
 `nifty-runtime-amd64` or `nifty-runtime-arm64`.
 Windows runtime template filenames have an `.exe` suffix.
 
-Native images use the `NIFTYN02` format, which includes ownership metadata.
+Native images use the `NIFTYN03` format, which includes union tags, member
+layouts, and ownership metadata.
 Rebuild the compiler and runtime templates together after this update, and
 re-emit images created with the earlier format.
 

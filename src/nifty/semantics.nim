@@ -49,6 +49,7 @@ proc expression(p: var Planner, e: Expr) =
   ## Records resolved identities on expression references.
   if e.isNil:
     return
+  p.plan.usesHeap = p.plan.usesHeap or hasOwned(e.typ)
   e.binding = 0
   if e.kind == IdentExpr:
     e.binding = p.resolve(e.sval)

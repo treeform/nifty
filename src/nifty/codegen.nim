@@ -16,6 +16,9 @@ type
     frameOf: Table[string, int64]  # routine -> its own arena frame bytes
     needOf: Table[string, int64]   # routine -> worst-case arena incl callees
     bigOffs: Table[string, Table[string, int64]] # routine -> local -> offset
+    exprOffsets: Table[string, Table[pointer, int64]]
+    exprBytes: Table[string, int64]
+    curRoutine: string
     curOffsets: Table[string, int64]
     curArena: Table[string, int64] # current routine's big locals
     curRet: Typ                    # return type of the routine being emitted
@@ -23,6 +26,9 @@ type
     curThread: bool
     source: Module
     ownerPaths: Table[BindingId, string]
+    typesReady: bool
+    pendingOwners, pendingDynamics, pendingElements: seq[Typ]
+    defaultTypes: seq[Typ]
 
 proc put(g: var Gen, s: string) =
   g.o.add spaces(g.ind * 2)
@@ -67,6 +73,7 @@ proc mangle(t: Typ): string =
     "_" & mangle(t.val)
   of SparseMapType: "m" & $t.len & "_" & mangle(t.elem) & "_" & mangle(t.val)
   of ObjectType: "o" & t.name
+  of UnionType: "u_" & t.name
   else: "x"
 
 proc cBase(t: Typ): string =
@@ -79,6 +86,7 @@ proc cBase(t: Typ): string =
     if t.width == 0 or (t.width == 8 and t.rlo < 0): "int64_t"
     else: (if t.rlo >= 0: "uint" else: "int") & $(t.width * 8) & "_t"
   of ObjectType: "S_" & t.name
+  of UnionType: "U_" & t.name
   of SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType,
       ChannelType: "NS_" & mangle(t)
   else: "int64_t"
@@ -95,6 +103,30 @@ proc passByPtr(t: Typ): bool =
   ## var parameters pass by pointer, except arrays which already decay.
   t.kind != ArrayType
 
+proc needsDefault(t: Typ): bool =
+  ## Identifies inline union tags which cannot use an all-zero default.
+  if t.isNil or t.opt or t.dynamic:
+    return false
+  case t.kind
+  of UnionType:
+    true
+  of ObjectType:
+    for field in t.fields:
+      if needsDefault(field.typ):
+        return true
+    false
+  of ArrayType:
+    needsDefault(t.elem)
+  else:
+    false
+
+proc initialize(g: var Gen, destination: string, typ: Typ) =
+  ## Initializes fresh storage without allocating or exposing empty tags.
+  if needsDefault(typ):
+    g.put "ni_init_" & mangle(typ) & "(" & destination & ");"
+  else:
+    g.put "memset(" & destination & ", 0, " & $typeSize(typ) & "LL);"
+
 include codegen_memory
 
 proc externSym(r: Routine): string =
@@ -108,6 +140,8 @@ proc externName(r: Routine): string =
 proc genStrMethod(g: var Gen, e: Expr, ordered: bool): string
 proc genOrdered(g: var Gen, e: Expr): string
 proc genPathOrdered(g: var Gen, e: Expr): string
+proc destinationCall(e: Expr): bool
+proc genCallInto(g: var Gen, e: Expr, dest: string)
 proc borrowArg(g: var Gen, e: Expr, target: Typ, ordered: bool): string
 
 proc floatLiteral(e: Expr): string =
@@ -136,7 +170,22 @@ proc genExpr(g: var Gen, e: Expr): string =
     e.typ = optT
     e.wrapOpt = true
     return "((" & cBase(optT) & "){ .m_val = " & inner & ", .m_ok = true })"
+  if destinationCall(e):
+    return g.genOrdered(e)
+  if e.kind == NoneExpr and typeSize(e.typ) > arenaThreshold:
+    return g.genOrdered(e)
   case e.kind
+  of ObjectExpr, UnionWrapExpr:
+    g.genOrdered(e)
+  of UnionProjectExpr:
+    "(" & g.genExpr(e.kids[0]) & ").m_payload.m_" & e.typ.name
+  of TypeIdExpr:
+    if e.ival > 0 and e.kids.len == 0:
+      $e.ival & "LL"
+    elif e.ival > 0:
+      "((void)(" & g.genExpr(e.kids[0]) & "), " & $e.ival & "LL)"
+    else:
+      "((int64_t)(" & g.genExpr(e.kids[0]) & ").m_tag)"
   of NoneExpr:
     "((" & cBase(e.typ) & "){0})"
   of IntExpr:
@@ -169,7 +218,8 @@ proc genExpr(g: var Gen, e: Expr): string =
         else:
           "v_" & e.sval
       of ParamSym:
-        if g.source.mode(e.binding).isBorrow and e.typ.passByPtr:
+        if (g.source.mode(e.binding).isBorrow or bigRet(e.typ)) and
+            e.typ.passByPtr:
           "(*p_" & e.sval & ")"
         else:
           "p_" & e.sval
@@ -213,6 +263,9 @@ proc genExpr(g: var Gen, e: Expr): string =
     for i, a in e.kids:
       if r.externLib != "" and r.params[i].typ.kind == StringType:
         parts.add g.genExpr(a) & ".m_data"
+      elif bigRet(r.params[i].typ) and r.params[i].typ.passByPtr and
+          not g.source.mode(r.params[i].binding).isBorrow:
+        parts.add "&(" & g.genOrdered(a) & ")"
       elif g.source.mode(r.params[i].binding).isBorrow and
           r.params[i].typ.passByPtr:
         parts.add g.borrowArg(a, r.params[i].typ, false)
@@ -310,6 +363,8 @@ proc hasEffects(g: Gen, e: Expr): bool =
   ## (func calls are pure and echo-free by construction.)
   if e.isNil:
     return false
+  if e.kind in {ObjectExpr, UnionWrapExpr}:
+    return true
   if e.kind == CallExpr and e.sval in g.routines and
       g.routines[e.sval].kind == ProcRoutine:
     return true
@@ -322,6 +377,8 @@ proc hasEffects(g: Gen, e: Expr): bool =
 proc genPathOrdered(g: var Gen, e: Expr): string =
   ## An lvalue path with its index expressions hoisted in source order.
   case e.kind
+  of UnionProjectExpr:
+    "(" & g.genPathOrdered(e.kids[0]) & ").m_payload.m_" & e.typ.name
   of FieldExpr:
     g.genPathOrdered(e.kids[0]) & ".m_" & e.sval
   of IndexExpr:
@@ -334,7 +391,29 @@ proc genPathOrdered(g: var Gen, e: Expr): string =
   else:
     if g.hasEffects(e): g.genOrdered(e) else: g.genExpr(e)
 
+proc freshTemp(g: var Gen, e: Expr): string =
+  ## Places large expression storage in its statically planned arena slot.
+  let name = "ni_t" & $g.tmpN
+  inc g.tmpN
+  if e.typ != nil and typeSize(e.typ) > arenaThreshold:
+    let key = cast[pointer](e)
+    if key notin g.exprOffsets[g.curRoutine]:
+      let offset = sizeAlign(g.exprBytes[g.curRoutine], 8, e.line)
+      g.exprOffsets[g.curRoutine][key] = offset
+      g.exprBytes[g.curRoutine] = sizeAdd(offset, typeSize(e.typ), e.line)
+    let offset = g.exprOffsets[g.curRoutine][key]
+    g.put cDecl("(*" & name & ")", e.typ) &
+      " = (void *)(ni_base + " & $offset & "LL);"
+    "(*" & name & ")"
+  else:
+    g.put cDecl(name, e.typ) & ";"
+    name
+
 proc tempFor(g: var Gen, e: Expr, val: string): string =
+  if e.typ != nil and typeSize(e.typ) > arenaThreshold:
+    let temporary = g.freshTemp(e)
+    g.put temporary & " = " & val & ";"
+    return temporary
   let t = "ni_t" & $g.tmpN
   inc g.tmpN
   let ctype =
@@ -342,7 +421,7 @@ proc tempFor(g: var Gen, e: Expr, val: string): string =
     elif e.typ.opt: cBase(e.typ)
     elif e.typ.kind == FloatType: cBase(e.typ)
     elif e.typ.kind == BoolType: "bool"
-    elif e.typ.kind in {ObjectType, SeqType, StringType, SetType, QueueType,
+    elif e.typ.kind in {ObjectType, UnionType, SeqType, StringType, SetType, QueueType,
       DenseMapType, SparseMapType}: cBase(e.typ)
     else: "int64_t"
   g.put ctype & " " & t & " = " & val & ";"
@@ -353,6 +432,20 @@ proc genOrdered(g: var Gen, e: Expr): string =
   ## included: effectful nodes become their own C statements, and every
   ## read is captured at the moment the program text reaches it, so C's
   ## unspecified subexpression order can never be observed.
+  if e.wrapOpt and typeSize(e.typ) > arenaThreshold:
+    return g.genOrdered(e)
+  if e.wrapOpt and typeSize(e.typ) > arenaThreshold:
+    let temporary = g.freshTemp(e)
+    let optional = e.typ
+    e.wrapOpt = false
+    e.typ = deOpt(optional)
+    let inner = g.genOrdered(e)
+    e.typ = optional
+    e.wrapOpt = true
+    g.put "memmove(&" & temporary & ".m_val, &(" & inner &
+      "), sizeof(" & temporary & ".m_val));"
+    g.put temporary & ".m_ok = true;"
+    return temporary
   if e.wrapOpt:
     let optT = e.typ
     e.wrapOpt = false
@@ -361,7 +454,44 @@ proc genOrdered(g: var Gen, e: Expr): string =
     e.typ = optT
     e.wrapOpt = true
     return "((" & cBase(optT) & "){ .m_val = " & inner & ", .m_ok = true })"
+  if destinationCall(e):
+    let temporary = g.freshTemp(e)
+    g.genCallInto(e, "&" & temporary)
+    return temporary
+  if e.kind == NoneExpr and typeSize(e.typ) > arenaThreshold:
+    let temporary = g.freshTemp(e)
+    g.initialize("&" & temporary, e.typ)
+    return temporary
   case e.kind
+  of ObjectExpr:
+    let temporary = g.freshTemp(e)
+    g.initialize("&" & temporary, e.typ)
+    for i, child in e.kids:
+      let
+        destination = temporary & ".m_" & e.typ.fields[i].name
+        value = g.genOrdered(child)
+      if child.typ.kind == ArrayType:
+        g.put "memcpy(" & destination & ", " & value & ", " &
+          $typeSize(child.typ) & "LL);"
+      else:
+        g.put destination & " = " & value & ";"
+    temporary
+  of UnionWrapExpr:
+    let
+      payload = g.genOrdered(e.kids[0])
+      temporary = g.freshTemp(e)
+    g.put temporary & ".m_tag = " & $e.kids[0].typ.typeId & "ULL;"
+    g.put temporary & ".m_payload.m_" & e.kids[0].typ.name & " = " & payload & ";"
+    temporary
+  of UnionProjectExpr:
+    g.tempFor(e, g.genPathOrdered(e))
+  of TypeIdExpr:
+    if e.ival > 0:
+      if e.kids.len > 0 and g.hasEffects(e.kids[0]):
+        discard g.genOrdered(e.kids[0])
+      $e.ival & "LL"
+    else:
+      g.tempFor(e, "((int64_t)(" & g.genOrdered(e.kids[0]) & ").m_tag)")
   of NoneExpr, IntExpr, FloatExpr, BoolExpr, StrExpr:
     g.genExpr(e)
   of IdentExpr:
@@ -436,6 +566,9 @@ proc genOrdered(g: var Gen, e: Expr): string =
     for i, a in e.kids:
       if r.externLib != "" and r.params[i].typ.kind == StringType:
         parts.add g.genPathOrdered(a) & ".m_data"
+      elif bigRet(r.params[i].typ) and r.params[i].typ.passByPtr and
+          not g.source.mode(r.params[i].binding).isBorrow:
+        parts.add "&(" & g.genOrdered(a) & ")"
       elif g.source.mode(r.params[i].binding).isBorrow and
           r.params[i].typ.passByPtr:
         parts.add g.borrowArg(a, r.params[i].typ, true)
@@ -510,7 +643,10 @@ proc genCallInto(g: var Gen, e: Expr, dest: string) =
   let r = g.routines[e.sval]
   var parts: seq[string]
   for i, a in e.kids:
-    if g.source.mode(r.params[i].binding).isBorrow and
+    if bigRet(r.params[i].typ) and r.params[i].typ.passByPtr and
+        not g.source.mode(r.params[i].binding).isBorrow:
+      parts.add "&(" & g.genOrdered(a) & ")"
+    elif g.source.mode(r.params[i].binding).isBorrow and
         r.params[i].typ.passByPtr:
       parts.add g.borrowArg(a, r.params[i].typ, true)
     elif a.typ != nil and a.typ.kind == ArrayType:
@@ -636,7 +772,7 @@ proc genStmt(g: var Gen, s: Stmt) =
           else: g.genExpr(s.init)
         g.put "*v_" & s.name & " = " & v & ";"
       else:
-        g.put "memset(v_" & s.name & ", 0, " & $typeSize(s.typ) & "LL);"
+        g.initialize("v_" & s.name, s.typ)
       return
     if destinationCall(s.init):
       g.put cDecl("v_" & s.name, s.typ) & ";"
@@ -650,16 +786,38 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put cDecl("v_" & s.name, s.typ) & ";"
       g.put "memcpy(v_" & s.name & ", " & v & ", " & $typeSize(s.typ) & "LL);"
       return
+    if s.init == nil and needsDefault(s.typ):
+      g.put cDecl("v_" & s.name, s.typ) & ";"
+      g.initialize("&v_" & s.name, s.typ)
+      return
     let init =
       if s.init != nil and g.hasEffects(s.init): g.genOrdered(s.init)
       elif s.init != nil: g.genExpr(s.init)
       elif s.typ.opt: "{0}"
-      elif s.typ.kind in {ArrayType, ObjectType, SeqType, StringType, SetType, QueueType,
+      elif s.typ.kind in {ArrayType, ObjectType, UnionType, SeqType, StringType, SetType, QueueType,
         DenseMapType, SparseMapType}: "{0}"
       elif s.typ.kind == BoolType: "false"
       else: "0"
     g.put cDecl("v_" & s.name, s.typ) & " = " & init & ";"
   of AssignStmt:
+    if hasOwned(s.lhs.typ):
+      let lhs = g.genPathOrdered(s.lhs)
+      let captured = "ni_t" & $g.tmpN
+      inc g.tmpN
+      if typeSize(s.rhs.typ) > arenaThreshold:
+        let rhs = g.genOrdered(s.rhs)
+        g.put "ni_drop_" & mangle(s.lhs.typ) & "(&(" & lhs & "));"
+        g.put lhs & " = " & rhs & ";"
+        return
+      g.put cDecl(captured, s.rhs.typ) & ";"
+      if destinationCall(s.rhs):
+        g.genCallInto(s.rhs, "&" & captured)
+      else:
+        let rhs = g.genOrdered(s.rhs)
+        g.put captured & " = " & rhs & ";"
+      g.put "ni_drop_" & mangle(s.lhs.typ) & "(&(" & lhs & "));"
+      g.put lhs & " = " & captured & ";"
+      return
     if destinationCall(s.rhs):
       let lhs =
         if g.hasEffects(s.lhs): g.genPathOrdered(s.lhs)
@@ -1124,9 +1282,11 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
   ## dependencies first. Declare-before-use makes this a simple post-order.
   if t.isNil:
     return
-  defer:
-    if hasOwned(t) and (not t.dynamic or t.opt):
-      g.emitOwnedHelpers(t)
+  if hasOwned(t) and (not t.dynamic or t.opt):
+    if not g.pendingOwners.anyIt(mangle(it) == mangle(t)):
+      g.pendingOwners.add t
+  if needsDefault(t) and not g.defaultTypes.anyIt(mangle(it) == mangle(t)):
+    g.defaultTypes.add t
   if t.opt:
     let base = deOpt(t)
     g.emitTypeDefs(base)
@@ -1146,12 +1306,28 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     return
   if t.dynamic:
     if t.kind == SeqType:
-      g.emitTypeDefs(t.elem)
-      if not hasOwned(t.elem):
-        g.emitTypeDefs(optOf(t.elem))
+      let key = mangle(t)
+      if key in g.emitted:
+        return
+      g.emitted.incl key
+      if "forward:" & mangle(t) notin g.emitted:
+        g.put "typedef struct " & cBase(t) & " " & cBase(t) & ";"
+        g.emitted.incl "forward:" & mangle(t)
+      g.put "struct " & cBase(t) & " { int64_t m_len, m_cap; " &
+        cBase(t.elem) & " *m_data; };"
+      g.pendingDynamics.add t
+      g.pendingElements.add t.elem
+      return
     else:
+      if mangle(t) in g.emitted:
+        return
+      g.emitted.incl mangle(t)
       g.emitTypeDefs(optOf(intType()))
-    g.emitDynamicType(t)
+      if "forward:" & mangle(t) notin g.emitted:
+        g.put "typedef struct " & cBase(t) & " " & cBase(t) & ";"
+        g.emitted.incl "forward:" & mangle(t)
+      g.put "struct " & cBase(t) & " { int64_t m_len, m_cap; uint8_t *m_data; };"
+    g.pendingDynamics.add t
     return
   case t.kind
   of ArrayType:
@@ -1164,10 +1340,26 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     for f in t.fields:
       g.emitTypeDefs(f.typ)
     g.put ""
-    g.put "typedef struct {"
+    g.put "struct " & cBase(t) & " {"
+    if t.fields.len == 0:
+      g.put "  uint8_t m_empty;"
     for f in t.fields:
       g.put "  " & cDecl("m_" & f.name, f.typ) & ";"
-    g.put "} S_" & t.name & ";"
+    g.put "};"
+  of UnionType:
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    for member in t.members:
+      g.emitTypeDefs(member)
+    g.put "struct " & cBase(t) & " {"
+    g.put "  uint64_t m_tag;"
+    g.put "  union {"
+    for member in t.members:
+      g.put "    " & cDecl("m_" & member.name, member) & ";"
+    g.put "  } m_payload;"
+    g.put "};"
   of SeqType:
     g.emitTypeDefs(t.elem)
     let key = mangle(t)
@@ -1499,10 +1691,13 @@ proc emitBodyTypeDefs(g: var Gen, body: seq[Stmt]) =
       g.emitBodyTypeDefs(br.body)
     g.emitBodyTypeDefs(s.elseBody)
 
-proc generate*(m: Module, src: string): string =
-  ## Generate the complete C translation unit for a checked module.
+proc generatePass(m: Module, src: string,
+    expressions: var Table[string, Table[pointer, int64]],
+    expressionBytes: var Table[string, int64]): string =
+  ## Emits C while recording only expression temporaries actually materialized.
   requireChecked(m)
-  var g = Gen(src: src, source: m)
+  var g = Gen(src: src, source: m, exprOffsets: expressions,
+    exprBytes: expressionBytes)
   for r in m.routines:
     g.routines[r.name] = r
   # Arena analysis: big locals leave the C stack for per-thread arenas,
@@ -1514,7 +1709,10 @@ proc generate*(m: Module, src: string): string =
     var hiWater = 0'i64
     collectBig(r.body, offs, off, hiWater)
     g.bigOffs[r.name] = offs
-    g.frameOf[r.name] = sizeAlign(hiWater, 16, r.line)
+    if r.name notin g.exprOffsets:
+      g.exprOffsets[r.name] = initTable[pointer, int64]()
+      g.exprBytes[r.name] = hiWater
+    g.frameOf[r.name] = sizeAlign(g.exprBytes[r.name], 16, r.line)
     var callees: HashSet[string]
     collectCallees(r.body, callees)
     var worst = 0'i64
@@ -1542,6 +1740,32 @@ proc generate*(m: Module, src: string): string =
         "__asm__(NI_EXTERN_STRINGIFY(__USER_LABEL_PREFIX__) name)"
   if anyArena:
     g.put "static _Thread_local uint8_t *ni_sp;"
+  var forwards: HashSet[string]
+  proc forward(t: Typ) =
+    if t.isNil or mangle(t) in forwards:
+      return
+    forwards.incl mangle(t)
+    if t.opt:
+      forward(deOpt(t))
+    elif t.kind in {ObjectType, UnionType} or t.dynamic:
+      g.put "typedef struct " & cBase(t) & " " & cBase(t) & ";"
+      g.emitted.incl "forward:" & mangle(t)
+      for field in t.fields:
+        forward(field.typ)
+      for member in t.members:
+        forward(member)
+      if t.dynamic and t.kind == SeqType:
+        forward(t.elem)
+    elif t.kind == ArrayType:
+      forward(t.elem)
+  for td in m.types:
+    forward(td.typ)
+  for gd in m.globals:
+    forward(gd.typ)
+  for r in m.routines:
+    for pm in r.params:
+      forward(pm.typ)
+    forward(r.ret)
   for td in m.types:
     g.emitTypeDefs(td.typ)
   for gd in m.globals:
@@ -1551,6 +1775,44 @@ proc generate*(m: Module, src: string): string =
       g.emitTypeDefs(pm.typ)
     g.emitTypeDefs(r.ret)
     g.emitBodyTypeDefs(r.body)
+  var elementIndex = 0
+  while elementIndex < g.pendingElements.len:
+    let element = g.pendingElements[elementIndex]
+    inc elementIndex
+    g.emitTypeDefs(element)
+    if not hasOwned(element):
+      g.emitTypeDefs(optOf(element))
+  for t in g.defaultTypes:
+    g.put "static void ni_init_" & mangle(t) & "(" & cDecl("(*s)", t) & ");"
+  for t in g.pendingOwners & g.pendingDynamics:
+    g.put "static void ni_drop_" & mangle(t) & "(" & cDecl("(*s)", t) & ");"
+    g.put "static bool ni_copy_" & mangle(t) & "(" & cDecl("(*s)", t) &
+      ", const " & cDecl("(*d)", t) & ");"
+  for t in g.defaultTypes:
+    g.put "static void ni_init_" & mangle(t) & "(" & cDecl("(*s)", t) & ") {"
+    g.put "  memset(s, 0, sizeof(*s));"
+    case t.kind
+    of UnionType:
+      let member = t.members[0]
+      g.put "  s->m_tag = " & $member.typeId & "ULL;"
+      if needsDefault(member):
+        g.put "  ni_init_" & mangle(member) & "(&s->m_payload.m_" & member.name & ");"
+    of ObjectType:
+      for field in t.fields:
+        if needsDefault(field.typ):
+          g.put "  ni_init_" & mangle(field.typ) & "(&s->m_" & field.name & ");"
+    of ArrayType:
+      g.put "  for (int64_t i = 0; i < " & $t.len & "LL; ++i)"
+      g.put "    ni_init_" & mangle(t.elem) & "(&(*s)[i]);"
+    else:
+      discard
+    g.put "}"
+  g.emitWalkers()
+  for t in g.pendingOwners:
+    g.emitOwnedHelpers(t)
+  for t in g.pendingDynamics:
+    g.emitted.excl mangle(t)
+    g.emitDynamicType(t)
   if m.consts.len > 0:
     g.put ""
     for cd in m.consts:
@@ -1592,6 +1854,8 @@ proc generate*(m: Module, src: string): string =
         let qualifier = if mutable: "" else: "const "
         if pm.typ.kind == StringType:
           ps.add qualifier & "uint8_t *"
+        elif bigRet(pm.typ) and pm.typ.passByPtr:
+          ps.add "const " & cBase(pm.typ) & " *p_" & pm.name
         elif pm.typ.kind == ArrayType:
           ps.add qualifier & cBase(pm.typ.elem) & " *"
         elif mutable:
@@ -1604,6 +1868,7 @@ proc generate*(m: Module, src: string): string =
         ") NI_EXTERN_SYMBOL(" & cQuote(externName(r)) & ");"
       continue
     g.curOffsets = g.bigOffs[r.name]
+    g.curRoutine = r.name
     g.curArena.clear()
     g.curFrame = g.frameOf[r.name]
     g.curRet = (if r.kind == ThreadRoutine: nil else: r.ret)
@@ -1631,6 +1896,8 @@ proc generate*(m: Module, src: string): string =
         if m.mode(pm.binding) == MutBorrowMode and pm.typ.passByPtr:
           ps.add cBase(pm.typ) & " *p_" & pm.name
         elif m.mode(pm.binding) == ReadBorrowMode and pm.typ.passByPtr:
+          ps.add "const " & cBase(pm.typ) & " *p_" & pm.name
+        elif bigRet(pm.typ) and pm.typ.passByPtr:
           ps.add "const " & cBase(pm.typ) & " *p_" & pm.name
         elif pm.typ.kind == ArrayType:
           # Arrays decay to pointers in C either way; const makes the C
@@ -1671,6 +1938,9 @@ proc generate*(m: Module, src: string): string =
   g.put ""
   g.put "int main(void) {"
   inc g.ind
+  for gd in m.globals:
+    if needsDefault(gd.typ):
+      g.initialize("&g_" & gd.name, gd.typ)
   g.put "#ifdef _WIN32"
   g.put "if (_setmode(_fileno(stdout), _O_BINARY) < 0) ni_output_failure();"
   g.put "#else"
@@ -1725,4 +1995,21 @@ proc generate*(m: Module, src: string): string =
   g.put "return 1;"
   dec g.ind
   g.put "}"
+  expressions = g.exprOffsets
+  expressionBytes = g.exprBytes
   g.o
+
+proc cArenaFrames*(m: Module): Table[string, int64] =
+  ## Plans exact C arena frames using the same materialization as emission.
+  var expressions: Table[string, Table[pointer, int64]]
+  discard generatePass(m, "arena-plan", expressions, result)
+  for routine in m.routines:
+    result[routine.name] = sizeAlign(result[routine.name], 16, routine.line)
+
+proc generate*(m: Module, src: string): string =
+  ## Plans expression storage, then emits C with exact arena frame sizes.
+  var
+    expressions: Table[string, Table[pointer, int64]]
+    expressionBytes: Table[string, int64]
+  discard generatePass(m, src, expressions, expressionBytes)
+  generatePass(m, src, expressions, expressionBytes)
