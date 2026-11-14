@@ -1,0 +1,13 @@
+var sharedKey: 0 .. 7
+var gate: Lock
+
+thread writer() =
+  with gate:
+    sharedKey = 1
+
+thread main() =
+  var m: map[2, 0 .. 7, int]
+  with gate:
+    m[sharedKey] = 42
+  with gate:
+    echo m[sharedKey]
