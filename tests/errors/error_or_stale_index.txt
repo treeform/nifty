@@ -1,0 +1,1 @@
+error_or_stale_index.nifty:12: cannot prove index is inside 0 ..< 10 (index is 0 .. 10); test it first
