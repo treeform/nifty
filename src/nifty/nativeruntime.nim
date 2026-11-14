@@ -181,6 +181,9 @@ proc dispatch(context: pointer, hostId: int64,
 
 proc enterThread(argument: pointer) =
   ## Enters one native thread with its own preallocated arena.
+  setupForeignThreadGc()
+  defer:
+    tearDownForeignThreadGc()
   let thread = cast[ptr NativeThread](argument)
   if lockMutex(addr thread.gate.mutex) != 0:
     runtimeFailure("nifty: thread startup synchronization failed\n")
