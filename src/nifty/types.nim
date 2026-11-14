@@ -113,6 +113,7 @@ type
     bodyScope*, elseScope*: int
     nonowningTemp*: bool # Compiler-generated readonly descriptor snapshot.
     drops*: seq[BindingId] # Ordered owners released by return or break.
+    hooks*: seq[string] # Lexically resolved start/end for a custom with block.
 
   RoutineKind* = enum
     FuncRoutine = "func", ProcRoutine = "proc", ThreadRoutine = "thread"
@@ -125,6 +126,8 @@ type
   Routine* = ref object
     kind*: RoutineKind
     name*: string
+    groupName*: string # Original overload group, retained across checking.
+    sourceName*: string
     line*: int
     count*: int                # threads: instances declared (thread 4 w());
                                # 0 or 1 means one
@@ -160,6 +163,9 @@ type
     routines*: seq[Routine]
     supportCount*: int        # Trailing backend support routines.
     semantics*: SemanticPlan # Present only after all source checks pass.
+    moduleLookups*: seq[ModuleLookup]
+    sourceNames*: Table[string, string]
+    files*: seq[string]
 
 const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
   "put", "remove", "setLen", "addByte", "addNum", "copyRange",
@@ -225,6 +231,10 @@ proc setSize*(t: Typ): int64 =
   t.elem.rhi - t.elem.rlo + 1
 
 const arenaThreshold* = 256'i64 # locals bigger than this go to the arena
+
+proc resourceHooks*(statement: Stmt): array[2, string] =
+  if statement.hooks.len == 2: [statement.hooks[0], statement.hooks[1]]
+  else: ["start", "end"]
 
 proc sizeAdd*(a, b: int64, line = 0): int64 =
   ## Adds nonnegative storage sizes without returning a false bound.

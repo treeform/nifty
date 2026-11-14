@@ -1,0 +1,10 @@
+import _module_math
+import "_module_math.nifty" as math
+
+type Value = math.Value
+threeTimes = math.triple
+
+thread main() =
+  var value: Value
+  value.number = 7
+  echo threeTimes(value), " ", _module_math.triple(value)

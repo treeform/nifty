@@ -52,6 +52,7 @@ type
     lockOrder: Table[string, int]       # lock name -> declaration position
     routineLocks: Table[string, HashSet[string]] # routine -> locks it may take
     overloads: Table[string, seq[string]] # shared name -> unique routine names
+    moduleViews: Table[string, string] # Scoped overload views -> source spelling.
 
 const
   IntLow = low(int64)
@@ -787,9 +788,10 @@ proc collectAssigned(c: Ctx, body: seq[Stmt], s: var HashSet[string]) =
       s.incl st.name
       if st.name notin c.globals or c.globals[st.name].kind != LockType:
         # Resource entry and exit may change globals between iterations.
-        for protocol in ["start", "end"]:
-          for global in c.routineWrites.getOrDefault(protocol):
-            s.incl global
+        for protocol in st.resourceHooks:
+          for callee in c.overloads.getOrDefault(protocol, @[protocol]):
+            for global in c.routineWrites.getOrDefault(callee):
+              s.incl global
     c.collectAssigned(st.body, s)
     for br in st.elifs:
       c.collectAssignedExpr(br.cond, s)
@@ -2170,6 +2172,25 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     let bigOk = c.allowBigRet
     c.allowBigRet = false # arguments are not store targets
     var name = e.sval
+    if name in c.moduleViews and c.overloads[name].len > 1:
+      for candidate in c.overloads[name]:
+        if candidate in c.generics:
+          err(e.line, "ambiguous imported name '" & c.moduleViews[name] &
+            "'; generic routines cannot be overloaded, so qualify the name or add an alias")
+    if name in c.moduleViews and c.overloads[name].len == 1:
+      name = c.overloads[name][0]
+      e.sval = name
+    elif name in c.moduleViews and e.kids.len == 0:
+      var matches: seq[string]
+      for candidate in c.overloads[name]:
+        if candidate in c.routineTab and c.routineTab[candidate].params.len == 0:
+          matches.add candidate
+      if matches.len > 1:
+        err(e.line, "ambiguous imported name '" & c.moduleViews[name] &
+          "'; qualify it with a module name or add an alias")
+      if matches.len == 1:
+        name = matches[0]
+        e.sval = name
     if name in ["float32", "float64"]:
       if e.kids.len != 1:
         err(e.line, name & "(x) takes exactly one argument")
@@ -2183,7 +2204,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       err(e.line, "unknown func or proc: '" & name & "'")
     if name == c.cur.name:
       err(e.line, "recursion is not allowed: '" & name & "' calls itself")
-    if name notin c.checked:
+    if name notin c.checked and name notin c.moduleViews:
       err(e.line, "'" & name & "' is called before its declaration " &
         "(declare-before-use keeps the call graph recursion-free)")
     # Every argument is typed exactly once, in source order, up front:
@@ -2204,8 +2225,12 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           $ats[0] & " does not pick an overload")
       var found = ""
       for cn in c.overloads[name]:
-        if c.routineTab[cn].params.len > 0 and
+        if cn in c.routineTab and c.routineTab[cn].params.len > 0 and
             dispatchKey(c.routineTab[cn].params[0].typ) == key:
+          if found.len > 0:
+            err(e.line, "ambiguous imported name '" &
+              c.moduleViews.getOrDefault(name, name) &
+              "'; qualify it with a module name or add an alias")
           found = cn
       if found == "":
         err(e.line, "no overload of '" & name & "' takes " & key &
@@ -2929,11 +2954,27 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       if not s.lhs.mut:
         err(s.line, "with target '" & s.name & "' must be mutable")
       let want = "proc name(x: var " & $t & ")"
-      for pn in ["start", "end"]:
+      var hooks = s.resourceHooks
+      for i in 0 ..< 2:
+        var pn = hooks[i]
+        if pn in c.moduleViews:
+          var matches: seq[string]
+          for candidate in c.overloads[pn]:
+            if candidate in c.routineTab:
+              let routine = c.routineTab[candidate]
+              if routine.params.len == 1 and typeEq(routine.params[0].typ, t):
+                matches.add candidate
+          if matches.len > 1:
+            err(s.line, "ambiguous imported name '" & c.moduleViews[pn] &
+              "'; qualify it with an alias")
+          if matches.len == 1: pn = matches[0]
+        hooks[i] = pn
         if pn notin c.allRoutines:
           err(s.line, "with on a " & $t & " needs a '" & pn & "' proc: " & want)
         if pn notin c.checked:
           err(s.line, "'" & pn & "' must be declared before this with statement")
+        if pn notin c.routineTab:
+          err(s.line, "with on a " & $t & " needs a concrete '" & pn & "' proc: " & want)
         let r = c.routineTab[pn]
         if r.kind != ProcRoutine or r.params.len != 1 or not r.params[0].isVar or
             not typeEq(r.params[0].typ, t) or not typeRangeEq(r.params[0].typ, t) or
@@ -2941,7 +2982,8 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           err(s.line, "with on a " & $t & " needs '" & pn & "' to be: " & want)
         discard c.checkExpr(Expr(kind: CallExpr, sval: pn,
           kids: @[s.lhs], line: s.line))
-      for pn in ["start", "end"]:
+      s.hooks = @[hooks[0], hooks[1]]
+      for pn in s.resourceHooks:
         if pn in c.routineWrites:
           for gw in c.routineWrites[pn]:
             c.delFacts gw
@@ -2972,7 +3014,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     if not isLock:
       # end(x) runs after the body and may write globals too.
       c.delFacts s.name
-      for pn in ["start", "end"]:
+      for pn in s.resourceHooks:
         if pn in c.routineWrites:
           for gw in c.routineWrites[pn]:
             c.delFacts gw
@@ -3285,7 +3327,7 @@ proc checkRoutine(c: var Ctx, r: Routine) =
         if pm.name == vname:
           isParam = true
       if isParam:
-        if r.name in ["start", "end"]:
+        if r.name in ["start", "end"] or r.sourceName in ["start", "end"]:
           continue # the with protocol imposes the var signature
         err(vline, "var parameter '" & vname & "' is never modified in '" &
           r.name & "'; remove var")
@@ -3427,7 +3469,7 @@ proc scanNoGlobals(c: Ctx, gname: string, body: seq[Stmt]) =
       if s.name in c.globals:
         err(s.line, "generic '" & gname & "' locks global '" & s.name &
           "'; generic routines cannot access globals")
-      for name in ["start", "end"]:
+      for name in s.resourceHooks:
         c.scanCall(name, s.line)
     for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
       scanE(c, e)
@@ -3504,6 +3546,33 @@ proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string =
     e.sval = c.instCache[key]
     return e.sval
   let mangled = gname & "__" & parts.join("_")
+  # Only substituted type tokens see these fresh aliases. An undefined type
+  # written in the generic body must never bind to a caller's declaration.
+  var instanceTypes = gr.typesSnap
+  var nominalAliases: Table[string, string]
+  var occupied: HashSet[string]
+  for token in gr.toks:
+    if token.kind == IdentToken: occupied.incl token.text
+  for name in instanceTypes.keys: occupied.incl name
+  var aliasSerial = 0
+  proc bindType(typ: Typ) =
+    if typ == nil: return
+    if typ.kind in {ObjectType, OpaqueType} and typ.name notin nominalAliases:
+      var alias = ""
+      while alias.len == 0 or alias in occupied:
+        inc aliasSerial
+        alias = "niftyGenericType" & $aliasSerial
+      occupied.incl alias
+      nominalAliases[typ.name] = alias
+      var base = typ
+      if typ.opt:
+        new(base)
+        base[] = typ[]
+        base.opt = false
+      instanceTypes[alias] = base
+    bindType(typ.elem)
+    bindType(typ.val)
+  for typ in typs.values: bindType(typ)
   var toks: seq[Token]
   var i = 0
   while i < gr.toks.len:
@@ -3534,7 +3603,11 @@ proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string =
         toks.add Token(kind: IntToken, text: $sizes[nm], line: tk.line)
         i += 2
       elif nm in typs:
-        toks.add typToToks(typs[nm], tk.line, gname)
+        for token in typToToks(typs[nm], tk.line, gname):
+          var bound = token
+          if bound.kind == IdentToken and bound.text in nominalAliases:
+            bound.text = nominalAliases[bound.text]
+          toks.add bound
         i += 2
       else:
         err(tk.line, "'$" & nm & "' is not bound by any parameter of '" &
@@ -3543,7 +3616,7 @@ proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string =
       toks.add tk
       inc i
   toks.add Token(kind: EofToken, line: gr.toks[^1].line)
-  let inst = parseInstance(toks, gr.constsSnap, gr.typesSnap)
+  let inst = parseInstance(toks, gr.constsSnap, instanceTypes)
   c.allRoutines.incl mangled
   c.routineTab[mangled] = inst
   c.routineAccess[mangled] = initHashSet[string]()
@@ -3612,8 +3685,7 @@ proc orderRoutines(routines: seq[Routine]): seq[Routine] =
       for e in s.args:
         expression(e)
       if s.kind == WithStmt and s.typ.kind != LockType:
-        visit("start")
-        visit("end")
+        for name in s.resourceHooks: visit(name)
       body(s.body)
       for branch in s.elifs:
         expression(branch.cond)
@@ -3711,6 +3783,49 @@ proc check*(m: Module) =
     if r.kind == ThreadRoutine:
       anyThread = true
   c.usedNames = used
+  # Namespace views merge overloads without introducing wrapper procedures.
+  # Locals override only matching dispatch keys; imports never override imports.
+  var groups: Table[string, seq[string]]
+  for routine in m.routines:
+    let group = if routine.groupName.len > 0: routine.groupName else: routine.name
+    groups.mgetOrPut(group, @[]).add routine.name
+  var definitions: Table[string, ModuleLookup]
+  for definition in m.moduleLookups: definitions[definition.name] = definition
+  var installing: HashSet[string]
+  proc members(name: string): seq[string]
+  proc install(name: string) =
+    if name in c.moduleViews: return
+    if name in installing: err(1, "module alias cycle")
+    installing.incl name
+    let definition = definitions[name]
+    var local, imported: seq[string]
+    for target in definition.local:
+      for member in members(target):
+        if member notin local: local.add member
+    for target in definition.imports:
+      for member in members(target):
+        if member notin imported: imported.add member
+    proc key(name: string): string =
+      if name in c.generics: return "*"
+      let routine = c.routineTab[name]
+      if routine.params.len == 0: return "()"
+      dispatchKey(routine.params[0].typ)
+    var hidden: HashSet[string]
+    for member in local: hidden.incl key(member)
+    var candidates = local
+    for member in imported:
+      if key(member) notin hidden and member notin candidates: candidates.add member
+    c.overloads[name] = candidates
+    c.moduleViews[name] = definition.display
+    c.allRoutines.incl name
+    c.usedNames.incl name
+    installing.excl name
+  proc members(name: string): seq[string] =
+    if name in definitions:
+      install(name)
+      return c.overloads[name]
+    groups.getOrDefault(name, @[name])
+  for name in definitions.keys: install(name)
   if not anyThread:
     err(1, "a nifty program needs at least one thread (thread name() = ...)")
 
@@ -3854,8 +3969,9 @@ proc check*(m: Module) =
         if isPlainGlobal(s.name):
           note(s.name, held)
           wr.incl s.name
-        mergeCallee("start", held, s.line)
-        mergeCallee("end", held, s.line)
+        for hook in s.resourceHooks:
+          for name in c.overloads.getOrDefault(hook, @[hook]):
+            mergeCallee(name, held, s.line)
     else:
       discard
     for st in s.body:
@@ -4075,3 +4191,4 @@ proc check*(m: Module) =
   prepareSemantics(m)
   m.semantics.locks = lockReport
   m.semantics.channelProgress = channelProgress
+  m.moduleLookups.setLen(0) # All scoped views are now resolved to real callees.

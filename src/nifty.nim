@@ -59,6 +59,8 @@ usage:
   nifty report file.nifty          backend report (static RAM, heap, ops)
 
 options:
+  --offline                       use cached URL imports without network access
+  --update-imports                refresh URL imports and update nifty.lock
   --backend:c|arm64|amd64|wasm64   backend (wasm aliases wasm64)
   --opt:none|speed                IR optimization (default: speed)
   -o path                         output path
@@ -98,6 +100,10 @@ options:
     of "-h", "--help":
       echo usage
       quit(0)
+    of "--offline":
+      putEnv("NIFTY_OFFLINE", "1")
+    of "--update-imports":
+      putEnv("NIFTY_UPDATE_IMPORTS", "1")
     else:
       if a.startsWith("--backend:") or a.startsWith("--backend="):
         backend = a[10 .. ^1]

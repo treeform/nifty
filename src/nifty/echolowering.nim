@@ -56,6 +56,10 @@ proc backendRoutines*(source: Module): seq[Routine] =
 proc lowerEcho*(source: Module, filename = "", portableIo = false): Module =
   ## Keeps the original checked tree and its semantic bindings immutable.
   source.requireChecked()
+  if source.files.len > 0:
+    srcFiles = @[]
+    srcFiles.add(source.files)
+    symbolNames = source.sourceNames
   var needed = false
   for routine in source.routines:
     needed = needed or hasEcho(routine.body)
@@ -66,8 +70,10 @@ proc lowerEcho*(source: Module, filename = "", portableIo = false): Module =
   if srcFiles.len == 0:
     srcFiles.add(if filename.len > 0: filename else: "<source>")
   var tokens = loadStandardTokens("_echo", portableIo)
+  let moduleLookups = tokens[^1].moduleLookups
   tokens.setLen(tokens.len - 1)
   tokens.add(tokenize("thread niftyEchoBootstrap() =\n  discard 0\n"))
+  tokens[^1].moduleLookups = moduleLookups
   let library = parse(tokens)
   check(library)
   library.routines.setLen(library.routines.len - 1)
@@ -100,9 +106,9 @@ proc lowerEcho*(source: Module, filename = "", portableIo = false): Module =
   for definition in library.types:
     renamed[definition.name] = unique(definition.name)
   for routine in library.routines:
-    renamed[routine.name] = unique(routine.name)
+    renamed[routine.name] = unique(library.sourceNames.getOrDefault(routine.name, routine.name))
   for constant in library.consts:
-    renamed[constant.name] = unique(constant.name)
+    renamed[constant.name] = unique(library.sourceNames.getOrDefault(constant.name, constant.name))
   proc renameExpr(value: Expr) =
     if value.isNil: return
     if value.kind in {CallExpr, IdentExpr} and value.sval in renamed:
@@ -131,6 +137,8 @@ proc lowerEcho*(source: Module, filename = "", portableIo = false): Module =
 
   new(result)
   result[] = source[]
+  result.files = @[]
+  result.files.add(srcFiles)
   result.globals = @[]
   for global in source.globals: result.globals.add(global)
   result.types = @[]

@@ -80,8 +80,9 @@ proc stmtOps(s: Stmt, costs: Table[string, int64]): int64 =
   of WithStmt:
     # Lock/unlock (or start/end) plus the body.
     result = sadd(result, 2)
-    result = sadd(result, sadd(costs.getOrDefault("start", 0),
-      costs.getOrDefault("end", 0)))
+    let hooks = s.resourceHooks
+    result = sadd(result, sadd(costs.getOrDefault(hooks[0], 0),
+      costs.getOrDefault(hooks[1], 0)))
     result = sadd(result, bodyOps(s.body, costs))
   of LoopStmt:
     result = sadd(result, bodyOps(s.body, costs))
@@ -265,8 +266,7 @@ proc collectCalls(body: seq[Stmt], globals: Table[string, Typ],
       collectCallsExpr(a, into)
     if s.kind == WithStmt and
         not (s.name in globals and globals[s.name].kind == LockType):
-      into.incl "start"
-      into.incl "end"
+      for name in s.resourceHooks: into.incl name
     collectCalls(s.body, globals, into)
     for br in s.elifs:
       collectCallsExpr(br.cond, into)

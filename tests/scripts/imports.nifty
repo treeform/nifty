@@ -1,6 +1,5 @@
-# import splices the target file once (splice-once, diamond-safe),
-# in import order, into one whole-program compilation. One namespace,
-# no visibility - the proofs are the encapsulation.
+# Imports share each source module once and cascade its names.
+# Each file keeps its own scope; proofs still cover the whole program.
 
 import _mathmod
 import _sensormod

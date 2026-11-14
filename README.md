@@ -6,6 +6,8 @@ containers need no heap; growable containers report allocation failure
 explicitly. It compiles to C (C99 + pthreads) or native AMD64 and ARM64.
 
 See [spec.md](spec.md) for the language, `examples/` for programs.
+The [module guide](docs/modules.md) covers cascading imports, qualification,
+aliases, and cached URL sources.
 The [FFI guide](docs/ffi.md) covers foreign buffer contracts, opaque handles,
 and checked C-string inputs. The ordinary [console and file library](docs/io.md)
 uses that FFI; [file_io.nifty](examples/file_io.nifty) shows a binary file

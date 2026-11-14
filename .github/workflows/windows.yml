@@ -25,7 +25,9 @@ jobs:
         run: nim r tests/tests.nim
       - name: Run native component tests
         run: |
-          $checks = Get-ChildItem tests/test_*.nim | Where-Object { $_.BaseName -notin @('test_native', 'test_windowscli', 'test_memory') }
+          # The WASM corpus harness takes a compiler argument and requires Node
+          # and Wasmtime; its selector/metadata component tests run below.
+          $checks = Get-ChildItem tests/test_*.nim | Where-Object { $_.BaseName -notin @('test_native', 'test_windowscli', 'test_memory', 'test_wasm') }
           foreach ($check in $checks) {
             nim r $check.FullName
             if ($LASTEXITCODE) { exit $LASTEXITCODE }

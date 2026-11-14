@@ -57,22 +57,60 @@ Unproven direct access does not compile; allocation failure is a value.
 
 ## Imports
 
-`import name` at the top of a file splices `name.nifty` (resolved next
-to the importing file) into the program — once, no matter how many
-files import it. Whole-program, fresh, every time: the SQLite-
-amalgamation model, and in nifty it is not even a trade-off, because
-every proof (thread ownership, lock inference, arenas, WCET) is a
-whole-program analysis — separate compilation was never possible.
+Imports precede declarations, with exactly one import per line:
 
-- Imports come before any declaration; the import graph must be a DAG
-  (a cycle is a compile error — the no-recursion principle, one level
-  up). Splice order is import order, so declare-before-use holds across
-  files and all proofs work unchanged.
-- One namespace, no visibility modifiers. A cross-file name collision is
-  the ordinary duplicate-name error. Encapsulation as *safety* is the
-  checker's job (races, ranges, container internals are already
-  unbreakable); encapsulation as *communication* is a naming convention.
-- Errors report `file.nifty:line` across splices.
+```nifty
+import io
+import "graphics/window.nifty"
+import "https://example.com/1.0.3/http.nifty" as http
+```
+
+The filename supplies the module name: the second import binds `window`.
+`as name` changes that binding without creating another module instance.
+A bare name searches beside the importing file, then the standard library.
+Quoted file paths resolve relative to the importing file. Existing local
+files take precedence. Modules cascade both declarations and module names:
+if `a` imports `b`, and `b` imports `c`, callers of `a` can use `c.foo`,
+`b.c.foo`, and unambiguous bare names exported by those modules.
+
+Each resolved source location is loaded once, even through diamonds or aliases.
+Local identity is its absolute, normalized path (case-insensitive on Windows);
+different files, including identical copies, remain distinct. URL identity is
+the requested URL; different URLs remain different modules even if their bytes
+match. Shared instances share globals, nominal types, and thread declarations.
+Import cycles are rejected.
+
+Each file resolves names in its own scope. Its declarations take precedence
+over imported declarations. Distinguishable routine overloads combine; a local
+overload replaces imported candidates with the same first-argument dispatch key.
+Two imported candidates with the same dispatch key remain ambiguous. Import
+order never selects a winner. Qualify an ambiguous name or select it explicitly:
+
+```nifty
+type List = collections.List
+combineText = text.combine
+```
+
+These top-level aliases bind the original symbol, with no new storage, wrapper
+routine, or nominal type. Bare aliases may select constants, globals, routines,
+types, or modules. An alias names a symbol rather than a runtime expression.
+Import module names are reserved against declarations in that scope; rename
+the import when necessary. Qualification selects a unique module binding even
+when a cascaded value shares its basename.
+
+All names cascade, including underscore-prefixed names and modules. Underscores
+have no compiler visibility semantics. Calls inside an imported file stay bound
+to that file's scope when a caller shadows a name. After resolution, the complete
+program is checked and compiled together; aliases preserve global ownership,
+lock protection, and type identity. Errors retain their original source locations.
+
+HTTP(S) imports cache source locally, with SHA-256 content pins in `nifty.lock`
+beside the entry file. Commit the lockfile for reproducible dependency contents.
+Cached imports need no network access. `--offline` rejects uncached URLs;
+`--update-imports` explicitly downloads fresh contents and updates the pins.
+Relative imports in remote files resolve against the original URL after local
+file lookup. Scheme-free host/path URLs are also accepted when no local file
+matches. See [modules.md](docs/modules.md) for cache and distribution details.
 
 ## Program structure
 
@@ -1070,8 +1108,11 @@ statically known storage from runtime-dependent payloads and work:
 
 ```
 program     = { importDecl } module
-importDecl  = "import" ident NL
-module      = { constDecl | globalDecl | objectDecl | routineDecl }
+importDecl  = "import" (ident | STRING) ["as" ident] NL
+module      = { constDecl | globalDecl | typeDecl | aliasDecl | objectDecl | routineDecl }
+typeDecl    = "type" ident "=" ("opaque" | symbolPath) NL
+aliasDecl   = ident "=" symbolPath NL
+symbolPath  = ident { "." ident }
 constDecl   = "const" ident "=" constExpr NL
 globalDecl  = "var" ident ":" type NL
 objectDecl  = "object" ident "=" NL INDENT { fieldDecl } DEDENT

@@ -48,7 +48,7 @@ proc foreignCalls(a: Analysis, body: seq[Stmt]): string =
       if result.len > 0:
         return
     if s.kind == WithStmt and s.typ.kind != LockType:
-      for name in ["start", "end"]:
+      for name in s.resourceHooks:
         result = a.foreign.getOrDefault(name)
         if result.len > 0:
           return
@@ -191,7 +191,7 @@ proc body(a: Analysis, statements: seq[Stmt]): Protocol =
       let nested = a.body(s.body)
       result.unknown = result.unknown or nested.unknown
       if s.kind == WithStmt and s.typ.kind != LockType:
-        for name in ["start", "end"]:
+        for name in s.resourceHooks:
           if a.foreign.getOrDefault(name).len > 0:
             result.unknown = true
           elif name in a.routines:

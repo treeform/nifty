@@ -582,8 +582,7 @@ proc collectCallees(body: seq[Stmt], into: var HashSet[string]) =
     for a in s.args:
       walkCalleeExpr(a, into)
     if s.kind == WithStmt and s.typ != nil and s.typ.kind != LockType:
-      into.incl "start"
-      into.incl "end"
+      for name in s.resourceHooks: into.incl name
     collectCallees(s.body, into)
     for br in s.elifs:
       walkCalleeExpr(br.cond, into)
@@ -830,12 +829,12 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "}"
       g.put "pthread_mutex_unlock(&g_" & s.name & ");"
     else:
-      let arg = (if s.typ.passByPtr: "&" else: "") & g.genExpr(s.lhs)
-      g.put "f_start(" & arg & ");"
+      let hooks = s.resourceHooks
+      g.put g.genExpr(Expr(kind: CallExpr, sval: hooks[0], kids: @[s.lhs])) & ";"
       g.put "{"
       g.genBlock(s.body, s.bodyScope)
       g.put "}"
-      g.put "f_end(" & arg & ");"
+      g.put g.genExpr(Expr(kind: CallExpr, sval: hooks[1], kids: @[s.lhs])) & ";"
   of ReturnStmt:
     if s.value.isNil:
       g.cleanup(s.drops)

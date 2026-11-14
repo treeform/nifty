@@ -934,11 +934,12 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
         unlock.operation = "unlock"
         g.hostCall(unlock, receiver, g.null, g.null)
     else:
-      let start = Expr(kind: CallExpr, sval: "start", kids: @[s.lhs])
+      let hooks = s.resourceHooks
+      let start = Expr(kind: CallExpr, sval: hooks[0], kids: @[s.lhs])
       discard g.routineCall(start)
       g.statements(s.body, s.bodyScope)
       if g.live:
-        let finish = Expr(kind: CallExpr, sval: "end", kids: @[s.lhs])
+        let finish = Expr(kind: CallExpr, sval: hooks[1], kids: @[s.lhs])
         discard g.routineCall(finish)
   of ForEachStmt:
     let receiver = g.path(s.value)

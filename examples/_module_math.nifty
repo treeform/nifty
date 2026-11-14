@@ -1,0 +1,5 @@
+object Value =
+  number: 0 .. 1000
+
+func triple(value: Value): 0 .. 3000 =
+  return value.number * 3

@@ -4,12 +4,18 @@ import std/strutils
 import common
 
 type
+  ModuleLookup* = object
+    name*, display*: string
+    local*, imports*: seq[string]
   TokKind* = enum
     IdentToken, IntToken, FloatToken, StrToken, OpToken, NewlineToken, IndentToken, DedentToken, EofToken
   Token* = object
     kind*: TokKind
     text*: string
     line*: int
+    sourceName*: string
+    moduleLookups*: seq[ModuleLookup] # Carried on the final EOF token.
+    resourceHooks*: seq[string]
 
 const multiOps = ["..<", "..", "==", "!=", "<=", ">="]
 const singleOps = {'+', '-', '*', '/', '%', '(', ')', '[', ']', ':', ',', '=', '<', '>', '.', '?', '$'}

@@ -12,6 +12,7 @@ type
     consts: Table[string, int64] # needed at parse time for array lengths
     types: Table[string, Typ]    # declared object types
     allowTypeVar: bool           # $names legal (generic parameter lists only)
+    symbolicExpr: bool           # Scan clause boundaries in deferred generic bodies.
 
 proc peek(p: Parser): Token =
   p.toks[p.pos]
@@ -284,6 +285,9 @@ proc parseType(p: var Parser): Typ =
 
 proc parseAtom(p: var Parser): Expr =
   let t = p.peek
+  if p.symbolicExpr and p.atOp("$"):
+    discard p.next
+    return Expr(kind: IdentExpr, line: t.line, sval: "$" & p.expectIdent())
   case t.kind
   of IntToken:
     discard p.next
@@ -555,7 +559,7 @@ proc parseStmt(p: var Parser): Stmt =
     discard p.next
     let target = p.expectIdent()
     result = Stmt(kind: WithStmt, line: t.line, name: target,
-      lhs: Expr(kind: IdentExpr, line: t.line, sval: target))
+      lhs: Expr(kind: IdentExpr, line: t.line, sval: target), hooks: t.resourceHooks)
     p.expectOp(":")
     result.body = p.parseBody()
   else:
@@ -845,7 +849,23 @@ proc parseModule(p: var Parser): Module =
 proc parse*(toks: seq[Token]): Module =
   ## Parse a token stream into a Module AST.
   var p = Parser(toks: toks)
-  p.parseModule()
+  result = p.parseModule()
+  result.files.add(srcFiles)
+  if toks.len > 0:
+    result.moduleLookups = toks[^1].moduleLookups
+  for token in toks:
+    if token.sourceName.len > 0:
+      result.sourceNames[token.text] = token.sourceName
+      symbolNames[token.text] = token.sourceName
+  for routine in result.routines:
+    routine.groupName = routine.name
+    routine.sourceName = result.sourceNames.getOrDefault(routine.name, routine.name)
+
+proc expressionEnd*(toks: seq[Token], start: int): int =
+  ## Locate contextual clause keywords without interpreting expression names.
+  var p = Parser(toks: toks, pos: start, symbolicExpr: true)
+  discard p.parseExpr()
+  p.pos
 
 proc parseInstance*(toks: seq[Token], consts: Table[string, int64],
     otypes: Table[string, Typ]): Routine =
