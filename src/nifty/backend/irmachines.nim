@@ -710,6 +710,14 @@ proc emitArm64Ir*(module: ir.IrModule,
             elif not code.floatImmediate(floatResult, bits):
               code.loadImmediate(Word32, X12, int64(bits))
               code.bitsToFloat(floatResult, X12, single = true)
+          elif DirectConstants and resultKind == ir.Float64Type and
+              item.op == ir.ConstantOp:
+            floatResult = floatDestination(resultId)
+            if item.bits == 0:
+              code.bitsToFloat(floatResult, ZeroRegister)
+            elif not code.floatImmediate(floatResult, item.bits):
+              code.loadImmediate(Word64, X12, cast[int64](item.bits))
+              code.bitsToFloat(floatResult, X12)
           elif DirectVectors and resultKind == ir.Float32x2Type and
             item.op == ir.ConstantOp:
               floatResult = floatDestination(resultId)

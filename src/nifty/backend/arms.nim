@@ -851,6 +851,27 @@ proc floatImmediate*(assembler: var Assembler, destination: int,
       uint32(destination))
   true
 
+proc floatImmediateBits64*(immediate: uint8): uint64 {.raises: [].} =
+  ## Expands the ARM64 binary64 immediate into its exact IEEE representation.
+  let
+    value = uint64(immediate)
+    repeated = (value shr 6) and 1
+  ((value and 0x80) shl 56) or ((1 - repeated) shl 62) or
+    ((repeated * 255) shl 54) or ((value and 0x3f) shl 48)
+
+proc floatImmediate*(assembler: var Assembler, destination: int,
+    bits: uint64): bool {.raises: [BackendError].} =
+  ## Emits an exact binary64 immediate or leaves the instruction stream intact.
+  if destination notin 0 .. 31:
+    fail("Invalid floating-point register")
+  let immediate = uint8(((bits shr 56) and 0x80) or
+    (((bits shr 61) and 1) shl 6) or ((bits shr 48) and 0x3f))
+  if floatImmediateBits64(immediate) != bits:
+    return false
+  assembler.emit(0x1E601000'u32 or (uint32(immediate) shl 13) or
+    uint32(destination))
+  true
+
 proc stackAdjustment*(assembler: var Assembler, bytes: int,
     subtract: bool) {.raises: [BackendError].} =
   ## Adjusts SP with two fixed-size immediate instructions for patching.
