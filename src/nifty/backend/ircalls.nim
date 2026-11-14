@@ -91,7 +91,8 @@ proc argumentPlan(module: IrModule, function: IrFunction, wide: bool):
         if not constants[displacement]:
           continue
         let delta = cast[int64](bits[displacement])
-        if delta < 0 or delta > module.storageTypes[storage - 1].byteCount:
+        if delta < -int64(module.storageTypes[storage - 1].byteCount) or
+            delta > module.storageTypes[storage - 1].byteCount:
           return
         offset += delta
       else:
@@ -101,6 +102,8 @@ proc argumentPlan(module: IrModule, function: IrFunction, wide: bool):
             item.offset > int64(module.storageTypes[storage - 1].byteCount):
           return
         offset += item.offset
+      if offset < 0 or offset > module.storageTypes[storage - 1].byteCount:
+        return
       known[item.results.first] = true
       offsets[item.results.first] = offset
       changed = true

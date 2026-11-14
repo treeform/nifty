@@ -31,29 +31,33 @@ proc roots(function: IrFunction): seq[int32] =
 
 proc resultKinds(module: IrModule, storage: int32,
     records: bool): seq[IrType] =
-  ## Accepts scalar results or two to four contiguous binary32 fields.
+  ## Accepts scalar results or two to four uniform floating fields.
   let layout = module.storageTypes[storage - 1]
   if layout.kind == ScalarStorage:
     if layout.scalar != AddressType:
       return @[layout.scalar]
     return
-  if not records or layout.byteCount notin [8'i32, 12, 16]:
+  if not records or layout.byteCount < 8 or layout.byteCount > 32:
     return
-  var cursor = 0'i32
+  var
+    cursor = 0'i32
+    kinds: seq[IrType]
   proc fields(storage, offset: int32): bool =
-    ## Rejects padding, hidden fields, and ownership-bearing storage.
+    ## Rejects padding, mixed widths, hidden fields, and ownership storage.
     let data = module.storageTypes[storage - 1]
     case data.kind
     of ScalarStorage:
-      if data.scalar != Float32Type or offset != cursor:
+      if data.scalar notin {Float32Type, Float64Type} or offset != cursor or
+          kinds.len >= 4 or (kinds.len > 0 and data.scalar != kinds[0]):
         return false
-      cursor += 4
+      cursor += data.byteCount
+      kinds.add(data.scalar)
     of StructStorage:
       for i in data.fields.indices:
         let field = module.fields[i]
         if field.role != SourceField or
-          not fields(field.storage, offset + field.offset):
-            return false
+            not fields(field.storage, offset + field.offset):
+          return false
     of ArrayStorage:
       if data.length > 4:
         return false
@@ -64,9 +68,8 @@ proc resultKinds(module: IrModule, storage: int32,
     else:
       return false
     cursor == offset + data.byteCount
-  if fields(storage, 0) and cursor == layout.byteCount:
-    for i in 0 ..< cursor div 4:
-      result.add(Float32Type)
+  if fields(storage, 0) and cursor == layout.byteCount and kinds.len >= 2:
+    result = kinds
 
 proc returnPlan(module: IrModule, function: IrFunction,
     records: bool): ReturnPlan =
@@ -106,10 +109,12 @@ proc returnPlan(module: IrModule, function: IrFunction,
         continue
       if item.op == ConvertOp and result.addresses[item.results.first]:
         continue
-      let lane = if result.kinds.len == 1: 0 else: int(item.offset div 4)
+      let
+        width = byteCount(result.kinds[0], module.pointerBytes)
+        lane = if result.kinds.len == 1: 0 else: int(item.offset div width)
       if item.op != StoreOp or position != int(item.arguments.first) or
           item.volatile or item.offset < 0 or lane >= result.kinds.len or
-          item.offset != int64(lane * 4) or
+          item.offset != int64(lane * width) or
           byteCount(function.values[int32(function.operands[
             item.arguments.first + 1])].valueType, module.pointerBytes) !=
             byteCount(result.kinds[lane], module.pointerBytes):
@@ -223,7 +228,8 @@ proc privateResult(module: IrModule, function: IrFunction,
         int64(function.slots[item.target].byteCount) -
           int64(if plan.kinds.len == 1:
             byteCount(plan.kinds[0], module.pointerBytes)
-          else: int32(plan.kinds.len * 4))
+          else: int32(plan.kinds.len) *
+              byteCount(plan.kinds[0], module.pointerBytes))
     if item.arguments.count == 0:
       return false
     let input = int32(function.operands[item.arguments.first])
@@ -357,7 +363,8 @@ proc promoteReturns*(module: var IrModule, records = false): bool =
           function.operands.add([address, ValueId(int32(returned) +
             int32(lane))])
           transfers[i].add(IrInstruction(op: StoreOp,
-            arguments: arguments, offset: int64(lane * 4), alignment: 1,
+            arguments: arguments, offset: int64(lane) *
+              byteCount(target.kinds[0], module.pointerBytes), alignment: 1,
             location: item.location))
     for owner, data in old.blocks:
       let first = if owner == 0: 0'i32 else: int32(instructions.len)

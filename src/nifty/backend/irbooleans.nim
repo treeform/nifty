@@ -195,3 +195,10 @@ proc simplifyBooleans*(function: var IrFunction): seq[ValueId] {.raises: [].} =
     function.blocks[owner].instructions = Span(first: first,
       count: int32(instructions.len) - first)
   function.instructions = move(instructions)
+
+proc normalizedBooleans*(function: IrFunction): seq[bool] {.raises: [].} =
+  ## Proves zero-or-one payloads independently of call failure annotations.
+  let facts = booleanFacts(function)
+  result = newSeq[bool](facts.len)
+  for value, fact in facts:
+    result[value] = fact != UnknownBoolean

@@ -26,7 +26,8 @@ const DefaultIrOptimizations* = {
   RemoveIrIdentities, SimplifyIrParameters, ThreadIrJumps,
   MergeIrBlocks, ForwardIrStores, FoldIrConstants, HoistIrInvariants,
   PromoteIrSlots, SimplifyIrConversions, ReuseIrDominating, PromoteIrArguments,
-  PromoteIrReturns, ForwardIrFields, FoldIrAddresses, RemoveIrArguments,
+  PromoteIrReturns, PromoteIrRecordReturns, ForwardIrFields, FoldIrAddresses,
+  RemoveIrArguments,
   FoldIrPredicates, PreserveIrFloatSlots, SimplifyIrConditions, ForwardIrRegions,
   RemoveIrStores, RematerializeIrAddresses, RematerializeIrConstants,
   SeparateIrTemporaries, MergeIrParameters, ReduceIrRemainders, CacheIrArguments,
@@ -572,7 +573,8 @@ proc reuseLoads(function: var IrFunction, hosts: seq[IrHost]) =
   var
     aliases = newSeq[ValueId](function.values.len)
     instructions: seq[IrInstruction]
-    addresses = initTable[tuple[op: IrOpcode, base, target, storage: int32], int32]()
+    addresses = initTable[tuple[op: IrOpcode, base, target, storage: int32,
+      offset: int64], int32]()
     loads = initTable[tuple[address: int32, offset: int64, alignment: int32,
       kind: IrType, storage: int32], int32]()
   for i in 0 ..< aliases.len:
@@ -592,7 +594,8 @@ proc reuseLoads(function: var IrFunction, hosts: seq[IrHost]) =
           let
             base = if instruction.arguments.count == 0: -1'i32
               else: int32(function.operands[instruction.arguments.first])
-            key = (instruction.op, base, instruction.target, value.storage)
+            key = (instruction.op, base, instruction.target, value.storage,
+              instruction.offset)
           if addresses.hasKey(key):
             aliases[instruction.results.first] =
               ValueId(addresses.getOrDefault(key))
@@ -628,8 +631,8 @@ proc forwardStores(function: var IrFunction, hosts: seq[IrHost]) =
   var
     aliases = function.identityAliases()
     instructions: seq[IrInstruction]
-    addresses = initTable[tuple[op: IrOpcode, base, target, storage: int32],
-      ValueId]()
+    addresses = initTable[tuple[op: IrOpcode, base, target, storage: int32,
+      offset: int64], ValueId]()
     stores = initTable[tuple[address: int32, offset: int64, alignment: int32,
       kind: IrType, storage: int32], ValueId]()
   for data in function.blocks.mitems:
@@ -646,7 +649,8 @@ proc forwardStores(function: var IrFunction, hosts: seq[IrHost]) =
           value = function.values[instruction.results.first]
           base = if instruction.arguments.count == 0: -1'i32
             else: int32(function.operands[instruction.arguments.first])
-          key = (instruction.op, base, instruction.target, value.storage)
+          key = (instruction.op, base, instruction.target, value.storage,
+              instruction.offset)
         if addresses.hasKey(key):
           replacement = addresses.getOrDefault(key)
         else:
@@ -813,11 +817,13 @@ proc removeDead(function: var IrFunction, removableLoads: seq[bool] = @[]) =
       instruction.target = slots[index]
   function = move(rebuilt)
 
-proc promoteSlots(function: var IrFunction, pointerBytes: int32) =
+proc promoteSlots(function: var IrFunction, module: IrModule) =
   ## Promotes initialized private scalar slots into pruned SSA block arguments.
   function.compact(function.identityAliases())
   let
     old = function
+    pointerBytes = module.pointerBytes
+    booleans = normalizedBooleans(old)
     slotCount = old.slots.len
     blockCount = old.blocks.len
   if slotCount == 0:
@@ -830,6 +836,9 @@ proc promoteSlots(function: var IrFunction, pointerBytes: int32) =
     defines = newSeq[bool](slotCount * blockCount)
     uses = newSeq[bool](slotCount * blockCount)
     live = newSeq[bool](slotCount * blockCount)
+    constants = newSeq[bool](old.values.len)
+    bits = newSeq[uint64](old.values.len)
+    transparent = newSeq[bool](old.instructions.len)
   for address in addresses.mitems:
     address = -1
   for slot in allowed.mitems:
@@ -837,6 +846,39 @@ proc promoteSlots(function: var IrFunction, pointerBytes: int32) =
   for item in old.instructions:
     if item.op == SlotAddressOp:
       addresses[item.results.first] = int(item.target)
+    elif item.op == ConstantOp:
+      constants[item.results.first] = true
+      bits[item.results.first] = item.bits
+  var aliasesChanged = true
+  while aliasesChanged:
+    aliasesChanged = false
+    for index, item in old.instructions:
+      if item.results.count != 1 or item.arguments.count == 0:
+        continue
+      let
+        input = int32(old.operands[item.arguments.first])
+        output = item.results.first
+      if addresses[input] < 0 or addresses[output] >= 0 or
+          old.values[input].valueType notin
+            {AddressType, Int64Type, UInt64Type} or
+          old.values[output].valueType notin
+            {AddressType, Int64Type, UInt64Type}:
+        continue
+      var same = item.op == ConvertOp and
+        item.conversion == BitcastConversion
+      if item.op in {OffsetAddressOp, AddOp} and item.arguments.count == 2:
+        let displacement = int32(old.operands[item.arguments.first + 1])
+        if constants[displacement] and old.values[displacement].valueType in
+            {Int64Type, UInt64Type}:
+          same = (bits[displacement] +
+            (if item.op == OffsetAddressOp: cast[uint64](item.offset)
+            else: 0'u64)) == 0
+      elif item.op == FieldAddressOp:
+        same = int64(module.fields[item.target].offset) +% item.offset == 0
+      if same:
+        addresses[output] = addresses[input]
+        transparent[index] = true
+        aliasesChanged = true
   proc width(kind: IrType): int32 =
     ## Requires a whole-slot access of the declared primitive width.
     case kind
@@ -860,15 +902,19 @@ proc promoteSlots(function: var IrFunction, pointerBytes: int32) =
           slot = addresses[int32(value)]
         if slot < 0:
           continue
+        if i == 0 and transparent[index]:
+          continue
         if i != 0 or item.op notin {LoadOp, StoreOp} or
             item.volatile or item.offset != 0:
             allowed[slot] = false
             continue
         let accessed = if item.op == LoadOp: old.values[item.results.first]
           else: old.values[int32(old.operands[item.arguments.first + 1])]
-        if accessed.valueType == BoolType or
-            old.slots[slot].byteCount != width(accessed.valueType):
-            allowed[slot] = false
+        if old.slots[slot].byteCount != width(accessed.valueType):
+          allowed[slot] = false
+        if accessed.valueType == BoolType and item.op == StoreOp and
+            not booleans[int32(old.operands[item.arguments.first + 1])]:
+          allowed[slot] = false
         if typed[slot] and kinds[slot] != accessed:
           allowed[slot] = false
         typed[slot] = true
@@ -936,6 +982,8 @@ proc promoteSlots(function: var IrFunction, pointerBytes: int32) =
     for index in data.instructions.indices:
       let item = old.instructions[index]
       if item.op == SlotAddressOp and allowed[item.target]:
+        continue
+      if transparent[index] and allowed[addresses[item.results.first]]:
         continue
       if item.op in {LoadOp, StoreOp}:
         let slot = addresses[int32(old.operands[item.arguments.first])]
@@ -1156,7 +1204,7 @@ proc optimizeIr*(module: var IrModule,
       continue
     if pass == PromoteIrSlots:
       for function in module.functions.mitems:
-        function.promoteSlots(module.pointerBytes)
+        function.promoteSlots(module)
         if SimplifyIrConversions in selected:
           function.simplifyConversions(module.pointerBytes)
       scalarizeSlots(module, PreserveIrFloatSlots in selected)
@@ -1199,7 +1247,7 @@ proc optimizeIr*(module: var IrModule,
         function.compact(aliases)
       of SimplifyIrConversions:
         function.simplifyConversions(module.pointerBytes)
-      of PromoteIrSlots: function.promoteSlots(module.pointerBytes)
+      of PromoteIrSlots: function.promoteSlots(module)
       of HoistIrInvariants: function.hoistLoops()
       of FoldIrConstants:
         function.foldConstants(FoldIrConversions in selected)

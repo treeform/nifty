@@ -58,12 +58,21 @@ proc rematerializeAddresses*(function: var IrFunction): bool {.raises: [].} =
     function.recreate(definitions)
 
 proc cheapConstant(function: IrFunction, item: IrInstruction): bool =
-  ## Limits duplication to float32 bits and small scalar integer payloads.
+  ## Limits duplication to short floating encodings and small integer payloads.
   if item.op != ConstantOp or item.volatile or item.results.count != 1:
     return false
   case function.values[item.results.first].valueType
   of Float32Type:
     true
+  of Float64Type:
+    var zeroChunks, oneChunks = 0
+    for shift in countup(0, 48, 16):
+      let chunk = (item.bits shr shift) and 0xffff'u64
+      if chunk != 0:
+        inc zeroChunks
+      if chunk != 0xffff'u64:
+        inc oneChunks
+    min(zeroChunks, oneChunks) <= 2
   of BoolType, CharType, Int8Type .. UInt64Type:
     item.bits <= 65535 or item.bits >= uint64.high - 65535
   else:
