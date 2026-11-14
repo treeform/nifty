@@ -1,0 +1,25 @@
+# Large values use caller destinations, including optional get results.
+object Payload =
+  bytes: array[40000, uint8]
+  mark: int
+
+func fetch(values: seq[Payload], index: int): Payload? =
+  return values.get(index)
+
+proc fill(value: var Payload) =
+  value.mark = 42
+  value.bytes[0] = 7
+
+thread main() =
+  var values: seq[Payload]
+  if values.resize(2):
+    if values.len == 2:
+      fill(values[1])
+      let found = values.get(1)
+      if found.ok:
+        echo found.mark, " ", found.bytes[0]
+      let forwarded = fetch(values, 1)
+      if forwarded.ok:
+        echo forwarded.mark
+      let missing = values.get(-1)
+      echo missing.ok

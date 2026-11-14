@@ -1,0 +1,8 @@
+object Payload =
+  data: array[300, int]
+
+thread main() =
+  var values: seq[Payload]
+  if values.resize(1):
+    echo values.get(0).ok
+  echo values.len

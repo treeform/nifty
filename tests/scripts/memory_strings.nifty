@@ -1,0 +1,33 @@
+# Child procedures grow the caller's string and read calls borrow it.
+
+proc fill(text: var string): bool =
+  if not text.add("hello"):
+    return false
+  return text.add(" world")
+
+func length(text: string): int =
+  return text.len
+
+thread main() =
+  var text: string
+  echo text.len
+  echo fill(text)
+  echo text
+  echo length("literal")
+  echo text.startsWith("hello"), " ", text.endsWith("world")
+  echo text.find("world").or(0), " ", text.get(99).ok
+  var copied: string
+  echo copied.copyFrom(text)
+  text.clear()
+  echo text.len, " ", copied
+  echo copied.setLen(5)
+  echo copied.addByte('!')
+  echo copied.addNum(-42)
+  echo copied
+  var part: string
+  echo part.copyRange(copied, 1, 4)
+  echo part
+  echo part.resize(5)
+  echo part.get(3).or(255), " ", part.get(4).or(255)
+  echo part.reserve(100)
+  echo part.len, " ", part.cap >= 100

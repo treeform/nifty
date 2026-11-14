@@ -58,25 +58,36 @@ interpret the source or compile it to C at startup.
 ## Compiler boundaries
 
 - `src/nifty.nim`: checked-source facade and backend selection.
-- `src/nifty/codegen.nim`: the AST-to-C reference implementation.
+- `src/nifty/checker.nim`: type, range, borrow, effect, lock, and termination
+  checks, plus generic instantiation and validated argument conversions.
+- `src/nifty/semantics.nim`: shared binding identities, parameter modes,
+  ownership inventory, and ordered cleanup on each scope and control edge.
+- `src/nifty/codegen.nim`: C emission from the checked AST and semantic plan.
 - `src/nifty/lowering.nim`: source evaluation order, explicit branches,
-  optional values, numeric conversions, fixed layouts, and arena planning.
+  optional values, numeric conversions, and emission of planned borrows and
+  cleanup into native IR, with target storage and arena planning.
 - `src/nifty/backend/`: IR validation, register allocation, frame layout,
   instruction encoding, and executable memory. Adapted from Nimkey with
   attribution in `src/nifty/backend/PROVENANCE.md`.
-- `src/nifty/nativecontainers.nim`: operations on fixed-capacity storage.
+- `src/nifty/nativecontainers.nim`: operations on fixed-capacity and growable
+  storage, including fallible allocation and recursive ownership cleanup.
 - `src/nifty/nativeruntime.nim`: preallocated program storage, host calls,
   thread startup, synchronization, and external symbol binding.
 - `src/nifty/nativefiles.nim` and `nativebundles.nim`: image validation,
   serialization, and standalone packaging.
 
+`check(module)` publishes the semantic plan only after all source checks
+succeed. Generators and source reports require that plan; they do not run
+their own type or borrow checking. Reports read ownership and lock proofs
+from the same checked module. Backend IR, ABI, and image validation remain
+separate checks on generated code and artifacts.
+
 The native path retains Nifty's checker and diagnostics. It uses Nifty's own
-fixed-capacity layouts rather than Nimkey's dynamic collections. Public and
-thread entries receive an execution context, argument storage, result
-destination, and per-thread arena pointer. Private routines can pass scalar
-arguments and return scalar values or small homogeneous floating records in
-registers. User arithmetic, branches, memory accesses, and
-routine calls are emitted as machine code; runtime helpers handle containers,
+fixed-capacity and growable layouts. Public and thread entries receive an
+execution context, argument storage, result destination, and per-thread arena
+pointer. Private routines can pass scalar arguments and return scalar values
+or small homogeneous floating records in registers. User arithmetic, branches,
+memory accesses, and routine calls are emitted as machine code; runtime helpers handle containers,
 I/O, synchronization, and external library interaction.
 
 ## Native optimization
@@ -90,7 +101,10 @@ Bounded CFG inlining and cleanup run for at most three rounds. Function indices
 remain stable for runtime thread descriptors.
 
 Typed storage metadata preserves field offsets, padding, optional payloads,
-and argument passing modes. Unknown external calls remain memory barriers.
+and argument passing modes. Growable descriptors retain pointer metadata so
+private argument promotion cannot copy an owner. AST unrolling rebuilds binding
+identities and scoped cleanup, and zero-initialization elision excludes owners.
+Unknown external calls remain memory barriers.
 Return promotion requires complete stores on every reachable return and
 proves that delayed result writes cannot change observable behavior.
 Floating arithmetic retains its source order and precision, without fused
@@ -138,6 +152,20 @@ exclude unknown external-call stack usage, OS stack reservations, and runtime
 bookkeeping. The C/source report remains available for abstract operation
 bounds and comparison with the original implementation.
 
+Growable `string` and `seq[T]` have fixed-size owning descriptors and
+runtime-sized payloads on every backend. Native reports include descriptors
+in their static storage figures and report heap payload separately. Allocation,
+traversal, copying, and cleanup can make abstract work runtime-dependent.
+Allocator overhead and temporary growth peaks are excluded from static totals.
+
+Borrowed parameters keep ownership with the caller. The common semantic pass
+plans cleanup at scope exits, early returns, and breaks. Both C and native
+generation emit those ordered drops, evaluating return values first; shared
+global owners are released after all threads finish. The checker rejects
+escaping owners,
+overlapping mutable borrows, and mutation of container metadata for every
+backend. Allocation failure is a checked boolean result.
+
 ## Runtime distribution
 
 Standalone packaging currently reuses a compiler binary as its prebuilt
@@ -146,6 +174,10 @@ runtime would, but requires no compiler during native program builds. A
 different-architecture template can be supplied with `NIFTY_RUNTIME_AMD64` or
 `NIFTY_RUNTIME_ARM64`, or placed beside the compiler under
 `nifty-runtime-amd64` or `nifty-runtime-arm64`.
+
+Native images use the `NIFTYN02` format, which includes ownership metadata.
+Rebuild the compiler and runtime templates together after this update, and
+re-emit images created with the earlier format.
 
 macOS packaging uses `/usr/bin/codesign` for an ad-hoc signature. ARM64 and
 AMD64 execution are tested on macOS, with AMD64 run through Rosetta. Other OS
@@ -156,6 +188,7 @@ POSIX threads.
 
 ```sh
 nim r tests/tests.nim
+nim r tests/test_semantics.nim
 nim r tests/test_backend_engine.nim
 nim r tests/test_nativecontainers.nim
 nim r tests/test_nativeruntime.nim
@@ -175,6 +208,8 @@ nim r tests/test_memoryops.nim
 nim r tests/test_nativeunroll.nim
 nim r tests/test_loweringoptimizations.nim
 nim r tests/test_nativemaths.nim
+nim r tests/test_memoryfiles.nim
+nim r tests/test_nativememory.nim
 nim r tests/test_native.nim "$PWD/nifty"
 ```
 

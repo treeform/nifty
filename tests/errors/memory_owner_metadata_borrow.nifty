@@ -1,0 +1,7 @@
+proc change(value: var int) =
+  value = 100
+
+thread main() =
+  var values: seq[int]
+  change(values.len)
+  echo values.len

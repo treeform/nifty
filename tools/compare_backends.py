@@ -4,6 +4,7 @@
 Builds finish before execution. Warmup/sample rounds rotate all executables.
 Only the four existing workload configuration constants may change. Every
 response must match exact RGB, and available independent goldens are mandatory.
+C emission uses --baseline unless a separate --c-compiler is selected.
 """
 
 import argparse
@@ -141,10 +142,12 @@ def parseArguments(arguments=None):
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--baseline", required=True, type=Path)
   parser.add_argument("--candidate", required=True, type=Path)
+  parser.add_argument("--c-compiler", type=Path,
+                      help="Nifty compiler for C emission; default --baseline")
   parser.add_argument("--backend", choices=("arm64", "amd64"), action="append")
   parser.add_argument("--c-architecture", choices=("auto", "arm64", "amd64"), default="auto",
                       help="auto builds one C baseline per selected native CPU")
-  parser.add_argument("--cc", default="cc")
+  parser.add_argument("--cc", default="cc", help="Host C toolchain executable")
   parser.add_argument("--size", type=int, action="append", help="Repeat; default 64 and 256")
   parser.add_argument("--repeat", type=int, default=1)
   parser.add_argument("--warmups", type=int, default=1)
@@ -161,9 +164,10 @@ def parseArguments(arguments=None):
       parser.error(f"--{name} must be in {low}..{high}")
   if not 0 < options.timeout <= 3600:
     parser.error("--timeout must be greater than zero and at most 3600")
-  for name in ("baseline", "candidate", "source", "output"):
+  options.c_compiler = options.c_compiler or options.baseline
+  for name in ("baseline", "candidate", "c_compiler", "source", "output"):
     setattr(options, name, getattr(options, name).expanduser().resolve())
-  for compiler in (options.baseline, options.candidate):
+  for compiler in (options.baseline, options.candidate, options.c_compiler):
     if not compiler.is_file() or not os.access(compiler, os.X_OK):
       parser.error(f"Compiler is not executable: {compiler}")
   options.cc = shutil.which(options.cc)
@@ -189,9 +193,9 @@ def main(arguments=None):
   variants = [(kind, architecture, compiler) for architecture in architectures
               for kind, compiler in (("baseline", options.baseline),
                                      ("candidate", options.candidate))]
-  variants += [("c", architecture, options.baseline) for architecture in cArchitectures]
+  variants += [("c", architecture, options.c_compiler) for architecture in cArchitectures]
   fingerprints = {path: sha256(path) for path in
-                  (options.baseline, options.candidate, options.source)}
+                  (options.baseline, options.candidate, options.c_compiler, options.source)}
   for compiler in (options.baseline, options.candidate):
     environment = compilerEnvironment(compiler)
     for architecture in architectures:

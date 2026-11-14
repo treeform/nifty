@@ -1,0 +1,1 @@
+memory_alias_mutable.nifty:7: overlapping borrows of 'text': a mutable borrow must be exclusive

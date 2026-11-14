@@ -1,0 +1,6 @@
+thread main() =
+  var values: seq[int]
+  if values.resize(1):
+    values.clear()
+    echo values[0]
+  echo values.len

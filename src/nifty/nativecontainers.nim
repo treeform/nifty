@@ -1,7 +1,35 @@
-## Fixed-storage container operations used by native host calls.
+## Container operations and owned storage used by native host calls.
 import nativeplans, types
 
 {.push raises: [], checks: off.}
+
+type
+  NativeMemory* = object
+    ## Allocation callbacks for program-owned storage.
+    reallocate*: proc(address: pointer, bytes: csize_t): pointer
+      {.cdecl, raises: [].}
+    release*: proc(address: pointer) {.cdecl, raises: [].}
+
+proc cRealloc(address: pointer, bytes: csize_t): pointer
+    {.importc: "realloc", header: "<stdlib.h>", raises: [].}
+proc cFree(address: pointer)
+    {.importc: "free", header: "<stdlib.h>", raises: [].}
+
+proc reallocate(memory: NativeMemory, address: pointer,
+    bytes: csize_t): pointer =
+  ## Allocate program-owned bytes through a scoped callback or libc.
+  if memory.reallocate != nil:
+    memory.reallocate(address, bytes)
+  else:
+    cRealloc(address, bytes)
+
+proc release(memory: NativeMemory, address: pointer) =
+  ## Free program-owned bytes through a scoped callback or libc.
+  if address != nil:
+    if memory.release != nil:
+      memory.release(address)
+    else:
+      cFree(address)
 
 proc at*(base: pointer, offset: int64): pointer {.inline.} =
   ## Address an offset within fixed native storage.
@@ -10,6 +38,21 @@ proc at*(base: pointer, offset: int64): pointer {.inline.} =
 proc length(base: pointer): var int64 {.inline.} =
   ## Access the native length field.
   cast[ptr int64](base)[]
+
+proc capacity(base: pointer): var int64 {.inline.} =
+  ## Access the capacity of a dynamic descriptor.
+  cast[ptr int64](at(base, 8))[]
+
+proc dataPointer(base: pointer, layout: NativeLayout): pointer =
+  ## Find inline fixed data or the allocation in a dynamic descriptor.
+  if layout.dynamic:
+    cast[ptr pointer](at(base, 16))[]
+  else:
+    at(base, layout.dataOffset)
+
+proc dataSlot(base: pointer): var pointer {.inline.} =
+  ## Access the allocation pointer of a dynamic descriptor.
+  cast[ptr pointer](at(base, 16))[]
 
 proc integer*(base: pointer, layout: NativeLayout): int64 =
   ## Read an integer using its declared storage width and signedness.
@@ -40,6 +83,172 @@ proc copyValue*(destination, source: pointer,
     writeInteger(destination, targetLayout, integer(source, sourceLayout))
   else:
     copyMem(destination, source, int(targetLayout.bytes))
+
+proc reserveDynamic(base: pointer, layout: NativeLayout,
+    elementBytes, wanted: int64, memory: NativeMemory): bool =
+  ## Grow a descriptor while preserving its live data and zeroing spare slots.
+  if wanted < 0 or elementBytes <= 0:
+    return false
+  if wanted <= capacity(base):
+    return true
+  if uint64(wanted) > uint64(high(int)) div uint64(elementBytes) or
+      uint64(wanted) > uint64(high(csize_t)) div uint64(elementBytes):
+    return false
+  var grown = max(8'i64, capacity(base))
+  while grown < wanted:
+    if grown > high(int64) div 2:
+      grown = wanted
+      break
+    grown *= 2
+  if uint64(grown) > uint64(high(int)) div uint64(elementBytes) or
+      uint64(grown) > uint64(high(csize_t)) div uint64(elementBytes):
+    grown = wanted
+  let address = reallocate(memory, dataSlot(base),
+    csize_t(grown) * csize_t(elementBytes))
+  if address == nil:
+    return false
+  zeroMem(at(address, capacity(base) * elementBytes),
+    int((grown - capacity(base)) * elementBytes))
+  dataSlot(base) = address
+  capacity(base) = grown
+  true
+
+proc dropOwned*(layouts: seq[NativeLayout], layoutId: int,
+    base: pointer, memory = NativeMemory()) =
+  ## Recursively destroy one owned value and restore zero storage.
+  let layout = layouts[layoutId]
+  if not layout.owned:
+    return
+  if layout.optional:
+    if cast[ptr bool](at(base, layout.okOffset))[]:
+      for i, candidate in layouts:
+        if candidate.kind == layout.kind and
+            candidate.bytes == int64(layout.okOffset) and
+            not candidate.optional and candidate.dynamic == layout.dynamic:
+          dropOwned(layouts, i, base, memory)
+          break
+    zeroMem(base, int(layout.bytes))
+    return
+  case layout.kind
+  of StringType:
+    if layout.dynamic:
+      release(memory, dataSlot(base))
+  of SeqType:
+    if layout.elem >= 0 and layouts[layout.elem].owned:
+      let element = layouts[layout.elem]
+      let data = dataPointer(base, layout)
+      for i in countdown(length(base) - 1, 0'i64):
+        dropOwned(layouts, layout.elem,
+          at(data, i * element.bytes), memory)
+    if layout.dynamic:
+      release(memory, dataSlot(base))
+  of ArrayType:
+    let element = layouts[layout.elem]
+    for i in countdown(layout.capacity - 1, 0'i64):
+      dropOwned(layouts, layout.elem,
+        at(base, i * element.bytes), memory)
+  of ObjectType:
+    for i in countdown(layout.fields.high, 0):
+      let field = layout.fields[i]
+      if layouts[field.typ].owned:
+        dropOwned(layouts, field.typ,
+          at(base, field.offset), memory)
+  else:
+    discard
+  zeroMem(base, int(layout.bytes))
+
+proc copyOwnedZero(layouts: seq[NativeLayout], layoutId: int,
+    destination, source: pointer, memory: NativeMemory): bool =
+  ## Copy into zero storage, cleaning partial children after failure.
+  let layout = layouts[layoutId]
+  if not layout.owned:
+    copyMem(destination, source, int(layout.bytes))
+    return true
+  if layout.optional:
+    if cast[ptr bool](at(source, layout.okOffset))[]:
+      for i, candidate in layouts:
+        if candidate.kind == layout.kind and
+            candidate.bytes == int64(layout.okOffset) and
+            not candidate.optional and candidate.dynamic == layout.dynamic:
+          if not copyOwnedZero(layouts, i, destination, source, memory):
+            return false
+          cast[ptr bool](at(destination, layout.okOffset))[] = true
+          return true
+    return true
+  case layout.kind
+  of StringType, SeqType:
+    if layout.dynamic:
+      let elementBytes = if layout.kind == StringType: 1'i64
+        else: layouts[layout.elem].bytes
+      if not reserveDynamic(destination, layout, elementBytes,
+          length(source), memory):
+        return false
+      if layout.kind == SeqType and layouts[layout.elem].owned:
+        for i in 0 ..< length(source):
+          if not copyOwnedZero(layouts, layout.elem,
+              at(dataPointer(destination, layout), i * elementBytes),
+              at(dataPointer(source, layout), i * elementBytes), memory):
+            dropOwned(layouts, layoutId, destination, memory)
+            return false
+          inc length(destination)
+      else:
+        if length(source) > 0:
+          copyMem(dataPointer(destination, layout),
+            dataPointer(source, layout), int(length(source) * elementBytes))
+        length(destination) = length(source)
+      return true
+    if layout.kind == SeqType and layouts[layout.elem].owned:
+      let elementBytes = layouts[layout.elem].bytes
+      for i in 0 ..< length(source):
+        if not copyOwnedZero(layouts, layout.elem,
+            at(dataPointer(destination, layout), i * elementBytes),
+            at(dataPointer(source, layout), i * elementBytes), memory):
+          dropOwned(layouts, layoutId, destination, memory)
+          return false
+        inc length(destination)
+      return true
+    copyMem(destination, source, int(layout.bytes))
+  of ArrayType:
+    let element = layouts[layout.elem]
+    for i in 0 ..< layout.capacity:
+      if not copyOwnedZero(layouts, layout.elem,
+          at(destination, i * element.bytes),
+          at(source, i * element.bytes), memory):
+        dropOwned(layouts, layoutId, destination, memory)
+        return false
+  of ObjectType:
+    for field in layout.fields:
+      if not copyOwnedZero(layouts, field.typ,
+          at(destination, field.offset), at(source, field.offset), memory):
+        dropOwned(layouts, layoutId, destination, memory)
+        return false
+  else:
+    copyMem(destination, source, int(layout.bytes))
+  true
+
+proc copyOwned*(layouts: seq[NativeLayout], layoutId: int,
+    destination, source: pointer, memory = NativeMemory()): bool =
+  ## Copy an owner transactionally, leaving the old value on failure.
+  if destination == source:
+    return true
+  let layout = layouts[layoutId]
+  var scratch: array[128, uint64]
+  let temporary = if layout.bytes <= int64(sizeof(scratch)):
+      cast[pointer](addr scratch[0])
+    else:
+      reallocate(memory, nil, csize_t(layout.bytes))
+  if temporary == nil:
+    return false
+  zeroMem(temporary, int(layout.bytes))
+  if not copyOwnedZero(layouts, layoutId, temporary, source, memory):
+    if temporary != cast[pointer](addr scratch[0]):
+      release(memory, temporary)
+    return false
+  dropOwned(layouts, layoutId, destination, memory)
+  copyMem(destination, temporary, int(layout.bytes))
+  if temporary != cast[pointer](addr scratch[0]):
+    release(memory, temporary)
+  true
 
 proc bytesEqual(a, b: pointer, count: int64): bool =
   ## Compare raw bytes without constructing strings.
@@ -97,7 +306,9 @@ proc parseInteger(receiver: pointer, dataOffset: int,
   ## Parse strict signed decimal with checked full-range accumulation.
   let
     count = length(receiver)
-    data = cast[ptr UncheckedArray[byte]](at(receiver, dataOffset))
+    data = cast[ptr UncheckedArray[byte]](
+      if dataOffset < 0: dataSlot(receiver)
+      else: at(receiver, dataOffset))
   if count == 0:
     return false
   var
@@ -193,8 +404,241 @@ proc queuePop*(receiver, output: pointer, layout: NativeLayout,
   head[] = (head[] + 1) mod layout.capacity
   dec length(receiver)
 
+proc appendDynamic(receiver, source: pointer, count: int64,
+    memory: NativeMemory): bool =
+  ## Append bytes to a dynamic string after a checked growth.
+  if count < 0 or count > high(int64) - length(receiver):
+    return false
+  let oldLength = length(receiver)
+  if not reserveDynamic(receiver, NativeLayout(), 1,
+      oldLength + count, memory):
+    return false
+  if count > 0:
+    moveMem(at(dataSlot(receiver), oldLength), source, int(count))
+  length(receiver) = oldLength + count
+  true
+
+proc copyDynamicFrom(layouts: seq[NativeLayout], layoutId: int,
+    destination, source: pointer, sourceLayout: NativeLayout,
+    memory: NativeMemory): bool =
+  ## Replace a dynamic descriptor with a deep copy of fixed or dynamic data.
+  let layout = layouts[layoutId]
+  var temporary: array[3, uint64]
+  let target = cast[pointer](addr temporary[0])
+  zeroMem(target, 24)
+  let elementBytes = if layout.kind == StringType: 1'i64
+    else: layouts[layout.elem].bytes
+  if not reserveDynamic(target, layout, elementBytes,
+      length(source), memory):
+    return false
+  if layout.kind == SeqType and layouts[layout.elem].owned:
+    for i in 0 ..< length(source):
+      if not copyOwnedZero(layouts, layout.elem,
+          at(dataSlot(target), i * elementBytes),
+          at(dataPointer(source, sourceLayout), i * elementBytes), memory):
+        dropOwned(layouts, layoutId, target, memory)
+        return false
+      inc length(target)
+  else:
+    if length(source) > 0:
+      copyMem(dataSlot(target), dataPointer(source, sourceLayout),
+        int(length(source) * elementBytes))
+    length(target) = length(source)
+  dropOwned(layouts, layoutId, destination, memory)
+  copyMem(destination, target, 24)
+  true
+
+proc executeDynamic(host: NativeHost, layouts: seq[NativeLayout],
+    receiver, args, output: pointer, memory: NativeMemory) =
+  ## Dispatch fallible growable string and sequence operations.
+  template layout: untyped = layouts[host.receiverType]
+  template argument(index: int): pointer =
+    at(args, int64(host.paramOffsets[index]))
+  template argumentLayout(index: int): NativeLayout =
+    layouts[host.paramTypes[index]]
+  template argumentInteger(index: int): int64 =
+    integer(argument(index), argumentLayout(index))
+  template boolean(value: bool) =
+    cast[ptr bool](output)[] = value
+  let elementBytes = if layout.kind == StringType: 1'i64
+    else: layouts[layout.elem].bytes
+  case host.operation
+  of "drop":
+    dropOwned(layouts, host.receiverType, receiver, memory)
+  of "clear":
+    if layout.kind == SeqType and layouts[layout.elem].owned:
+      for i in countdown(length(receiver) - 1, 0'i64):
+        dropOwned(layouts, layout.elem,
+          at(dataSlot(receiver), i * elementBytes), memory)
+    if length(receiver) > 0:
+      zeroMem(dataSlot(receiver), int(length(receiver) * elementBytes))
+    length(receiver) = 0
+  of "reserve":
+    boolean(reserveDynamic(receiver, layout, elementBytes,
+      argumentInteger(0), memory))
+  of "resize", "setLen":
+    let wanted = argumentInteger(0)
+    if wanted < 0 or
+        (host.operation == "setLen" and wanted > capacity(receiver)):
+      boolean(false)
+      return
+    if host.operation == "resize" and not reserveDynamic(receiver,
+        layout, elementBytes, wanted, memory):
+      boolean(false)
+      return
+    if layout.kind == SeqType and layouts[layout.elem].owned:
+      for i in countdown(length(receiver) - 1, wanted):
+        dropOwned(layouts, layout.elem,
+          at(dataSlot(receiver), i * elementBytes), memory)
+    if host.operation == "resize" and wanted > length(receiver):
+      zeroMem(at(dataSlot(receiver), length(receiver) * elementBytes),
+        int((wanted - length(receiver)) * elementBytes))
+    length(receiver) = wanted
+    boolean(true)
+  of "copyFrom":
+    boolean(copyDynamicFrom(layouts, host.receiverType, receiver,
+      argument(0), argumentLayout(0), memory))
+  of "add", "push":
+    if layout.kind == StringType:
+      let source = argument(0)
+      boolean(appendDynamic(receiver,
+        dataPointer(source, argumentLayout(0)), length(source), memory))
+    else:
+      if length(receiver) == high(int64):
+        boolean(false)
+        return
+      if layouts[layout.elem].owned:
+        var scratch: array[128, uint64]
+        let temporary = if elementBytes <= int64(sizeof(scratch)):
+            cast[pointer](addr scratch[0])
+          else:
+            reallocate(memory, nil, csize_t(elementBytes))
+        if temporary == nil:
+          boolean(false)
+          return
+        zeroMem(temporary, int(elementBytes))
+        if not copyOwnedZero(layouts, layout.elem, temporary,
+            argument(0), memory):
+          if temporary != cast[pointer](addr scratch[0]):
+            release(memory, temporary)
+          boolean(false)
+          return
+        if not reserveDynamic(receiver, layout, elementBytes,
+            length(receiver) + 1, memory):
+          dropOwned(layouts, layout.elem, temporary, memory)
+          if temporary != cast[pointer](addr scratch[0]):
+            release(memory, temporary)
+          boolean(false)
+          return
+        copyMem(at(dataSlot(receiver), length(receiver) * elementBytes),
+          temporary, int(elementBytes))
+        if temporary != cast[pointer](addr scratch[0]):
+          release(memory, temporary)
+      else:
+        if not reserveDynamic(receiver, layout, elementBytes,
+            length(receiver) + 1, memory):
+          boolean(false)
+          return
+        copyValue(at(dataSlot(receiver), length(receiver) * elementBytes),
+          argument(0), layouts[layout.elem], argumentLayout(0))
+      inc length(receiver)
+      boolean(true)
+  of "pop":
+    dec length(receiver)
+    copyMem(output, at(dataSlot(receiver), length(receiver) * elementBytes),
+      int(elementBytes))
+  of "get":
+    zeroMem(output, int(layouts[host.resultType].bytes))
+    let index = argumentInteger(0)
+    if index >= 0 and index < length(receiver):
+      if layout.kind == StringType:
+        cast[ptr int64](output)[] = int64(
+          cast[ptr byte](at(dataSlot(receiver), index))[])
+        cast[ptr bool](at(output,
+          layouts[host.resultType].okOffset))[] = true
+      else:
+        let element = layouts[layout.elem]
+        copyMem(output, at(dataSlot(receiver), index * elementBytes),
+          int(elementBytes))
+        if not element.optional:
+          cast[ptr bool](at(output,
+            layouts[host.resultType].okOffset))[] = true
+  of "addByte":
+    var value = byte(argumentInteger(0))
+    boolean(appendDynamic(receiver, addr value, 1, memory))
+  of "addNum":
+    var
+      buffer: array[20, byte]
+      count = 0
+      magnitude = if argumentInteger(0) < 0:
+          0'u64 - cast[uint64](argumentInteger(0))
+        else:
+          uint64(argumentInteger(0))
+    while true:
+      buffer[count] = byte(magnitude mod 10) + byte('0')
+      inc count
+      magnitude = magnitude div 10
+      if magnitude == 0:
+        break
+    if argumentInteger(0) < 0:
+      buffer[count] = byte('-')
+      inc count
+    var ordered: array[20, byte]
+    for i in 0 ..< count:
+      ordered[i] = buffer[count - i - 1]
+    boolean(appendDynamic(receiver, addr ordered[0], count, memory))
+  of "copyRange":
+    let source = argument(0)
+    let low = max(0'i64, min(length(source), argumentInteger(1)))
+    let high = max(low, min(length(source), argumentInteger(2)))
+    var section: array[3, uint64]
+    let temporary = cast[pointer](addr section[0])
+    zeroMem(temporary, 24)
+    length(temporary) = high - low
+    dataSlot(temporary) = at(dataPointer(source, argumentLayout(0)), low)
+    boolean(copyDynamicFrom(layouts, host.receiverType, receiver,
+      temporary, NativeLayout(dynamic: true), memory))
+  of "startsWith", "endsWith", "contains", "find":
+    let source = argument(0)
+    let count = length(source)
+    let data = dataSlot(receiver)
+    let needle = dataPointer(source, argumentLayout(0))
+    var found = -1'i64
+    if count == 0:
+      found = 0
+    elif count <= length(receiver):
+      if host.operation == "startsWith":
+        if bytesEqual(data, needle, count):
+          found = 0
+      elif host.operation == "endsWith":
+        if bytesEqual(at(data, length(receiver) - count), needle, count):
+          found = length(receiver) - count
+      else:
+        for i in 0 .. length(receiver) - count:
+          if bytesEqual(at(data, i), needle, count):
+            found = i
+            break
+    if host.operation == "find":
+      optionalInteger(output, layouts[host.resultType], found, found >= 0)
+    else:
+      boolean(found >= 0)
+  of "findByte":
+    var found = -1'i64
+    for i in 0 ..< length(receiver):
+      if cast[ptr byte](at(dataSlot(receiver), i))[] ==
+          byte(argumentInteger(0)):
+        found = i
+        break
+    optionalInteger(output, layouts[host.resultType], found, found >= 0)
+  of "toInt":
+    var value = 0'i64
+    let present = parseInteger(receiver, -1, value)
+    optionalInteger(output, layouts[host.resultType], value, present)
+  else:
+    discard
+
 proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
-    receiver, args, output: pointer) =
+    receiver, args, output: pointer, memory = NativeMemory()) =
   ## Execute a checked container method without allocations or GC writes.
   template layout: untyped = layouts[host.receiverType]
   template argument(index: int): pointer =
@@ -205,6 +649,12 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
     integer(argument(index), argumentLayout(index))
   template boolean(value: bool) =
     cast[ptr bool](output)[] = value
+  if host.operation == "drop":
+    dropOwned(layouts, host.receiverType, receiver, memory)
+    return
+  if layout.dynamic:
+    executeDynamic(host, layouts, receiver, args, output, memory)
+    return
   if layout.optional:
     if cast[ptr bool](at(receiver, layout.okOffset))[]:
       copyMem(output, receiver, int(layout.okOffset))
@@ -218,6 +668,16 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
     of QueueType:
       length(receiver) = 0
       cast[ptr int64](at(receiver, 8))[] = 0
+    of SeqType:
+      if layouts[layout.elem].owned:
+        let element = layouts[layout.elem]
+        for i in countdown(length(receiver) - 1, 0'i64):
+          dropOwned(layouts, layout.elem,
+            at(receiver, int64(layout.dataOffset) + i * element.bytes),
+            memory)
+        zeroMem(at(receiver, layout.dataOffset),
+          int(length(receiver) * element.bytes))
+      length(receiver) = 0
     else:
       length(receiver) = 0
     return
@@ -256,7 +716,7 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
         source = argument(0)
         count = length(source)
       moveMem(at(data, length(receiver)),
-        at(source, argumentLayout(0).dataOffset), int(count))
+        dataPointer(source, argumentLayout(0)), int(count))
       length(receiver) += count
     of "setLen":
       length(receiver) = argumentInteger(0)
@@ -274,11 +734,25 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
         let offset = if host.operation == "startsWith": 0'i64
           else: length(receiver) - count
         found = bytesEqual(at(data, offset),
-          at(source, argumentLayout(0).dataOffset), count)
+          dataPointer(source, argumentLayout(0)), count)
       boolean(found)
     of "contains", "find":
-      let found = findString(receiver, argument(0), layout.dataOffset,
-        argumentLayout(0).dataOffset)
+      let found = if argumentLayout(0).dynamic:
+          block:
+            let source = argument(0)
+            var index = -1'i64
+            if length(source) == 0:
+              index = 0
+            elif length(source) <= length(receiver):
+              for i in 0 .. length(receiver) - length(source):
+                if bytesEqual(at(data, i), dataPointer(source,
+                    argumentLayout(0)), length(source)):
+                  index = i
+                  break
+            index
+        else:
+          findString(receiver, argument(0), layout.dataOffset,
+            argumentLayout(0).dataOffset)
       if host.operation == "contains":
         boolean(found >= 0)
       else:
@@ -303,8 +777,8 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
         high = max(0'i64, min(sourceLength, argumentInteger(2)))
         count = min(layout.capacity, max(0'i64, high - low))
       if count > 0:
-        moveMem(data, at(source,
-          int64(argumentLayout(0).dataOffset) + low), int(count))
+        moveMem(data, at(dataPointer(source, argumentLayout(0)), low),
+          int(count))
       length(receiver) = count
     else:
       discard

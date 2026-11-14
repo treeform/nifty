@@ -1,24 +1,30 @@
 # Nifty — language spec (v0 draft)
 
 Nifty is nimmy's super-static brother. nimmy is a dynamic scripting language;
-nifty is a small systems language where everything is fixed at compile time:
-memory, threads, stack depth, control flow, evaluation order. Nifty compiles
-to portable C.
+nifty is a small systems language with statically checked memory access,
+threads, stack depth, control flow, and evaluation order. Fixed-capacity
+storage remains the default; growable strings and sequences add explicit,
+fallible heap allocation with scoped ownership. Nifty compiles to portable C
+or native ARM64 and AMD64 code; see [BACKENDS.md](BACKENDS.md).
 
-The design goal is *provability through simplicity*: the whole working set
-of a program is visible in its source, and the compiler puts a static bound
-on memory, stack depth, and worst-case iterations per thread. What cannot be
-proven does not compile; what compiles cannot trap.
+The design goal is *provability through simplicity*: the compiler proves
+access safety and reports static storage, stack depth, and operation bounds
+where available. Growable payloads and their operation costs are reported as
+runtime-dependent rather than disguised as fixed resource requirements.
+Unproven direct access does not compile; allocation failure is a value.
 
 ## Core model
 
-- **The heap is the globals.** All long-lived data lives in global `var`
-  declarations of fixed size. There is no allocator, no `alloc`/`free`, no
-  hidden allocation anywhere. Globals are zero-initialized.
+- **Static storage plus scoped owners.** Fixed-capacity values keep their
+  existing storage and, when they contain no owners, copy semantics.
+  `string` and `seq[T]` own growable
+  heap storage and begin empty without allocating. Locals release owned
+  storage on scope exit; globals release it after all threads finish.
+  There is no public `alloc` or `free`. Growth is explicit and fallible.
 - **Threads are declared, not created.** Every `thread name() =` declaration
   is one OS thread — and `thread 4 name() =` is four of them running the
   same body: a thread pool is one declaration. All threads start at
-  program start. There is no `createThread`, no teardown logic; a program
+  program start. There is no `createThread` or user thread teardown; a program
   is "start once, run until done (or forever)". The program exits when
   every thread returns.
 - **No recursion.** Declare-before-use with no forward declarations makes
@@ -27,21 +33,23 @@ proven does not compile; what compiles cannot trap.
   don't even use the C stack (see Big locals). (Planned: allow self and
   mutual recursion when every call in the cycle is a provable tail call,
   compiled to loops.)
-- **No exceptions, no traps, no runtime checks.** Division by zero, out-of-
+- **No exceptions or implicit traps.** Division by zero, out-of-
   bounds indexing, integer overflow, non-termination of `while` loops, and
   data races are all proven impossible at compile time (see Static proofs).
-  The generated C contains no checks and no exit paths. There is no
-  unwinding, ever.
-- **Errors are optionals at the boundary.** Internal code is total: a
+  Proven direct indexing and arithmetic need no runtime checks. Growable
+  operations check allocation requests and report failure without trapping.
+  There is no exception unwinding.
+- **Fallibility is explicit.** Internal `func` code is total: a
   `func` provably terminates and cannot fail. Fallibility exists only
-  where the outside world can say no (sensors, input, hardware), expressed
-  as flow-typed optionals `T?` — see Types. There is no error flag, no
-  exception, no result-wrapper ceremony.
+  where the outside world can say no (sensors, input, hardware, allocation),
+  expressed as flow-typed optionals `T?` or a `bool` success result from
+  growable operations. No exceptions or implicit termination on failure.
 - **Evaluation order is strictly left to right, as written — effects
   included.** C leaves subexpression order unspecified; nifty does not
   inherit that (see Evaluation order).
-- **No pointers.** `var` parameters cover mutable arguments. Long-lived
-  references are array indices.
+- **No user pointers.** `var` parameters cover mutable arguments. Owned
+  values are borrowed during calls, with exclusive mutable access and no
+  escaping references. Long-lived references are array indices.
 
 ## Imports
 
@@ -70,7 +78,7 @@ code and no special `main`:
 ```nim
 const MaxItems = 10        # compile-time int constant
 
-var total: 0 .. 1000       # globals: the entire heap, zero-initialized
+var total: 0 .. 1000       # globals: static, zero-initialized storage
 var items: array[MaxItems, int]
 var itemsLock: Lock
 
@@ -99,6 +107,7 @@ Three kinds of routines, in increasing order of rights:
 | call `proc`s          | no     | yes    | yes      |
 | `echo`                | no     | yes    | yes      |
 | `with`                | no     | yes    | yes      |
+| allocate/grow storage  | no     | yes    | yes      |
 | return value          | required | optional | none |
 | callable              | yes    | yes    | never    |
 
@@ -109,6 +118,13 @@ elements). A `func` may only call other `func`s — otherwise it could
 reach globals through a `proc`. This makes every `func` referentially
 transparent — and, with the termination proof, *total*: same arguments,
 same result, always returns, never fails.
+
+A read-only parameter containing growable storage borrows the value for
+the call rather than copying its ownership. `var` parameters borrow it
+exclusively, including permission to grow or replace its storage. A helper
+may forward that borrow to a child call. The original owner keeps its
+allocation when the helper returns. Allocation and growth are unavailable
+in `func`; pure routines may inspect borrowed growable values.
 
 A `thread` takes no parameters, returns nothing, and cannot be called.
 Its body is the life of one OS thread. A count before the name —
@@ -123,8 +139,10 @@ single-thread scope errors do not fire), and the report prints
 Recursion is rejected in all three: routines must be declared before use,
 there are no forward declarations, and a routine may not call itself.
 
-Routines can return values of any size — arrays, big strings, big
-objects. C cannot return arrays (and returning a big struct by value
+Routines can return non-owning values of any size — arrays, bounded strings,
+and objects without owned fields. Values containing growable storage cannot
+be returned or implicitly copied; pass a `var` output parameter instead.
+C cannot return arrays (and returning a big struct by value
 would land a copy on the C stack), so any return of an array or of a
 value over the arena threshold compiles to **destination passing**: the
 signature becomes `void f(params..., T *ret)` and the caller passes
@@ -212,8 +230,18 @@ extern "libc":
   sockets) fit directly; NUL-expecting APIs need a 0 byte kept in the
   buffer by the caller.
 - Extern routines are proc-like (a `func` cannot call them), cannot be
-  variadic, and only sized ints, floats, `string[N]`/array buffers,
-  and `var` objects cross the boundary. No optionals, no containers.
+  variadic, and only sized ints, floats, strings, array buffers,
+  and `var` objects cross the boundary. Growable strings pass their byte
+  pointer just like bounded strings. Other owner-containing values,
+  optionals, and sequence descriptors cannot cross the boundary.
+- **Growable FFI buffers reserve before reading.** Check `buf.reserve(n)`
+  or `buf.resize(n)` before passing a `var string` to an extern that may
+  write `n` bytes. The requested write size must fit `buf.cap`. After
+  validating the returned byte count, check `buf.setLen(got)` to expose
+  the bytes C wrote. `setLen` preserves those bytes; it does not allocate.
+  Externs must respect the provided size and must not retain a borrowed
+  address after the call. The compiler cannot verify those foreign-code
+  promises.
 - The honest asterisk: "what compiles cannot trap" now reads "assuming
   externs honor their declared shapes." The declaration file is the
   contract; everything on nifty's side of it stays proven.
@@ -305,9 +333,10 @@ parameters — which is what a reusable routine should do anyway.
   defined for floats; `==` is IEEE equality (NaN never equals).
 - `array[N, T]` — fixed length `N` (an integer literal or `const`),
   element type `T`. Indexing `a[i]` is proven in bounds at compile time.
-  Arrays are values like everything else: whole-array assignment and
-  initialization copy (a `memcpy` in the generated C), and a copy from a
-  differently-ranged source must prove the element ranges fit.
+  Arrays without owned elements have value semantics: whole-array
+  assignment and initialization copy (a `memcpy` in the generated C), and
+  a copy from a differently-ranged source must prove the element ranges
+  fit. Arrays containing growable storage inherit its ownership rules.
 - `object` — a static struct, exactly like C:
 
   ```nim
@@ -316,23 +345,31 @@ parameters — which is what a reusable routine should do anyway.
     y: -1000 .. 1000
   ```
 
-  Nothing grows, everything is defined. A type can only refer to types
-  declared *above* it — declare-before-use for types — so recursive
-  types, and therefore unknown sizes, are impossible by construction.
-  Objects have C value semantics: assignment and non-`var` parameters
-  copy (a fixed, compile-time-known cost), `var` parameters pass by
-  pointer. Field access `a.b` nests freely with indexing
-  (`particles[i].pos.x`). Zero-initialized; no constructors or literals
+  The struct layout is fixed. Fields may own growable storage. A type can
+  only refer to types declared *above* it — declare-before-use for types —
+  so recursive layouts and unknown descriptor sizes are impossible by
+  construction.
+  Objects without owned fields have C value semantics: assignment and
+  non-`var` parameters copy (a fixed, compile-time-known cost), `var`
+  parameters pass by pointer. Objects with owned fields cannot be copied
+  or returned and are borrowed by parameters. Field access `a.b` nests
+  freely with indexing (`particles[i].pos.x`). Zero-initialized; no
+  constructors or literals
   in v0: declare, then assign fields.
 - `Lock` — a mutex. Only allowed as a global; only usable via `with`.
 - String literals appear as `echo` arguments and anywhere a `string[N]`
-  is expected (they must fit, checked at compile time).
+  is expected (they must fit, checked at compile time). They can also be
+  borrowed by read-only `string` parameters and passed to growable string
+  methods. A growable local starts empty; fill it with a checked operation
+  instead of an allocating literal initializer.
 
 ### Containers
 
-All containers are bounded, value-semantic, zero-init-is-empty, and
-sealed builtins (the compiler owns their representation, so it can prove
-their contracts and optimize freely). Only the live part of a container
+Containers are zero-init-is-empty and sealed builtins (the compiler owns
+their representation, so it can prove their contracts and optimize
+freely). Bounded containers without owned elements retain value semantics;
+growable containers and aggregates containing them have scoped ownership.
+Only the live part of a container
 is ever readable, so dead slots are free — a `seq` of `1 .. 5` ints is
 fine zero-initialized. `.len` reads create flow facts exactly like ints
 (`if s.len < N:`), invalidated when the container changes.
@@ -404,12 +441,113 @@ fine zero-initialized. `.len` reads create flow facts exactly like ints
   empty, at OS level. Not a container in the value sense (global-only,
   never copied, no iteration) — see Channels below.
 
+### Growable strings and sequences
+
+Omitting the capacity selects scoped heap ownership: `string` and
+`seq[T]`. Both begin with length and capacity zero, without an allocation.
+Their descriptor has a fixed size; its backing storage is chosen at run
+time. `string[N]` and `seq[N, T]` keep their existing bounded behavior.
+
+```nim
+proc greeting(output: var string): bool =
+  return output.add("hello")
+
+thread main() =
+  block:
+    var text: string
+    if greeting(text):
+      echo text
+  # The block releases text's allocation.
+```
+
+The caller owns `text`; the callee may allocate or grow its storage through
+the mutable parameter. No sizing pass or returned pointer is required.
+Growth can relocate the payload, but the caller's owner remains the same.
+
+- `.len` gives the live element count; `.cap` gives the allocated capacity.
+  Both properties are read-only, including through mutable parameters.
+  `reserve(n): bool` ensures capacity for at least `n` elements without
+  changing the length. Newly allocated spare storage is zeroed.
+- `resize(n): bool` changes the live length, allocating if necessary and
+  zero-initializing newly live elements.
+- `setLen(n): bool` changes the live length only if `n <= cap`; it does
+  not allocate or overwrite newly exposed bytes. This preserves FFI data
+  written after `reserve`. Both length-changing methods require an
+  element type with a valid zero initial value. Shrinking destroys and
+  zeroes removed owned elements. A sequence of a nonzero range can still
+  start empty and accept supplied values through `add` or `push`.
+- `add(x): bool` and `push(x): bool` append a sequence element, growing as
+  necessary. An owned element is copied into independent owned storage;
+  allocation failure leaves the destination unchanged.
+- On growable strings, `add(text): bool`, `addByte(byte): bool`, and
+  `addNum(integer): bool` append, while `copyRange(src, lo, hi): bool`
+  replaces the contents with the clamped source range.
+- `copyFrom(source): bool` explicitly copies into the receiving growable
+  container. String sources may be literals, bounded strings, or growable
+  strings; sequence sources may be bounded or growable with compatible
+  element types. There is no implicit allocating assignment or shallow
+  owner copy.
+- `clear()` destroys live owned elements and sets length to zero while
+  retaining capacity for reuse. It does not allocate.
+- `pop()` requires proven nonempty storage and returns the last element.
+  It is available only for element types without owned storage whose value
+  size is at most 256 bytes. Shrink or clear a sequence to destroy owned
+  elements instead.
+- `get(index)` returns an optional copied element, or `none` if out of
+  range; it is available only for nonoptional element types without owned
+  storage. Large results use destination passing, with the same direct
+  initialization, assignment, and return rules as large routine results.
+  Use guarded indexing and child procedures to access owned values.
+  Direct `s[index]` still requires a proof that the index is in the live
+  range. `.len` and read-only string searches do not allocate.
+
+Size arguments to `reserve`, `resize`, and `setLen` must be proven
+nonnegative. Allocating operations check request arithmetic and allocation
+results.
+A `false` result leaves the receiving container's length and contents
+unchanged. The caller must consult or explicitly discard the result, as
+with every other returned value. No growth failure implicitly exits the
+program. Allocating operations are available in `proc` and `thread`, not
+in `func`.
+
+Ownership follows the containing value. `seq[string]`, objects with
+growable fields, and arrays of those objects release their contents
+recursively. Locals clean up on normal scope exit, including `return` and
+`break`; a loop-local owner is cleaned up each iteration. A global owner is
+cleaned up after all threads join. Existing restrictions against escaping
+a `with` block still apply. A nested `block:` is the way to request earlier
+cleanup without a public `free` operation.
+
+Owned values cannot be initialized from another owner, assigned, returned,
+or sent through a channel. The restriction applies recursively to values
+containing owners. For this version, owned values are also excluded from
+optionals, queues, and maps. Fixed sequences can contain owners, but their
+copying `add`, `push`, and `pop` operations cannot be used on owned elements.
+Use dynamic sequences for collections of dynamically allocated values.
+
+Read-only parameters borrow owned values for the duration of the call.
+Mutable parameters borrow exclusively: while the borrow is active, the
+container and its elements are accessible only through it or a temporary
+borrow forwarded to a child call. Two read-only borrows may coexist.
+Overlapping arguments are rejected when either permits mutation, including
+passing a container alongside a reference to one of its elements. Calls
+cannot bypass a borrow through a global alias, and borrowed references
+cannot escape into stored values. Iteration cannot mutate its source;
+an iteration element containing owned storage is borrowed through a
+read-only pointer.
+
+Shared global owners use the ordinary lock rules for all access, reads
+included. The caller keeps the lock across the complete borrowed call.
+Borrowed access ends before releasing that lock; releasing the lock does
+not destroy the global owner's storage.
+
 ### Optionals
 
 `T?` is a flow-typed optional: a value that may be absent. Usable
 anywhere a regular type is — variables, params, returns, object fields,
 container elements and map values; only `set` elements and map *keys*
-stay non-optional (domains, not values).
+stay non-optional (domains, not values). Values containing growable storage
+cannot be optional in this version.
 
 - `none` is the absent value — for *missing*, not for failure. A plain
   value converts implicitly (it is self-evidently present). Zero-init is
@@ -446,15 +584,18 @@ deterministic floats. Generics exist — see Generics above.
   die with it; sibling blocks may reuse names. Big locals in sibling
   blocks share the same arena bytes (the frame is the high-water mark,
   not the sum), so blocks are also a RAM tool: scoped scratch sections
-  inside one long, readable routine.
+  inside one long, readable routine. Owned growable payloads are freed
+  when their block exits.
 - `name = expr`, `a[i] = expr`, `o.f = expr`, `m[k] = expr` — assignment.
 - `if cond: ... elif cond: ... else: ...`
 - `for i in lo ..< hi:` / `for i in lo .. hi:` — bounded by construction;
   `i` is immutable; bounds are evaluated once.
 - `for x in c:` — iterate a seq, string, set, or queue; `for k, v in m:`
   (or `for k in m:`) iterates a map. Loop variables are immutable
-  copies; modifying the container inside is a compile error; bounded by
-  capacity, so termination is free.
+  copies, except elements containing owned storage, which are borrowed
+  read-only. Modifying the container inside is a compile error. Bounded
+  containers have a static trip bound; growable containers terminate at
+  their runtime length and are reported as runtime-dependent work.
 - `while cond:` — must be provably bounded. Either the compiler
   recognizes induction — a finite-ranged local that strictly steps
   toward a bound on every iteration (`i = i + 1` at the top level of the
@@ -505,9 +646,11 @@ than needed is a compile error:
   iterations — accumulators stay outside.
 
 The nifty scorecard for the rest of the Power of 10: rules 1, 2, 3, 8,
-9 hold by construction (no goto/recursion, proven loop bounds, no
-allocation, no preprocessor, no pointers); rule 5's assertions became
-compile-time proof obligations on every division, index, store, and
+9 motivated the original static subset (no goto/recursion, proven loop
+bounds, no allocation, no preprocessor, no pointers). Explicit growable
+storage now relaxes the no-allocation rule and static operation bounds,
+while preserving scoped ownership and checked access. Rule 5's assertions
+became compile-time proof obligations on every division, index, store, and
 loop; rule 7 is the discard rule plus ranged parameters; rule 10 has no
 warning tier to negotiate with. Rule 4 (short functions) is rejected
 deliberately: verification here is the checker's job, not the
@@ -602,14 +745,16 @@ fine: the order is defined.
 
 ## Static proofs
 
-Nifty proves safety at compile time instead of checking it at run time.
-There is no gradual fallback: what cannot be proven does not compile,
-and the user adds a test the prover can see.
+Nifty proves direct access and arithmetic safety at compile time instead
+of inserting checks that trap. What cannot be proven does not compile,
+and the user adds a test the prover can see. Explicit fallible operations
+such as growable allocation and optional `get` perform runtime checks and
+return an ordinary result.
 
 The engine is interval analysis: every int expression carries a proven
 `[lo, hi]` range (plus a nonzero bit, since an interval cannot express
 "anything but zero"), and a second kind of fact — **predicates** — for
-containment (`m@k`) and presence (`r@ok`).
+containment (`m@k`), presence (`r@ok`), and dynamic index/length relations.
 
 **Where facts come from:**
 
@@ -631,6 +776,9 @@ containment (`m@k`) and presence (`r@ok`).
   ```
 
 - container tests: `if s.len < N:`, `if m.contains(k):`, `if r.ok:`;
+- dynamic bounds tests: `if i >= 0 and i < s.len:` prove a direct index
+  until either the index or the owning container changes. A loop over a
+  stable `0 ..< s.len` range supplies the same relationship;
 - arithmetic: ranges combine through `+ - * / %` exactly.
 
 **What invalidates a fact:** assigning something wider, passing the
@@ -638,11 +786,15 @@ variable as a `var` argument, using it as a `with` target, mutating it
 through a method, calling a routine that may write it (including a
 `with` block's `start`/`end`), releasing the lock that protected it, or
 entering a loop whose body modifies it (the loop condition re-proves
-what it can on every entry). Var params never carry flow facts — they
-may alias anything. Aliasing itself is restricted: a global cannot be
-passed as a `var` argument to a routine that also touches that global
+what it can on every entry). Ordinary var params do not carry flow facts
+because they may alias. Exclusive borrows of owned storage support the
+facts needed for growable access. Aliasing itself is restricted: a global
+cannot be passed as a `var` argument to a routine that also touches that global
 directly, and a `var` param cannot be forwarded toward a routine
 touching a type-compatible global.
+Owned storage additionally rejects overlapping mutable borrows, including
+aliases introduced by argument evaluation or accessing an element while
+another argument reallocates its container.
 
 **Accumulator induction** — the one loop exception: in any loop with a
 proven trip bound, a local assigned *only* as `v = v + e` / `v = v - e`
@@ -700,18 +852,19 @@ with queueLock:
    infinite control flow in the language.
 5. **Containment / presence**: `m[k]` requires proven containment;
    using a `T?` requires proven presence; `pop` requires proven
-   nonempty; `add` requires proven room (or use the `bool`-returning
-   `push`/`put`).
+   nonempty; bounded `add` requires proven room (or use the
+   `bool`-returning `push`/`put`). Growable `add` instead returns a
+   `bool` allocation result.
 
 Stores complete the system: assigning to (or initializing, returning
 into, or passing as an argument for) a ranged location must prove the
 value fits its declared range. `var` parameters require the exact same
 range on both sides, since writes flow both ways.
 
-**The payoff:** the generated C contains no runtime checks of any kind —
-no bounds checks, no division checks, no overflow checks, no
-trap-and-exit paths. `queue[tail]` compiles to `g_queue[g_tail]`. What
-remains at run time is exactly the program.
+**The payoff:** proven direct indexing and arithmetic compile without
+bounds, division, or overflow checks. `queue[tail]` compiles to
+`g_queue[g_tail]`. Growable helpers check sizes and allocation failure,
+and optional accessors check membership, without trap-and-exit paths.
 
 ## Big locals: per-thread arenas
 
@@ -735,9 +888,24 @@ object parameters* and big foreach element copies still use the C
 stack — keep those small or pass by `var`. The report prints both
 numbers.
 
+Growable owners do not reserve their payload in these arenas. Their fixed
+descriptors contribute to local storage, while heap payloads are tracked
+separately in the report. Aggregates with owned fields can themselves use
+the arena; their owned payloads are still destroyed before that storage is
+reused.
+
 ## Compilation model
 
-Nifty compiles one module to one portable C file (C99 + pthreads):
+The C backend compiles one module to one portable C file (C99 + pthreads).
+Native backends lower the same checked module into typed IR and machine code,
+with the same ownership, borrowing, and allocation-failure rules.
+Checking produces a backend-independent semantic plan with binding identities,
+value and borrow modes, lock proofs, and ordered destruction lists for normal
+scope exit, return, break, and program exit. Return expressions are evaluated
+before their destruction list runs. Generators consume this plan; type,
+borrow, range, and other source-language checks finish before backend entry.
+Backend validation checks generated IR, target layouts, and serialized images.
+The C mapping is:
 
 | nifty                  | C                                          |
 | ---------------------- | ------------------------------------------ |
@@ -747,6 +915,7 @@ Nifty compiles one module to one portable C file (C99 + pthreads):
 | `thread foo`           | `static void *t_foo(void*)` + `pthread_create`/`join` in generated `main` |
 | `object Name =`        | `typedef struct`                           |
 | seq/string/set/queue/map | `typedef struct` + tiny `static` op functions per instantiated type |
+| growable seq/string | length, capacity, and data pointer; checked allocation helpers |
 | `T?`                   | `struct { T m_val; bool m_ok; }` (niche packing planned) |
 | `with` on a `Lock`     | `pthread_mutex_t` lock–unlock pair         |
 | `with` on other types  | `start(x)` / `end(x)` calls around the block |
@@ -757,11 +926,13 @@ Nifty compiles one module to one portable C file (C99 + pthreads):
 | effectful statements   | temporaries in source order (defined evaluation) |
 | `var` param (scalar/struct) | pointer parameter                     |
 | array param            | decayed pointer, `const` in C unless `var` |
+| owner-containing param | borrowed descriptor/aggregate; no ownership copy |
+| owner scope exit       | recursive cleanup calls, including normal return/break paths |
 
 Because declare-before-use is required in nifty, the generated C needs
 no forward prototypes — definitions appear in call order. The host
 compiles; the target only executes. The runtime is libc + pthreads —
-there are no trap helpers, because nothing can trap.
+growable allocation helpers return failure rather than calling trap helpers.
 
 ## The undefined-behavior ledger
 
@@ -779,7 +950,7 @@ The ledger, clause by clause:
 | unsequenced side effects | strict left-to-right lowering |
 | integer promotion traps | operands cast-widened to int64 |
 | uninitialized reads | zero-initialization everywhere |
-| null / dangling pointers | no pointers exist |
+| null / dangling pointers | checked allocation, scoped ownership, and nonescaping borrows |
 | data races (C11) | the ownership and lock proofs; mutexes are the barriers |
 | float-to-int overflow / NaN casts | the saturating `ni_ftoi`, the only cast emitted |
 | strict aliasing at the arena | compiled with `-fno-strict-aliasing` (the kernel's choice) |
@@ -794,21 +965,30 @@ single readable auditable output file, and cc everywhere.
 
 ## The report
 
-`nifty report file.nifty` prints the program's static resource
-footprint — numbers most toolchains can only measure or guess, derived
-from properties the checker proves:
+`nifty report file.nifty` prints the program's resource footprint, separating
+statically known storage from runtime-dependent payloads and work:
 
-- **globals** — the whole heap, byte-exact per global (C layout, with
-  struct padding), plus the lock count.
+- **globals** — byte-exact static storage per global (C layout, with
+  struct padding), plus the lock count. Growable descriptors are included;
+  their heap payloads are not part of this static byte count.
 - **stack** — worst case per thread: the call DAG's deepest chain of
   frames, printed with the chain (`consumer -> tryPop`). Small by
-  construction: big locals are on the arena.
+  construction: big locals are on the arena. This language-level estimate
+  excludes allocator and runtime-helper frames.
 - **arena** — exact bytes per thread for big locals, allocated up front;
   overflow impossible because the allocation equals the proof.
 - **ops** — worst-case abstract operation count per thread pass, from
   the proven loop trip bounds. Container ops priced honestly:
   sparse-map searches ⌈log₂N⌉, map writes and string appends N.
-  Multiply by a target's cycles-per-op to approximate WCET.
+  Runtime-sized work and allocation are reported as runtime-dependent,
+  including through calls, rather than assigned a false constant bound.
+  Allocator latency is not a statically proven time bound.
+- **heap** — the `heap (runtime-sized; separate from static storage)`
+  section lists owners and their lifetimes. Payload and spare-capacity
+  storage have no static upper bound in this mode. A payload byte count
+  would not include allocator metadata, fragmentation, or temporary
+  growth/copy peaks, so static totals must not
+  be read as an exact process-memory bound for a growable program.
 
 ## Grammar (v0, informal)
 
@@ -827,9 +1007,10 @@ type        = baseType ["?"]
 baseType    = "int" | "bool" | "Lock"
             | "array" "[" cap "," type "]"
             | "seq" "[" cap "," type "]"
+            | "seq" "[" type "]"
             | "queue" "[" cap "," type "]"
             | "channel" "[" cap "," type "]"
-            | "string" "[" cap "]"
+            | "string" ["[" cap "]"]
             | "set" "[" rangeType "]"
             | "map" "[" rangeType "," type "]"
             | "map" "[" cap "," type "," type "]"
@@ -864,10 +1045,11 @@ indexing, overflow, termination, containment/presence) on one interval-
 and-predicate engine; thread ownership and lock inference (data-race
 freedom); defined left-to-right evaluation with effects; accumulator
 induction; per-thread arenas for big locals; whole-array/container
-copies with element-range fit proofs; strategic `var`/`let` (unmodified
-`var` is an error); any-size returns via destination passing; generics
-via `$` substitution variables (splice-per-instantiation, proven per
-binding, `$T.lo`/`$T.hi`, computed return ranges);
+copies of non-owning values with element-range fit proofs; strategic
+`var`/`let` (unmodified `var` is an error); any-size non-owning returns via
+destination passing; generics via `$` substitution variables
+(splice-per-instantiation, proven per binding, `$T.lo`/`$T.hi`, computed
+return ranges);
 smallest-scope enforcement (unused/one-thread/scratch globals,
 narrowable locals) and `block:` with sibling-block arena overlay;
 lock order (deadlock freedom, lexical + cross-call), pointless-lock
@@ -882,10 +1064,12 @@ channels (`channel[N, T]` with blocking `send`/`recv` on embedded
 condvars; both-sides and no-block-under-lock proofs);
 uniform call syntax, command statements, and first-parameter-kind
 overloading;
-C output
-with zero runtime checks; generated `main` with thread spawn/join;
-`nifty report` (globals / stack / arena / ops); splice-once imports with
-cycle rejection and file-tagged errors; gold-master test suite.
+C output with check-free proven indexing and arithmetic; growable `string`
+and `seq[T]` with checked allocation, caller-owned growth, exclusive mutable
+borrowing, and recursive scope cleanup; generated `main` with thread
+spawn/join and global owner cleanup;
+`nifty report` (globals / stack / arena / ops / dynamic heap); splice-once
+imports with cycle rejection and file-tagged errors; gold-master test suite.
 
 Not yet implemented: `$T` for scalar (non-container) parameters,
 generic `set`/`map` patterns, `index` types, absence reasons
@@ -896,4 +1080,5 @@ ranges (named hardware types size storage today; bare ranges are still
 8 bytes), float transcendentals (no libm; base ops only, contraction
 off), `fixed[lo .. hi, step]`,
 volatile registers and interrupt handlers,
-optional niche packing.
+optional niche packing, ownership moves/returns, shared ownership, and
+owned values inside optionals, queues, maps, or channels.

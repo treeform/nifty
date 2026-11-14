@@ -1,0 +1,7 @@
+proc change(text: string) =
+  text.clear()
+
+thread main() =
+  var text: string
+  discard text.add("hello")
+  change(text)

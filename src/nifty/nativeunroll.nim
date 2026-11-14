@@ -1,6 +1,6 @@
 ## Expands small checked constant ranges before native IR construction.
 import std/[sets, tables]
-import types
+import types, semantics
 
 type NativeUnrollConfig* = object
   maxIterations*: int
@@ -14,8 +14,12 @@ proc defaultNativeUnrollConfig*(): NativeUnrollConfig =
 proc unrollNative*(source: Module,
     config = defaultNativeUnrollConfig()): Module =
   ## Copies checked syntax and exposes literal induction values to shared IR.
+  source.requireChecked()
   new(result)
   result[] = source[]
+  result.globals = @[]
+  for global in source.globals:
+    result.globals.add(global)
   result.routines = @[]
   var constants = initTable[string, int64]()
   for item in source.consts:
@@ -202,6 +206,11 @@ proc unrollNative*(source: Module,
     var copied: Routine
     new(copied)
     copied[] = routine[]
+    copied.params = @[]
+    for parameter in routine.params:
+      copied.params.add(parameter)
     growth = 0
     copied.body = transform(routine.body)
     result.routines.add(copied)
+  prepareSemantics(result)
+  result.semantics.locks = source.semantics.locks

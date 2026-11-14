@@ -4,7 +4,7 @@ import common, types, nativeplans, nativeoptimizations, backend/engine
 export nativeplans, nativeoptimizations, engine
 
 const
-  NativeMagic = "NIFTYN01"
+  NativeMagic* = "NIFTYN02"
   NativeHeader = 40
   MaxNativeFile = 128 * 1024 * 1024
   MaxNativeStorage = 1024 * 1024 * 1024
@@ -26,6 +26,7 @@ type
     hosts: seq[NativeHost]
     layouts: seq[NativeLayout]
     lockOffsets, channelOffsets: seq[int]
+    ownedGlobals: seq[OwnedGlobal]
 
 const NativeHostPlatform* = when defined(macosx): MacosPlatform
   elif defined(linux): LinuxPlatform
@@ -83,9 +84,48 @@ proc validateNative*(program: NativeProgram) =
     if layout.bytes < 0 or layout.bytes > MaxNativeStorage or
         layout.align <= 0 or layout.align > 16 or layout.capacity < 0:
       raise newException(NiftyError, "invalid native type layout")
+    if layout.dynamic and
+        (layout.kind notin {StringType, SeqType} or
+        not layout.owned or layout.dataOffset != 16 or
+        layout.align != 8 or
+        (not layout.optional and layout.bytes != 24) or
+        (layout.optional and
+          (layout.bytes != 32 or layout.okOffset != 24))):
+      raise newException(NiftyError, "invalid native dynamic layout")
+    if layout.owned and layout.kind notin
+        {StringType, SeqType, ArrayType, ObjectType}:
+      raise newException(NiftyError, "unsupported native ownership layout")
     if layout.kind in {ArrayType, SeqType, QueueType, ChannelType} and
         (layout.elem < 0 or layout.elem >= plan.layouts.len):
       raise newException(NiftyError, "invalid native element layout")
+    var owned = layout.dynamic
+    if layout.kind in {ArrayType, SeqType, QueueType, ChannelType,
+        SetType, DenseMapType, SparseMapType} and
+        layout.elem >= 0 and layout.elem < plan.layouts.len:
+      owned = owned or plan.layouts[layout.elem].owned
+    if layout.kind in {DenseMapType, SparseMapType} and
+        layout.val >= 0 and layout.val < plan.layouts.len:
+      owned = owned or plan.layouts[layout.val].owned
+    for field in layout.fields:
+      if field.typ < 0 or field.typ >= plan.layouts.len or
+          field.offset < 0 or field.offset > layout.bytes or
+          plan.layouts[field.typ].bytes > layout.bytes - field.offset:
+        raise newException(NiftyError, "invalid native field layout")
+      owned = owned or plan.layouts[field.typ].owned
+    if layout.owned != owned:
+      raise newException(NiftyError, "invalid native ownership layout")
+  for i, global in plan.ownedGlobals:
+    if global.layout < 0 or global.layout >= plan.layouts.len:
+      raise newException(NiftyError, "invalid native owned global layout")
+    let layout = plan.layouts[global.layout]
+    if not layout.owned or global.offset < 0 or
+        global.offset > plan.globalBytes or
+        layout.bytes > plan.globalBytes - global.offset or
+        global.offset mod int(layout.align) != 0:
+      raise newException(NiftyError, "invalid native owned global offset")
+    for j in 0 ..< i:
+      if plan.ownedGlobals[j].offset == global.offset:
+        raise newException(NiftyError, "duplicate native owned global")
   for host in plan.hosts:
     if host.paramTypes.len != host.paramOffsets.len:
       raise newException(NiftyError, "invalid native host parameters")
@@ -116,7 +156,8 @@ proc encodeNative*(program: NativeProgram): string =
     initialData: program.plan.initialData, threads: program.plan.threads,
     hosts: program.plan.hosts, layouts: program.plan.layouts,
     lockOffsets: program.plan.lockOffsets,
-    channelOffsets: program.plan.channelOffsets)
+    channelOffsets: program.plan.channelOffsets,
+    ownedGlobals: program.plan.ownedGlobals)
   let text = $metadata.toJson()
   var code = newString(program.image.bytes.len)
   copyMem(addr code[0], unsafeAddr program.image.bytes[0], code.len)
@@ -129,7 +170,7 @@ proc encodeNative*(program: NativeProgram): string =
   result.add code
 
 proc decodeNative*(data: string): NativeProgram =
-  ## Decodes and validates a complete version one native image.
+  ## Decodes and validates a complete version two native image.
   if data.len < NativeHeader or data.len > MaxNativeFile or
       data[0 ..< 8] != NativeMagic:
     raise newException(NiftyError, "unrecognized or truncated native image")
@@ -148,7 +189,15 @@ proc decodeNative*(data: string): NativeProgram =
     raise newException(NiftyError, "damaged native image checksum")
   var metadata: NativeMetadata
   try:
-    metadata = parseJson(metadataText).jsonTo(NativeMetadata)
+    let json = parseJson(metadataText)
+    if json.kind != JObject or not json.hasKey("ownedGlobals") or
+        not json.hasKey("layouts") or json["layouts"].kind != JArray:
+      raise newException(NiftyError, "missing native ownership metadata")
+    for layout in json["layouts"]:
+      if layout.kind != JObject or not layout.hasKey("dynamic") or
+          not layout.hasKey("owned"):
+        raise newException(NiftyError, "missing native layout flags")
+    metadata = json.jsonTo(NativeMetadata)
   except CatchableError as error:
     raise newException(NiftyError, "invalid native metadata: " & error.msg)
   result.platform = metadata.platform
@@ -160,7 +209,8 @@ proc decodeNative*(data: string): NativeProgram =
   result.plan = NativePlan(globalBytes: metadata.globalBytes,
     initialData: metadata.initialData, threads: metadata.threads,
     hosts: metadata.hosts, layouts: metadata.layouts,
-    lockOffsets: metadata.lockOffsets, channelOffsets: metadata.channelOffsets)
+    lockOffsets: metadata.lockOffsets, channelOffsets: metadata.channelOffsets,
+    ownedGlobals: metadata.ownedGlobals)
   result.validateNative()
 
 proc writeNativeFile*(program: NativeProgram, path: string) =

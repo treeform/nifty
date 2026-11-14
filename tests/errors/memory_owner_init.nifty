@@ -1,0 +1,5 @@
+thread main() =
+  var source: string
+  discard source.add("hello")
+  let duplicate = source
+  echo duplicate

@@ -1,0 +1,30 @@
+# Return expressions read their payload before the owner is cleaned up.
+
+proc first(): int =
+  var text: string
+  if not text.add("A"):
+    return 0
+  return text.get(0).or(0)
+
+proc leave(): int =
+  var outer: string
+  if not outer.add("outer"):
+    return 0
+  block:
+    var inner: string
+    if not inner.add("inner"):
+      return 0
+    return inner.len
+
+thread main() =
+  echo first(), " ", leave()
+  for i in 0 ..< 3:
+    var temporary: string
+    echo temporary.addNum(i)
+    echo temporary
+  for i in 0 ..< 3:
+    var temporary: string
+    echo temporary.addNum(i)
+    echo temporary
+    break
+  echo "done"

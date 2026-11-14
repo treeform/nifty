@@ -1,6 +1,7 @@
 ## Checks constant-range expansion against the original native behavior.
 import std/[os, strutils]
-import nifty/[common, parser, loader, checker, lowering, nativeunroll, types]
+import nifty/[common, parser, loader, checker, lowering, nativeunroll,
+  semantics, types]
 import nifty/backend/[engine, context, memories]
 
 proc evaluate(source: Module): int64 =
@@ -178,6 +179,59 @@ proc compute(Limit: int) =
 thread main() =
   compute(1)
 """, "duplicate or shadowing parameter name: 'Limit'")
+
+block:
+  let source = parse(loadTokens("""var shared: string
+var gate: Lock
+proc work(input: string) =
+  for i in 0 ..< 2:
+    var text: string
+    discard text.copyFrom(input)
+    if i == 1:
+      return
+proc observe(input: string) =
+  discard input.len
+thread main() =
+  with gate:
+    discard shared.add("main")
+    work(shared)
+thread other() =
+  with gate:
+    discard shared.add("other")
+    work(shared)
+""", "unroll-owners", ""))
+  check(source)
+  let
+    originalPlan = source.semantics
+    originalParam = source.routines[1].params[0].binding
+    originalGlobal = source.globals[0].binding
+    originalLoop = source.routines[0].body[0]
+    originalOwner = originalLoop.body[0].binding
+    expanded = unrollNative(source)
+    iterations = expanded.routines[0].body[0].body
+  doAssert source.semantics == originalPlan
+  doAssert source.routines[1].params[0].binding == originalParam
+  doAssert source.globals[0].binding == originalGlobal
+  doAssert originalLoop.body[0].binding == originalOwner
+  doAssert iterations.len == 2
+  doAssert expanded.semantics != originalPlan
+  doAssert expanded.semantics.locks == originalPlan.locks
+  doAssert expanded.semantics.locks.len == 1
+  doAssert expanded.mode(expanded.routines[0].params[0].binding) ==
+    ReadBorrowMode
+  doAssert iterations[0].body[0].binding != iterations[1].body[0].binding
+  for iteration in iterations:
+    let
+      owner = iteration.body[0].binding
+      call = iteration.body[1].value
+      branch = iteration.body[2].elifs[0]
+      returned = branch.body[0]
+    doAssert iteration.bodyScope > 0
+    doAssert branch.scope > 0
+    doAssert expanded.mode(owner) == OwnerMode
+    doAssert call.kids[0].binding == owner
+    doAssert expanded.semantics.scopes[iteration.bodyScope].drops == @[owner]
+    doAssert returned.drops == @[owner]
 
 for path in walkFiles("tests/scripts/*.nifty"):
   if path.extractFilename.startsWith("_"):

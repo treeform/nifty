@@ -8,6 +8,7 @@ type
   NativeLayout* = object
     kind*: TypKind
     bytes*, align*, capacity*: int64
+    dynamic*, owned*: bool
     elem*, key*, val*: int
     lower*, upper*: int64
     dataOffset*, keyOffset*, valOffset*, okOffset*: int
@@ -25,6 +26,8 @@ type
   ThreadPlan* = object
     name*: string
     count*, functionIndex*, arenaBytes*: int
+  OwnedGlobal* = object
+    offset*, layout*: int
   NativePlan* = object
     module*: IrModule
     globalBytes*: int
@@ -33,3 +36,4 @@ type
     hosts*: seq[NativeHost]
     layouts*: seq[NativeLayout]
     lockOffsets*, channelOffsets*: seq[int]
+    ownedGlobals*: seq[OwnedGlobal]

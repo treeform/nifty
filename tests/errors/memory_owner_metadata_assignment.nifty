@@ -1,0 +1,4 @@
+thread main() =
+  var values: seq[int]
+  values.cap = 100
+  echo values.len

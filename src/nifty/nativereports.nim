@@ -1,6 +1,6 @@
 ## Reports generated code and bounded compiler-owned native storage.
 import std/strutils
-import common, nativeplans, backend/[engine, irs]
+import common, nativeplans, report, types, semantics, backend/[engine, irs]
 
 type
   StackBounds = object
@@ -109,9 +109,28 @@ proc chain(plan: NativePlan, bounds: StackBounds, entry: int): string
     result.add(if name.len > 0: name else: "function " & $current)
     current = bounds.next[current]
 
+proc operationLines(sourceModule: Module, source: string): seq[string]
+    {.raises: [NiftyError].} =
+  ## Reuses the checked source report's abstract operation analysis.
+  if sourceModule.isNil:
+    return
+  var sourceReport: string
+  try:
+    sourceReport = buildReport(sourceModule, source)
+  except Exception as error:
+    invalid("source abstract operation analysis failed: " & error.msg)
+  let marker = "worst-case abstract ops per thread:"
+  let position = sourceReport.find(marker)
+  if position < 0:
+    invalid("source report has no abstract operation section")
+  result = sourceReport[position .. ^1].strip().splitLines()
+
 proc nativeReport*(plan: NativePlan, image: NativeImage,
-    source: string): string {.raises: [NiftyError].} =
+    source: string, sourceModule: Module = nil): string
+    {.raises: [NiftyError].} =
   ## Reports generated sizes while excluding unknown host/runtime memory.
+  if not sourceModule.isNil:
+    requireChecked(sourceModule)
   if plan.globalBytes < 0:
     invalid("negative global storage size")
   let
@@ -132,6 +151,18 @@ proc nativeReport*(plan: NativePlan, image: NativeImage,
     "  initialization payload: " & $plan.initialData.len &
       " bytes (initial contents; not additional runtime globals)"]
   lines.add("  read-only global payload: " & $readonlyBytes & " bytes")
+  let owners = ownerLines(sourceModule)
+  if owners.len > 0:
+    lines.add("")
+    lines.add("heap (runtime-sized; separate from static storage):")
+    lines.add(owners)
+    lines.add("  owner descriptors are included in globals/stack/arena")
+    lines.add("  payload and spare capacity: no static bound inferred")
+    lines.add("  allocator overhead and temporary growth/copy peaks are " &
+      "additional")
+    lines.add("  cleanup may take runtime-dependent work; global cleanup " &
+      "runs after threads")
+    lines.add("  native stack bounds exclude allocator/runtime helper frames")
   lines.add("")
   lines.add("native frame sizes (including spills, saves and ABI space):")
   for i, function in plan.module.functions:
@@ -182,6 +213,9 @@ proc nativeReport*(plan: NativePlan, image: NativeImage,
   lines.add("accounted storage (globals + stack bounds + arenas): " &
     $addBytes(int64(plan.globalBytes), addBytes(stackTotal, arenaTotal)) &
     " bytes")
+  if owners.len > 0:
+    lines.add("Growable payload, spare capacity, allocator overhead, and " &
+      "temporary copy/growth peaks are excluded from accounted storage.")
   lines.add("Host calls, runtime/PThread synchronization bookkeeping, startup " &
     "metadata, OS stack reservations, and allocator overhead are excluded; " &
     "their memory and stack use are unknown here.")
@@ -189,6 +223,14 @@ proc nativeReport*(plan: NativePlan, image: NativeImage,
   lines.add("Stack bounds sum generated frames along the deepest direct-call " &
     "chain, including AMD64 host-call return addresses; external host " &
     "stack is excluded.")
-  lines.add("Abstract operation bounds remain source-level; use the C/source " &
-    "report. They are not native instruction counts or wall-time promises.")
+  let operations = operationLines(sourceModule, source)
+  if operations.len > 0:
+    lines.add("")
+    lines.add(operations)
+    lines.add("Abstract operation counts are source-level, not native " &
+      "instruction counts or wall-time promises.")
+  else:
+    lines.add("Abstract operation bounds remain source-level; use the " &
+      "C/source report. They are not native instruction counts or " &
+      "wall-time promises.")
   lines.join("\n") & "\n"

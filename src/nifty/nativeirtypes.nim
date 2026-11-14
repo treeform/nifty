@@ -1,4 +1,4 @@
-## Describes fixed Nifty representations in the shared native IR.
+## Describes Nifty value and owner representations in the shared native IR.
 import nativeplans, types, backend/irs
 
 proc addStorage*(plan: var NativePlan, data: IrStorage): int32 =
@@ -69,6 +69,18 @@ proc layoutStorage*(plan: var NativePlan, mapping: var seq[int32],
       scalar: irs.BoolType, byteCount: 1, alignment: 1))
     members.add(IrField(name: "ok", storage: present,
       offset: int32(data.okOffset), role: DiscriminatorField))
+  elif data.dynamic:
+    let
+      word = plan.addStorage(IrStorage(kind: ScalarStorage,
+        scalar: Int64Type, byteCount: 8, alignment: 8))
+      address = plan.addStorage(IrStorage(kind: PointerStorage,
+        byteCount: 8, alignment: 8))
+    members.add(IrField(name: "length", storage: word,
+      role: RuntimeField))
+    members.add(IrField(name: "capacity", storage: word, offset: 8,
+      role: RuntimeField))
+    members.add(IrField(name: "data", storage: address, offset: 16,
+      role: RuntimeField))
   else:
     case data.kind
     of IntType, FloatType, types.BoolType:

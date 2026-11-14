@@ -1,0 +1,5 @@
+thread main() =
+  var texts: seq[string]
+  if texts.resize(1):
+    echo texts.pop()
+  echo texts.len

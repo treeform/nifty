@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Check comparison fairness and fail-closed validation without timing renders."""
 
+from contextlib import redirect_stderr
 import importlib.util
+import io
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -80,6 +83,66 @@ def testMeasurements():
       expectError(lambda: Comparison.measure(64, 1, options, {}, variants, 1, 5))
 
 
+def testCCompiler():
+  """Select and fingerprint a separate C emitter without running renderers."""
+  with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory).resolve()
+    baseline, candidate, emitter = [root / name for name in
+                                    ("baseline", "candidate", "emitter")]
+    for compiler in (baseline, candidate, emitter):
+      compiler.write_text(compiler.name)
+      compiler.chmod(0o700)
+    arguments = ["--baseline", str(baseline), "--candidate", str(candidate),
+                 "--output", str(root / "results"), "--size", "1"]
+    with patch.object(Comparison.shutil, "which", return_value="/usr/bin/cc"):
+      defaults = Comparison.parseArguments(arguments)
+      assert defaults.c_compiler == baseline
+      selected = Comparison.parseArguments(arguments + ["--c-compiler", str(emitter)])
+      assert selected.c_compiler == emitter
+      for invalid in (root / "missing", root / "not-executable"):
+        if invalid.name == "not-executable":
+          invalid.write_text("invalid")
+        with redirect_stderr(io.StringIO()):
+          try:
+            Comparison.parseArguments(arguments + ["--c-compiler", str(invalid)])
+          except SystemExit as error:
+            assert error.code == 2
+          else:
+            raise AssertionError("Invalid C emitter was accepted")
+
+    def measured(size, repeat, options, host, variants, *unused):
+      """Inspect compiler routing while replacing every timed workload."""
+      assert variants == [("baseline", "arm64", baseline),
+                          ("candidate", "arm64", candidate),
+                          ("c", "arm64", options.c_compiler)]
+      return {"size": size, "repeat": repeat, "correctness": "mock", "variants": []}
+
+    with patch.object(Comparison.Ray, "hostInfo", return_value={
+        "physical_architecture": "arm64"}), patch.object(
+        Comparison.Ray, "availableBackends", return_value=["arm64"]), patch.object(
+        Comparison.Ray, "optionalCommand", return_value="cc"), patch.object(
+        Comparison, "measure", side_effect=measured):
+      for options in (defaults, selected):
+        with patch.object(Comparison, "parseArguments", return_value=options), patch(
+            "builtins.print"):
+          assert Comparison.main() == 0
+        report = json.loads((options.output / "results.json").read_text())
+        assert report["inputs_sha256"][str(options.c_compiler)] == (
+          Comparison.sha256(options.c_compiler))
+
+      def changed(*args):
+        """Change only the selected emitter to exercise input validation."""
+        result = measured(*args)
+        emitter.write_text("changed")
+        return result
+
+      with patch.object(Comparison, "parseArguments", return_value=selected), patch.object(
+          Comparison, "measure", side_effect=changed):
+        expectError(Comparison.main)
+      assert not (selected.output / "results.json").exists()
+
+
 testArchitecture()
 testMeasurements()
-print("Optimization benchmark architecture, sample rotation, and validation checks passed")
+testCCompiler()
+print("Optimization benchmark architecture, sample rotation, compiler selection, and validation checks passed")

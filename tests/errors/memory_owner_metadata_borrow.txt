@@ -1,0 +1,1 @@
+memory_owner_metadata_borrow.nifty:6: container properties are read-only; use container methods

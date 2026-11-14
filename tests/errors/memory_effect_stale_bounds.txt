@@ -1,0 +1,1 @@
+memory_effect_stale_bounds.nifty:5: cannot prove index is below the length (index is 0, length is at least 0); test .len first

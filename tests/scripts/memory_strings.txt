@@ -1,0 +1,18 @@
+0
+true
+hello world
+7
+true true
+6 false
+true
+0 hello world
+true
+true
+true
+hello!-42
+true
+ell
+true
+0 0
+true
+5 true

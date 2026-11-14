@@ -1,0 +1,8 @@
+proc change(left: var string, right: var string) =
+  left.clear()
+  right.clear()
+
+thread main() =
+  var text: string
+  change(text, text)
+  echo text.len

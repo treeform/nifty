@@ -1,0 +1,8 @@
+object Message =
+  text: string
+
+thread main() =
+  var source: Message
+  discard source.text.add("hello")
+  let duplicate = source
+  echo duplicate.text

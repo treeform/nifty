@@ -1,0 +1,8 @@
+proc change(source: string, target: var string) =
+  target.clear()
+  echo source
+
+thread main() =
+  var text: string
+  change(text, text)
+  echo text.len

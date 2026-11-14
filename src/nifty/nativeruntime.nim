@@ -2,7 +2,7 @@
 import std/[dynlib, os, posix]
 import common, types, nativefiles, nativecontainers, nativebundles
 import backend/[context, memories]
-export nativefiles, nativebundles
+export nativefiles, nativebundles, nativecontainers
 
 type
   NativeEntry = proc(context, args, output, arena: pointer) {.cdecl.}
@@ -17,6 +17,7 @@ type
   NativeContext = object
     prefix: RuntimeContext
     plan: ptr NativePlan
+    memory: NativeMemory
     channels: ptr UncheckedArray[NativeChannel]
     channelCount: int
   ThreadHandle = object
@@ -48,6 +49,8 @@ var cStdout {.importc: "stdout", header: "<stdio.h>".}: File
 proc flockfile(file: File) {.importc, header: "<stdio.h>".}
 proc funlockfile(file: File) {.importc, header: "<stdio.h>".}
 proc printf(format: cstring): cint {.importc, varargs, header: "<stdio.h>".}
+proc fwrite(data: pointer, size, count: csize_t, file: File): csize_t
+    {.importc, header: "<stdio.h>".}
 
 proc offset(address: pointer, bytes: int): pointer {.inline.} =
   ## Returns a byte offset within a validated runtime allocation.
@@ -91,8 +94,13 @@ proc executeEcho(host: NativeHost, layouts: seq[NativeLayout],
         cast[ptr float64](argument)[]
       discard printf("%g", value)
     of StringType, StringLitType:
-      discard printf("%.*s", cint(cast[ptr int64](argument)[]),
-        cast[cstring](argument.offset(layout.dataOffset)))
+      let data = if layout.dynamic:
+          cast[ptr pointer](argument.offset(16))[]
+        else:
+          argument.offset(layout.dataOffset)
+      let count = cast[ptr int64](argument)[]
+      if count > 0:
+        discard fwrite(data, 1, csize_t(count), cStdout)
     else:
       discard
   discard printf("\n")
@@ -152,7 +160,8 @@ proc dispatch(context: pointer, hostId: int64,
     if runtime.plan.layouts[host.receiverType].kind == ChannelType:
       executeChannel(runtime, host, receiver, args, output)
     else:
-      executeContainer(host, runtime.plan.layouts, receiver, args, output)
+      executeContainer(host, runtime.plan.layouts, receiver, args,
+        output, runtime.memory)
   of ExternHost:
     quit("nifty: extern requires a direct ABI call", 1)
 
@@ -187,8 +196,9 @@ proc resolveExtern(host: NativeHost, libraries: var seq[LibHandle]): pointer =
   if result == nil:
     raise newException(NiftyError, "cannot resolve native symbol: " & host.symbol)
 
-proc runNative*(program: NativeProgram) =
-  ## Runs actual machine code after allocating all fixed program storage.
+proc runNative*(program: NativeProgram,
+    memory = NativeMemory()) =
+  ## Runs machine code with scoped allocation hooks for owned storage.
   program.validateNative()
   if program.platform != NativeHostPlatform:
     raise newException(NiftyError,
@@ -220,6 +230,11 @@ proc runNative*(program: NativeProgram) =
       cast[pointer](dispatch)
   if plan.initialData.len > 0:
     copyMem(addr globals[0], addr plan.initialData[0], plan.initialData.len)
+  defer:
+    for i in countdown(plan.ownedGlobals.high, 0):
+      let owned = plan.ownedGlobals[i]
+      dropOwned(plan.layouts, owned.layout,
+        addr globals[owned.offset], memory)
   var initializedLocks = 0
   var initializedChannels = 0
   defer:
@@ -249,7 +264,7 @@ proc runNative*(program: NativeProgram) =
   var runtime = NativeContext(
     prefix: RuntimeContext(globals: addr globals[0],
       hosts: if hosts.len > 0: addr hosts[0] else: nil),
-    plan: addr plan, channelCount: channels.len,
+    plan: addr plan, memory: memory, channelCount: channels.len,
     channels: if channels.len > 0:
       cast[ptr UncheckedArray[NativeChannel]](addr channels[0]) else: nil)
   var count = 0

@@ -1,0 +1,9 @@
+object Payload =
+  data: array[300, int]
+
+thread main() =
+  var values: seq[Payload]
+  if values.resize(1):
+    let item = values.pop()
+    echo item.data[0]
+  echo values.len

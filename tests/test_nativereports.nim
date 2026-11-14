@@ -1,6 +1,7 @@
 ## Verifies native resource accounting from finalized frames and direct calls.
-import std/strutils
-import ../src/nifty/[common, nativeplans, nativereports]
+import std/[os, strutils]
+import ../src/nifty/[checker, common, loader, lowering, nativeplans,
+  nativereports, parser]
 import ../src/nifty/backend/[engine, irs]
 
 proc samplePlan(): NativePlan =
@@ -216,5 +217,57 @@ block:
     doAssert "generatedCaller x2: " & $stackBytes & " bytes each, " &
       $(stackBytes * 2) & " bytes all instances " &
       "(generatedCaller -> generatedLeaf)" in generatedReport
+
+block:
+  let source = """
+var text: string
+var textLock: Lock
+
+proc fill(output: var string) =
+  discard output.add("x")
+
+thread main() =
+  var local: seq[string]
+  discard local.resize(1)
+  with textLock:
+    fill(text)
+
+thread observer() =
+  with textLock:
+    echo text.len
+"""
+  let checked = parse(loadTokens(source, "dynamic.nifty", ""))
+  check(checked)
+  let dynamicPlan = lowerNative(checked, "dynamic.nifty")
+  doAssert dynamicPlan.globalBytes == 32
+  for target in [Arm64Target, Amd64Target]:
+    let dynamicReport = nativeReport(dynamicPlan,
+      emitNative(dynamicPlan.module, target), "dynamic.nifty", checked)
+    doAssert "global storage: 32 bytes" in dynamicReport
+    doAssert "heap (runtime-sized; separate from static storage):" in
+      dynamicReport
+    doAssert "global text: string (program lifetime; freed after " &
+      "threads finish)" in dynamicReport
+    doAssert "local main.local: seq[string] (declaration scope)" in
+      dynamicReport
+    doAssert "payload and spare capacity: no static bound inferred" in
+      dynamicReport
+    doAssert "temporary copy/growth peaks are excluded from accounted " &
+      "storage" in dynamicReport
+    doAssert "main: runtime-dependent (dynamic allocation, traversal, " &
+      "or cleanup)" in dynamicReport
+
+block:
+  let path = currentSourcePath().parentDir / "reports" /
+    "memory_globals.nifty"
+  let checked = parse(loadTokens(readFile(path), path, path.parentDir))
+  check(checked)
+  let dynamicPlan = lowerNative(checked, path)
+  for target in [Arm64Target, Amd64Target]:
+    let dynamicReport = nativeReport(dynamicPlan,
+      emitNative(dynamicPlan.module, target), path, checked)
+    doAssert "scanner: runtime-dependent (dynamic allocation, traversal, " &
+      "or cleanup)" in dynamicReport
+    doAssert "reader: " in dynamicReport
 
 echo "Native resource report tests passed"

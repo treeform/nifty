@@ -1,27 +1,25 @@
-# A tiny HTTP server shaped like a real one, all of it provable, and
-# every wakeup is a channel: nifty's semaphore system. One io thread
-# owns the sockets - it polls the listener and the idle connections,
-# reads and parses each request into a Request object, and sends it
-# down the requests channel. The worker pool (thread Workers worker())
-# sleeps at OS level in recv until the kernel hands one of them a
-# request, builds the response, and sends it back; the writer thread
-# sleeps on the responses channel and puts each answer on its socket.
-# send blocks while full and recv blocks while empty (condition
-# variables, not spinning), the capacities are the backpressure, and
-# the checker proves the rest: the one remaining lock is taken on
-# every access to the shared connection table, both channels have a
-# sender and a receiver, and nothing can block while holding a lock.
+# A small HTTP pipeline with scoped growable strings. Requests carry only
+# a slot and route; responses carry a slot into shared owned storage.
+# Workers build pages and responses in local strings, then copy the result
+# into the shared slot under its lock. The writer takes its own copy before
+# unlocking, so no borrowed allocation crosses a channel or lock boundary.
+#
+# Request bytes, connection slots, and channel queues retain explicit
+# limits. Page and response storage grows to the amount actually needed.
 #
 #   nifty build examples/httpd.nifty
-#   cd examples && ./httpd        # then open http://localhost:8080/
+#   cd examples && ./httpd
+#   curl http://localhost:8080/
 
 const Port = 8080
 const MaxConnections = 8    # open connections the io thread juggles
 const PollSlots = MaxConnections + 1  # plus the listener
 const Workers = 4
-const RequestMax = 2048     # request buffer and page buffer, one read each
-const ResponseMax = 4096    # headers plus a full page, proven to fit below
-const PathMax = 128
+const RequestMax = 2048     # Explicit request-header limit.
+const ReadChunk = 4096      # Fixed scratch storage for each file read.
+const MaxFileReads = 4096   # Bound work per request, including the EOF read.
+const MaxResponseSize = MaxFileReads * ReadChunk + 512
+const NoSignal = 524288     # Darwin MSG_NOSIGNAL, like the socket options below.
 
 object PollEntry =          # one row of the poll set (C's struct pollfd)
   socket: int32
@@ -34,11 +32,7 @@ object Connection =         # one connection slot; socket 0 means free
 
 object Request =
   slot: 0 ..< MaxConnections
-  path: string[PathMax]?    # none = the request line did not parse
-
-object Response =
-  slot: 0 ..< MaxConnections
-  data: string[ResponseMax]
+  route: 0 .. 2            # 0 = malformed, 1 = page, 2 = not found.
 
 # The C names stop at this boundary: nifty declares its own names and
 # the string after each one is the C symbol the linker resolves.
@@ -50,73 +44,97 @@ extern "libc":
   proc acceptConnection "accept" (socket: int32, address: int64, addressSize: int64): int32
   proc poll(entries: var array[PollSlots, PollEntry], count: int32, timeoutMs: int32): int32
   proc read(descriptor: int32, buffer: var string[RequestMax], capacity: int64): int64
-  proc write(descriptor: int32, buffer: string[ResponseMax], size: int64): int64
+  proc readChunk "read" (descriptor: int32, buffer: var string[ReadChunk], capacity: int64): int64
+  proc sendChunk "send" (descriptor: int32, buffer: string[ReadChunk], size: int64, flags: int32): int64
   proc openFile "open" (path: string[16], flags: int32): int32
   proc close(descriptor: int32): int32
-  proc onSignal "signal" (signalNumber: int32, handler: int64): int64
 
 # The pipeline: io -> requests -> workers -> responses -> writer.
 # A channel is a bounded blocking queue with the semaphore built in -
 # it needs no lock and no handshake, and it works from the first
 # instruction, so there is no startup dance at all.
 var requests: channel[MaxConnections, Request]
-var responses: channel[MaxConnections, Response]
+var responses: channel[MaxConnections, 0 ..< MaxConnections]
 
 # The connection table is real shared state (io fills it, the writer
 # empties it), so it is a plain global under a lock, and the checker
 # holds every access to that.
 var connections: array[MaxConnections, Connection]
+var responseTexts: array[MaxConnections, string]
 var connectionsLock: Lock
 
-# The tiny HTTP parser: "GET /path HTTP/..." gives the path, anything
-# else gives none. Total string operations make hostile input safe -
-# find returns an optional and copyRange clamps, so there is no index
-# to get wrong and no request that can trap.
-func parsePath(request: string[RequestMax]): string[PathMax]? =
+# Classify the route directly; no path buffer or path-size parameter.
+func route(request: string[RequestMax]): 0 .. 2 =
   if not request.startsWith("GET "):
-    return none
+    return 0
   let pathEnd = request.find(" HTTP/")
   if not pathEnd.ok:
-    return none
-  var path: string[PathMax]
-  path.copyRange(request, 4, pathEnd)
-  return path
+    return 0
+  if request.startsWith("GET / HTTP/") or request.startsWith("GET /index.html HTTP/"):
+    return 1
+  return 2
 
-# The two URLs this server has. A length test plus startsWith is
-# string equality spelled with total operations.
-func isPage(path: string[PathMax]): bool =
-  if path.len == 1 and path.startsWith("/"):
-    return true
-  return path.len == 11 and path.startsWith("/index.html")
-
-# Read index.html fresh from disk - no cache, no cross-request state.
-proc loadPage(page: var string[RequestMax]): bool =
+# The caller owns page. This helper grows it as file chunks arrive.
+# Failure includes allocation failure and exhausting the request-work cap;
+# a partial page is never reported as a successfully loaded document.
+proc loadPage(page: var string): bool =
+  page.clear()
   var fileName: string[16] = "index.html"
-  fileName.addByte(0)                 # C's open wants a NUL terminator
-  let file = openFile(fileName, 0)    # O_RDONLY
+  fileName.addByte(0)
+  let file = openFile(fileName, 0)
   if file < 0:
     return false
-  let bytesRead = file.read(page, RequestMax)
+  var complete = false
+  for attempt in 0 ..< MaxFileReads:
+    var chunk: string[ReadChunk]
+    let bytesRead = readChunk(file, chunk, ReadChunk)
+    if bytesRead < 0 or bytesRead > ReadChunk:
+      break
+    if bytesRead == 0:
+      complete = true
+      break
+    chunk.setLen(bytesRead)
+    if not page.add(chunk):
+      break
   discard file.close()
-  if bytesRead < 0 or bytesRead > RequestMax:
-    return false                      # untrusted until proven
-  page.setLen(bytesRead)
-  return true
+  return complete
 
-# Build one response. Every add is priced at compile time: the
-# worst-case headers plus a full page must fit ResponseMax or this
-# does not compile. A func returning a big value compiles to
-# destination passing - the caller's variable is filled in place,
-# zero copies.
-func buildResponse(status: string[32], body: string[RequestMax]): string[ResponseMax] =
-  var response: string[ResponseMax]
-  response.add("HTTP/1.1 ")
-  response.add(status)
-  response.add("\r\nContent-Type: text/html\r\nContent-Length: ")
-  response.addNum(body.len)
-  response.add("\r\nConnection: close\r\n\r\n")
-  response.add(body)
-  return response
+# No response capacity calculation: each append reports allocation failure.
+proc buildResponse(status: string, body: string, response: var string): bool =
+  response.clear()
+  if not response.add("HTTP/1.1 "):
+    return false
+  if not response.add(status):
+    return false
+  if not response.add("\r\nContent-Type: text/html\r\nContent-Length: "):
+    return false
+  if not response.addNum(body.len):
+    return false
+  if not response.add("\r\nConnection: close\r\n\r\n"):
+    return false
+  return response.add(body)
+
+# A successful write can be short. Keep only fixed-size socket scratch
+# storage and advance by the bytes actually sent. The loop is bounded even
+# if a peer accepts just one byte per call; failure closes the connection.
+proc writeAll(socket: int32, text: string): bool =
+  let length = text.len
+  if length > MaxResponseSize:
+    return false
+  var sent: 0 .. MaxResponseSize = 0
+  while sent < length max MaxResponseSize:
+    var chunk: string[ReadChunk]
+    chunk.copyRange(text, sent, length)
+    let written = sendChunk(socket, chunk, chunk.len, NoSignal)
+    if written <= 0 or written > ReadChunk:
+      return false
+    if written > chunk.len:
+      return false
+    let next = sent + written
+    if next > MaxResponseSize:
+      return false
+    sent = next
+  return sent == length
 
 # The one listening socket, owned by the io thread.
 proc listenSocket(): int32? =
@@ -141,7 +159,6 @@ proc listenSocket(): int32? =
 # send sits: after the lock block, never inside one - the checker
 # rejects blocking while holding a lock outright.
 thread io() =
-  discard onSignal(13, 1)             # SIGPIPE -> SIG_IGN: a dead peer must not kill us
   var serverSocket: int32 = -1
   let opened = listenSocket()
   if opened.ok:
@@ -189,7 +206,7 @@ thread io() =
               requestText.setLen(bytesRead)
               var request: Request
               request.slot = i
-              request.path = requestText.parsePath()
+              request.route = route(requestText)
               with connectionsLock:
                 connections[i].busy = true
               requests.send(request)
@@ -198,38 +215,47 @@ thread io() =
                 connections[i].socket = 0
               discard clientSocket.close()
 
-# The worker pool: four OS threads asleep in recv until there is work.
+# Each worker owns temporary strings only for one loop iteration.
 thread Workers worker() =
   loop:
     let request = requests.recv()
-    var text: string[ResponseMax]
-    if not request.path.ok:
-      text = buildResponse("400 Bad Request", "<h1>400 bad request</h1>")
-    elif request.path.isPage():
-      var page: string[RequestMax]
+    var text: string
+    var built = false
+    if request.route == 0:
+      built = buildResponse("400 Bad Request", "<h1>400 bad request</h1>", text)
+    elif request.route == 1:
+      var page: string
       if loadPage(page):
-        text = buildResponse("200 OK", page)
+        built = buildResponse("200 OK", page, text)
       else:
-        text = buildResponse("404 Not Found", "<h1>404 not found</h1>")
+        built = buildResponse("404 Not Found", "<h1>404 not found</h1>", text)
     else:
-      text = buildResponse("404 Not Found", "<h1>404 not found</h1>")
-    var response: Response
-    response.slot = request.slot
-    response.data = text
-    responses.send(response)
+      built = buildResponse("404 Not Found", "<h1>404 not found</h1>", text)
+    with connectionsLock:
+      responseTexts[request.slot].clear()
+      if built:
+        if not responseTexts[request.slot].copyFrom(text):
+          echo "response allocation failed"
+    # Even on allocation failure, deliver the slot so the writer closes it.
+    responses.send(request.slot)
 
-# The writer: asleep in recv until an answer is ready, then puts it
-# on the socket and frees the slot.
+# Shared strings remain global owners. The local copy permits socket IO
+# outside the lock; no reference into shared storage survives unlocking.
 thread writer() =
   loop:
-    let response = responses.recv()
+    let slot = responses.recv()
+    var text: string
     var socket: int32 = 0
     with connectionsLock:
-      if connections[response.slot].socket > 0 and connections[response.slot].busy:
-        socket = connections[response.slot].socket
+      if connections[slot].socket > 0 and connections[slot].busy:
+        socket = connections[slot].socket
+        if not text.copyFrom(responseTexts[slot]):
+          echo "writer allocation failed"
+        responseTexts[slot].clear()
     if socket > 0:
-      discard socket.write(response.data, response.data.len)
-      with connectionsLock:
-        connections[response.slot].socket = 0
-        connections[response.slot].busy = false
+      if not writeAll(socket, text):
+        echo "response write failed"
       discard socket.close()
+      with connectionsLock:
+        connections[slot].socket = 0
+        connections[slot].busy = false

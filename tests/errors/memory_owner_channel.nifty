@@ -1,0 +1,9 @@
+var messages: channel[2, string]
+
+thread sender() =
+  var text: string
+  discard text.add("hello")
+  messages.send(text)
+
+thread receiver() =
+  echo messages.recv()

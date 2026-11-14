@@ -1,8 +1,8 @@
 ## Nifty — nimmy's super-static brother.
-## A tiny fixed-everything systems language with Nim-flavored syntax that
+## A small systems language with Nim-flavored syntax that
 ## compiles to C, ARM64, or AMD64. See spec.md for the language definition.
 ##
-## Pipeline: lexer -> parser -> checker -> C, or lowering -> IR -> native.
+## Pipeline: parser -> checker + semantics -> C, or lowering -> IR -> native.
 
 import nifty/[common, parser, checker, codegen, report, loader, types]
 
@@ -11,7 +11,7 @@ export common
 var lastExternLibs*: seq[string] ## non-libc libs of the last compile
 
 proc checkedModule*(src, moduleName: string, dir = ""): Module =
-  ## Loads imports and checks the source once before selecting a backend.
+  ## Checks imports and prepares shared semantics before backend selection.
   result = parse(loadTokens(src, moduleName, dir))
   check(result)
 
@@ -25,8 +25,7 @@ proc compileToC*(src: string, moduleName: string, dir = ""): string =
   generate(m, moduleName)
 
 proc reportFor*(src: string, moduleName: string, dir = ""): string =
-  ## Check the program and produce the static resource report:
-  ## exact RAM, worst-case stack and arena, worst-case ops per pass.
+  ## Report static storage and distinguish runtime heap and work costs.
   let m = checkedModule(src, moduleName, dir)
   buildReport(m, moduleName)
 
@@ -46,7 +45,7 @@ nifty - a checked language with C, ARM64, and AMD64 backends
 usage:
   nifty [run] file.nifty [options]   build and, if there are no errors, run (default)
   nifty build file.nifty [options]   build only
-  nifty report file.nifty          backend resource report
+  nifty report file.nifty          backend report (static RAM, heap, ops)
 
 options:
   --backend:c|arm64|amd64          backend (default: native host architecture)
@@ -123,7 +122,7 @@ options:
         let plan = lowerNative(checked, modName)
         let program = buildNativeProgram(plan, target,
           optimization = optimization)
-        stdout.write nativeReport(program.plan, program.image, modName)
+        stdout.write nativeReport(program.plan, program.image, modName, checked)
     except CatchableError as e:
       quit("nifty: " & e.msg, 1)
     quit(0)

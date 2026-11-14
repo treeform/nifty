@@ -7,6 +7,10 @@
 /tests/test_nativereports
 /tests/test_nativeruntime
 /tests/test_nativelowering
+/tests/test_nativememory
+/tests/test_memoryfiles
+/tests/test_memory
+/tests/test_semantics
 /tests/tests
 /tests/nifty_t
 /nimcache/

@@ -33,7 +33,7 @@ proc embeddedImage*(data: string): string =
         size = data.number(position + EmbeddedMagic.len + 8, 8)
       if start <= uint64(position) and size == uint64(position) - start and
           size >= 40 and size <= 128 * 1024 * 1024 and
-          data[int(start) ..< int(start) + 8] == "NIFTYN01":
+          data[int(start) ..< int(start) + 8] == NativeMagic:
         return data[int(start) ..< position]
     if position == 0:
       break

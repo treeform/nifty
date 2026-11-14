@@ -1,6 +1,6 @@
 ## Lowers checked Nifty syntax to explicit native SSA and storage.
 import std/[tables, sets]
-import types, common, nativeplans, nativeirtypes, backend/irs
+import types, common, semantics, nativeplans, nativeirtypes, backend/irs
 
 type
   Binding = object
@@ -15,7 +15,7 @@ type
     layouts: Table[string, int]
     storageTypes: seq[int32]
     argumentTypes: seq[int32]
-    bindings: Table[string, Binding]
+    bindings: Table[BindingId, Binding]
     fn, current, line: int
     routine: Routine
     arena, highArena: int
@@ -32,7 +32,7 @@ proc layout(g: var Lower, t: Typ): int =
   ## Registers the fixed native representation of a checked type.
   if t.isNil:
     return -1
-  let key = $t & ":" & $t.width
+  let key = $t & ":" & $t.width & ":" & $t.dynamic
   if key in g.layouts:
     return g.layouts[key]
   result = g.plan.layouts.len
@@ -40,7 +40,8 @@ proc layout(g: var Lower, t: Typ): int =
   g.plan.layouts.add(NativeLayout())
   var l = NativeLayout(kind: t.kind, align: 8, capacity: t.len,
     elem: -1, key: -1, val: -1, okOffset: -1, display: t.dname,
-    lower: t.rlo, upper: t.rhi, optional: t.opt)
+    lower: t.rlo, upper: t.rhi, optional: t.opt,
+    dynamic: t.dynamic, owned: hasOwned(t))
   if t.opt:
     let base = g.layout(deOpt(t))
     l = g.plan.layouts[base]
@@ -73,13 +74,21 @@ proc layout(g: var Lower, t: Typ): int =
         l.align = max(l.align, fl.align)
       l.bytes = int64(aligned(int(l.bytes), int(l.align)))
     of StringType, StringLitType:
-      l.dataOffset = 8
-      l.bytes = int64(aligned(8 + int(t.len), 8))
+      if t.dynamic:
+        l.dataOffset = 16
+        l.bytes = 24
+      else:
+        l.dataOffset = 8
+        l.bytes = int64(aligned(8 + int(t.len), 8))
     of SeqType, QueueType, ChannelType:
       l.elem = g.layout(t.elem)
-      l.dataOffset = if t.kind in {QueueType, ChannelType}: 16 else: 8
-      l.bytes = int64(aligned(l.dataOffset + int(t.len *
-        g.plan.layouts[l.elem].bytes), 8))
+      if t.dynamic:
+        l.dataOffset = 16
+        l.bytes = 24
+      else:
+        l.dataOffset = if t.kind in {QueueType, ChannelType}: 16 else: 8
+        l.bytes = int64(aligned(l.dataOffset + int(t.len *
+          g.plan.layouts[l.elem].bytes), 8))
     of SetType, DenseMapType:
       l.elem = g.layout(t.elem)
       l.lower = t.elem.rlo
@@ -102,7 +111,8 @@ proc layout(g: var Lower, t: Typ): int =
       l.bytes = int64(aligned(l.valOffset + int(t.len *
         g.plan.layouts[l.val].bytes), 8))
     of TypeVarType:
-      raise newException(NiftyError, "Uninstantiated native type " & $t)
+      raise newException(NiftyError,
+        "Internal compiler error: uninstantiated native type " & $t)
   g.plan.layouts[result] = l
 
 proc size(g: var Lower, t: Typ): int =
@@ -357,6 +367,23 @@ proc null(g: var Lower): ValueId =
   ## Defines a null address for absent ABI payloads.
   g.constant(0, AddressType)
 
+proc data(g: var Lower, base: ValueId, t: Typ): ValueId =
+  ## Finds container elements in inline or heap storage.
+  let layout = g.plan.layouts[g.layout(t)]
+  if layout.dynamic:
+    g.load(g.offset(base, layout.dataOffset), AddressType)
+  else:
+    g.offset(base, layout.dataOffset)
+
+proc borrowedView(g: var Lower, source: ValueId, t: Typ): ValueId =
+  ## Presents fixed string or sequence storage as a read-only growable view.
+  let layout = g.plan.layouts[g.layout(t)]
+  result = g.allocate(24)
+  g.clear(result, 24)
+  g.store(result, g.load(source))
+  g.store(g.offset(result, 8), g.constant(layout.capacity))
+  g.store(g.offset(result, 16), g.offset(source, layout.dataOffset))
+
 proc methodCall(g: var Lower, e: Expr): ValueId =
   ## Dispatches total bounded container operations over fixed layouts.
   let bt = e.kids[0].typ
@@ -403,6 +430,17 @@ proc floatInt(g: var Lower, value: ValueId): ValueId =
   g.current = done
   g.load(output)
 
+proc addressParam(g: Lower, p: Param): bool =
+  ## Selects native packet storage without redefining borrow semantics.
+  case g.source.mode(p.binding)
+  of MutBorrowMode:
+    true
+  of ReadBorrowMode:
+    # Immutable nonowning arrays retain their existing native value ABI.
+    p.typ.kind != ArrayType or hasOwned(p.typ)
+  else:
+    false
+
 proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
   ## Captures value and mutable arguments before calling a routine.
   let index = g.routines[e.sval]
@@ -410,22 +448,27 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
   var offsets: seq[int]
   var bytes = 0
   for p in r.params:
-    bytes = aligned(bytes, if p.isVar: 8 else:
+    let borrowed = g.addressParam(p)
+    bytes = aligned(bytes, if borrowed: 8 else:
       int(g.plan.layouts[g.layout(p.typ)].align))
     offsets.add(bytes)
-    bytes += (if p.isVar: 8 else: g.size(p.typ))
+    bytes += (if borrowed: 8 else: g.size(p.typ))
   let argumentType = g.argumentTypes[index]
   let argumentLayout = g.plan.module.storageTypes[argumentType - 1]
   let args = if bytes == 0: g.allocate(0)
     else: g.allocate(int(argumentLayout.byteCount),
       int(argumentLayout.alignment), argumentType)
   for i, a in e.kids:
-    if r.params[i].isVar:
-      g.store(g.fieldAddress(args, r.params[i].name, offsets[i]),
-        g.path(a))
+    let p = r.params[i]
+    let destination = g.fieldAddress(args, p.name, offsets[i])
+    if g.addressParam(p):
+      let source = g.path(a)
+      let address = if a.borrowedView:
+          g.borrowedView(source, a.typ)
+        else: source
+      g.store(destination, address)
     else:
-      g.assignExpression(g.fieldAddress(args, r.params[i].name, offsets[i]),
-        a, r.params[i].typ)
+      g.assignExpression(destination, a, p.typ)
   let output = if r.ret.isNil: g.null
     elif int32(dest) >= 0: dest
     else: g.allocType(r.ret)
@@ -438,14 +481,14 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
     var parameters: seq[IrType]
     for i, p in r.params:
       host.paramTypes.add(g.layout(p.typ))
-      host.paramVars.add(p.isVar)
+      host.paramVars.add(g.source.mode(p.binding) == MutBorrowMode)
       var v: ValueId
-      if p.isVar:
+      if g.addressParam(p):
         v = g.load(g.offset(args, offsets[i]), AddressType)
         if p.typ.kind == StringType:
-          v = g.offset(v, 8)
+          v = g.data(v, p.typ)
       elif p.typ.kind == StringType:
-        v = g.offset(g.offset(args, offsets[i]), 8)
+        v = g.data(g.offset(args, offsets[i]), p.typ)
       elif aggregate(p.typ):
         v = g.offset(args, offsets[i])
       else:
@@ -488,7 +531,7 @@ proc path(g: var Lower, e: Expr): ValueId =
         target: int32(g.globals[e.sval])), [], AddressType,
         g.storage(e.typ))
     else:
-      result = g.bindings[e.sval].address
+      result = g.bindings[e.binding].address
   of FieldExpr:
     if not e.isOptOk and e.kids[0].typ.kind != ObjectType:
       return g.expression(e)
@@ -501,7 +544,8 @@ proc path(g: var Lower, e: Expr): ValueId =
     for f in l.fields:
       if f.name == e.sval:
         return g.fieldAddress(p, f.name, f.offset)
-    raise newException(NiftyError, "Native field unavailable: " & e.sval)
+    raise newException(NiftyError,
+      "Internal compiler error: native field unavailable: " & e.sval)
   of IndexExpr:
     let base = g.path(e.kids[0])
     let index = g.expression(e.kids[1])
@@ -526,9 +570,11 @@ proc path(g: var Lower, e: Expr): ValueId =
     let displacement = g.binary(MultiplyOp, adjusted,
       g.constant(int64(stride)))
     let start = if bt.kind == DenseMapType: l.valOffset
-      elif bt.kind in {SeqType, StringType}: l.dataOffset else: 0
+      elif bt.kind in {SeqType, StringType} and not bt.dynamic:
+        l.dataOffset else: 0
+    let storage = if bt.dynamic: g.data(base, bt) else: base
     result = g.emit(IrInstruction(op: OffsetAddressOp,
-      offset: int64(start)), [base, displacement], AddressType)
+      offset: int64(start)), [storage, displacement], AddressType)
   else:
     result = g.expression(e)
 
@@ -561,13 +607,16 @@ proc expression(g: var Lower, e: Expr): ValueId =
   of BoolExpr:
     result = g.constant(int64(e.bval), irs.BoolType)
   of StrExpr:
-    let t = if e.typ.kind == StringLitType:
+    let fixed = e.typ.kind == StringLitType or e.typ.dynamic
+    let t = if fixed:
         Typ(kind: StringType, len: int64(e.sval.len)) else: e.typ
-    result = g.allocType(t)
-    g.clear(result, g.size(t))
-    g.store(result, g.constant(int64(e.sval.len)))
+    let storage = g.allocType(t)
+    g.clear(storage, g.size(t))
+    g.store(storage, g.constant(int64(e.sval.len)))
     for i, c in e.sval:
-      g.store(g.offset(result, 8 + i), g.constant(int64(ord(c)), UInt8Type))
+      g.store(g.offset(storage, 8 + i),
+        g.constant(int64(ord(c)), UInt8Type))
+    result = if e.typ.dynamic: g.borrowedView(storage, t) else: storage
   of IdentExpr:
     if e.symKind == ConstSym:
       return g.constant(g.constants[e.sval])
@@ -623,7 +672,8 @@ proc expression(g: var Lower, e: Expr): ValueId =
         of "/": DivideOp
         of "%": RemainderOp
         else:
-          raise newException(NiftyError, "Unsupported native operator " & e.sval)
+          raise newException(NiftyError,
+            "Internal compiler error: unsupported native operator " & e.sval)
       result = g.binary(op, a, b)
   of CallExpr:
     if e.sval in ["float32", "float64"]:
@@ -636,6 +686,8 @@ proc expression(g: var Lower, e: Expr): ValueId =
       result = g.floatInt(g.expression(e.kids[0]))
     elif e.sval == "toInt" and bt.kind == StringType:
       result = g.methodCall(e)
+    elif e.sval == "cap" and bt.dynamic:
+      result = g.load(g.offset(g.path(e.kids[0]), 8))
     elif not bt.opt and bt.kind in {SeqType, StringType, SetType,
         QueueType, DenseMapType, SparseMapType}:
       result = g.load(g.path(e.kids[0]))
@@ -668,7 +720,15 @@ proc expression(g: var Lower, e: Expr): ValueId =
       return g.read(output, e.typ)
     result = g.methodCall(e)
 
-proc statements(g: var Lower, body: seq[Stmt])
+proc statements(g: var Lower, body: seq[Stmt], scope: int)
+
+proc cleanup(g: var Lower, drops: seq[BindingId]) =
+  ## Emits the destruction order already established by semantic analysis.
+  for id in drops:
+    let owner = g.bindings[id]
+    let host = NativeHost(kind: ContainerHost, operation: "drop",
+      receiverType: g.layout(owner.typ), resultType: -1)
+    g.hostCall(host, owner.address, g.null, g.null)
 
 proc assignExpression(g: var Lower, dest: ValueId, e: Expr, t: Typ) =
   ## Forwards caller storage directly through native destination returns.
@@ -689,7 +749,7 @@ proc initialized(g: var Lower, body: seq[Stmt], index: int): bool =
   let declaration = body[index]
   if declaration.kind notin {VarStmt, LetStmt} or
       declaration.init != nil or declaration.typ.kind != ObjectType or
-      declaration.typ.opt:
+      declaration.typ.opt or hasOwned(declaration.typ):
     return false
   proc mentions(e: Expr): bool =
     ## Detects every direct reference to the not-yet-initialized local.
@@ -747,7 +807,7 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
     else:
       g.assignExpression(p, s.init, s.typ)
     g.arena = retained
-    g.bindings[s.name] = Binding(address: p, typ: s.typ)
+    g.bindings[s.binding] = Binding(address: p, typ: s.typ)
   of AssignStmt:
     if s.lhs.kind == IndexExpr and
         s.lhs.kids[0].typ.kind in {DenseMapType, SparseMapType}:
@@ -770,10 +830,10 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
       let cond = g.expression(br.cond)
       g.branch(cond, yes, no)
       g.current = yes
-      g.statements(br.body)
+      g.statements(br.body, br.scope)
       g.jump(done)
       g.current = no
-    g.statements(s.elseBody)
+    g.statements(s.elseBody, s.elseScope)
     g.jump(done)
     g.current = done
   of WhileStmt, LoopStmt:
@@ -796,7 +856,7 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
       g.jump(run)
     g.current = run
     g.breaks.add(done)
-    g.statements(s.body)
+    g.statements(s.body, s.bodyScope)
     discard g.breaks.pop()
     if g.live and s.maxTrips > 0:
       g.store(ctr, g.binary(AddOp, g.load(ctr), g.constant(1)))
@@ -806,7 +866,7 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
     let p = g.allocate(8)
     g.store(p, g.expression(s.lo))
     let bound = g.expression(s.hi)
-    g.bindings[s.name] = Binding(address: p, typ: intType())
+    g.bindings[s.binding] = Binding(address: p, typ: intType())
     let test = g.blockId
     let run = g.blockId
     let done = g.blockId
@@ -816,7 +876,7 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
       else: LessComparison, g.load(p), bound), run, done)
     g.current = run
     g.breaks.add(done)
-    g.statements(s.body)
+    g.statements(s.body, s.bodyScope)
     discard g.breaks.pop()
     if g.live:
       if s.inclusive:
@@ -829,9 +889,11 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
   of ReturnStmt:
     if s.value != nil:
       g.assignExpression(ValueId(2), s.value, g.routine.ret)
+    g.cleanup(s.drops)
     g.plan.module.functions[g.fn].blocks[g.current].terminator =
       IrTerminator(kind: ReturnTerminator)
   of BreakStmt:
+    g.cleanup(s.drops)
     g.jump(g.breaks[^1])
   of EchoStmt:
     var host = NativeHost(kind: EchoHost, operation: "echo",
@@ -842,9 +904,7 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
     discard g.expression(s.value)
   of BlockStmt:
     let entry = g.arena
-    let saved = g.bindings
-    g.statements(s.body)
-    g.bindings = saved
+    g.statements(s.body, s.bodyScope)
     g.arena = entry
   of WithStmt:
     let receiver = if s.typ.kind != LockType and s.lhs != nil:
@@ -856,7 +916,7 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
       let host = NativeHost(kind: LockHost, operation: "lock",
         receiverType: g.layout(s.typ), resultType: -1)
       g.hostCall(host, receiver, g.null, g.null)
-      g.statements(s.body)
+      g.statements(s.body, s.bodyScope)
       if g.live:
         var unlock = host
         unlock.operation = "unlock"
@@ -864,7 +924,7 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
     else:
       let start = Expr(kind: CallExpr, sval: "start", kids: @[s.lhs])
       discard g.routineCall(start)
-      g.statements(s.body)
+      g.statements(s.body, s.bodyScope)
       if g.live:
         let finish = Expr(kind: CallExpr, sval: "end", kids: @[s.lhs])
         discard g.routineCall(finish)
@@ -876,12 +936,13 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
     g.store(p, g.constant(0))
     let bound = if bt.kind in {SetType, DenseMapType}:
         g.constant(l.upper - l.lower + 1) else: g.load(receiver)
-    let item = g.allocType(s.typ)
-    g.bindings[s.name] = Binding(address: item, typ: s.typ)
+    let borrowed = g.source.mode(s.binding).isBorrow
+    let item = if borrowed: NoValue else: g.allocType(s.typ)
+    g.bindings[s.binding] = Binding(address: item, typ: s.typ)
     var value = NoValue
     if s.name2 != "":
       value = g.allocType(s.typ2)
-      g.bindings[s.name2] = Binding(address: value, typ: s.typ2)
+      g.bindings[s.binding2] = Binding(address: value, typ: s.typ2)
     let test = g.blockId
     let run = g.blockId
     let next = g.blockId
@@ -916,12 +977,16 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
           g.binary(AddOp, g.load(g.offset(receiver, 8)), index),
           g.constant(bt.len))
       let stride = if bt.kind == StringType: 1 else: g.size(s.typ)
-      let data = if bt.kind == SparseMapType: l.keyOffset else: l.dataOffset
+      let data = if bt.kind == SparseMapType: l.keyOffset
+        elif bt.dynamic: 0 else: l.dataOffset
       let displacement = g.binary(MultiplyOp, index, g.constant(int64(stride)))
+      let storage = if bt.dynamic: g.data(receiver, bt) else: receiver
       let address = g.emit(IrInstruction(op: OffsetAddressOp,
-        offset: int64(data)), [receiver, displacement], AddressType)
+        offset: int64(data)), [storage, displacement], AddressType)
       if bt.kind == StringType:
         g.copy(item, g.convert(g.load(address, UInt8Type), Int64Type), s.typ)
+      elif borrowed:
+        g.bindings[s.binding] = Binding(address: address, typ: s.typ)
       else:
         g.copy(item, g.read(address, s.typ), s.typ)
       if int32(value) >= 0:
@@ -931,7 +996,7 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
           offset: int64(l.valOffset)), [receiver, vd], AddressType)
         g.copy(value, g.read(vp, s.typ2), s.typ2)
     g.breaks.add(done)
-    g.statements(s.body)
+    g.statements(s.body, s.bodyScope)
     discard g.breaks.pop()
     g.jump(next)
     g.current = next
@@ -939,7 +1004,7 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
     g.jump(test)
     g.current = done
 
-proc statements(g: var Lower, body: seq[Stmt]) =
+proc statements(g: var Lower, body: seq[Stmt], scope: int) =
   ## Lowers reachable statements and releases temporary arena slices.
   for i, s in body:
     if not g.live: break
@@ -948,9 +1013,12 @@ proc statements(g: var Lower, body: seq[Stmt]) =
     g.statement(s, initialize)
     if s.kind notin {VarStmt, LetStmt}:
       g.arena = entry
+  if g.live:
+    g.cleanup(g.source.semantics.scopes[scope].drops)
 
 proc lowerNative*(source: Module, filename = ""): NativePlan =
   ## Builds native IR, fixed layouts, and executable runtime metadata.
+  source.requireChecked()
   var g = Lower(source: source)
   g.plan.module.pointerBytes = 8
   g.plan.module.files = if srcFiles.len > 0: srcFiles else: @[filename]
@@ -972,7 +1040,7 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
       bytes = 0
       alignment = 1
     for p in r.params:
-      let storage = if p.isVar:
+      let storage = if g.addressParam(p):
           g.plan.addStorage(IrStorage(kind: PointerStorage,
             byteCount: 8, alignment: 8))
         else: g.storage(p.typ)
@@ -1005,6 +1073,12 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
     if v.typ.kind == LockType: g.plan.lockOffsets.add(off)
     if v.typ.kind == ChannelType: g.plan.channelOffsets.add(off)
     g.plan.globalBytes += int(l.bytes)
+  # Runtime metadata keeps its declaration-order ABI and reverses at exit.
+  for i in countdown(source.semantics.globalDrops.high, 0):
+    let owner = source.semantics.bindings[source.semantics.globalDrops[i]]
+    let global = g.plan.module.globals[g.globals[owner.name]]
+    g.plan.ownedGlobals.add(OwnedGlobal(offset: int(global.offset),
+      layout: g.layout(owner.typ)))
   g.plan.initialData = newSeq[byte](g.plan.globalBytes)
   g.plan.module.data = g.plan.initialData
   for fn in 0 ..< g.plan.module.functions.len:
@@ -1023,18 +1097,20 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
       g.routine = source.routines[fn - 1]
       var bytes = 0
       for p in g.routine.params:
-        bytes = aligned(bytes, if p.isVar: 8 else:
+        let borrowed = g.addressParam(p)
+        bytes = aligned(bytes, if borrowed: 8 else:
           int(g.plan.layouts[g.layout(p.typ)].align))
         let address = g.fieldAddress(ValueId(1), p.name, bytes)
-        let bound = if p.isVar:
+        let bound = if borrowed:
             g.untyped(g.load(address, AddressType))
           else: address
-        if p.isVar:
+        if borrowed:
           g.plan.module.functions[g.fn].values[int32(bound)].storage =
             g.storage(p.typ)
-        g.bindings[p.name] = Binding(typ: p.typ, address: bound)
-        bytes += (if p.isVar: 8 else: g.size(p.typ))
-      if g.routine.externLib == "": g.statements(g.routine.body)
+        g.bindings[p.binding] = Binding(typ: p.typ, address: bound)
+        bytes += (if borrowed: 8 else: g.size(p.typ))
+      if g.routine.externLib == "":
+        g.statements(g.routine.body, g.routine.bodyScope)
     if g.live:
       g.plan.module.functions[fn].blocks[g.current].terminator =
         IrTerminator(kind: ReturnTerminator)
@@ -1047,7 +1123,8 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
   proc total(fn: int): int =
     ## Computes the maximum arena path through the acyclic call graph.
     if fn in visiting:
-      raise newException(NiftyError, "Recursive native arena call graph")
+      raise newException(NiftyError,
+        "Internal compiler error: recursive native arena call graph")
     if totals[fn] > 0: return totals[fn]
     visiting.incl(fn)
     var child = 0
