@@ -1026,12 +1026,15 @@ extern void flockfile(FILE *);
 extern void funlockfile(FILE *);
 #endif
 
-// An echo failure terminates the program with an explicit status. Buffered
-// output is checked once more after every program thread has finished.
-static void ni_output_failure(void) {
-  fputs("nifty: stdout write failed\n", stderr);
+// A fatal runtime error exits without releasing potentially live workers.
+static void ni_runtime_failure(const char *message) {
+  fputs(message, stderr);
   fflush(stderr);
   _Exit(1);
+}
+// Buffered output is checked once more after every program thread finishes.
+static void ni_output_failure(void) {
+  ni_runtime_failure("nifty: stdout write failed\n");
 }
 
 // No program thread enters user code before every thread has been created.
@@ -1045,18 +1048,24 @@ typedef struct {
 } ni_start_argument;
 static void *ni_start_worker(void *address) {
   ni_start_argument *worker = (ni_start_argument *)address;
-  pthread_mutex_lock(&ni_start_mutex);
+  if (pthread_mutex_lock(&ni_start_mutex) != 0)
+    ni_runtime_failure("nifty: thread startup synchronization failed\n");
   while (ni_start_decision == 0)
-    pthread_cond_wait(&ni_start_condition, &ni_start_mutex);
+    if (pthread_cond_wait(&ni_start_condition, &ni_start_mutex) != 0)
+      ni_runtime_failure("nifty: thread startup synchronization failed\n");
   int run = ni_start_decision > 0;
-  pthread_mutex_unlock(&ni_start_mutex);
+  if (pthread_mutex_unlock(&ni_start_mutex) != 0)
+    ni_runtime_failure("nifty: thread startup synchronization failed\n");
   return run ? worker->entry(worker->argument) : NULL;
 }
 static void ni_start_release(int decision) {
-  pthread_mutex_lock(&ni_start_mutex);
+  if (pthread_mutex_lock(&ni_start_mutex) != 0)
+    ni_runtime_failure("nifty: thread startup synchronization failed\n");
   ni_start_decision = decision;
-  pthread_cond_broadcast(&ni_start_condition);
-  pthread_mutex_unlock(&ni_start_mutex);
+  if (pthread_cond_broadcast(&ni_start_condition) != 0)
+    ni_runtime_failure("nifty: thread startup synchronization failed\n");
+  if (pthread_mutex_unlock(&ni_start_mutex) != 0)
+    ni_runtime_failure("nifty: thread startup synchronization failed\n");
 }
 // Compile-time fault injection is available only in explicit test builds.
 #ifdef NIFTY_TEST_THREAD_FAIL_AT
@@ -1676,7 +1685,8 @@ proc generate*(m: Module, src: string): string =
     base += t.instances
   g.put "ni_start_release(1);"
   g.put "for (int ni_i = 0; ni_i < " & $total & "; ++ni_i)"
-  g.put "  pthread_join(ni_threads[ni_i], NULL);"
+  g.put "  if (pthread_join(ni_threads[ni_i], NULL) != 0)"
+  g.put "    ni_runtime_failure(\"nifty: cannot join thread\\n\");"
   for binding in m.semantics.globalDrops:
     let owner = m.semantics.bindings[binding]
     g.ownerPaths[binding] = "g_" & owner.name
@@ -1686,7 +1696,8 @@ proc generate*(m: Module, src: string): string =
   g.put "ni_start_failed:"
   g.put "ni_start_release(-1);"
   g.put "for (int ni_i = 0; ni_i < ni_started; ++ni_i)"
-  g.put "  pthread_join(ni_threads[ni_i], NULL);"
+  g.put "  if (pthread_join(ni_threads[ni_i], NULL) != 0)"
+  g.put "    ni_runtime_failure(\"nifty: cannot join thread\\n\");"
   g.put "fputs(\"nifty: failed to start thread\\n\", stderr);"
   g.put "return 1;"
   dec g.ind

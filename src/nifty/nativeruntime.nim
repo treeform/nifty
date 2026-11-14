@@ -51,11 +51,15 @@ proc exitProcess(status: cint) {.importc: "_Exit", header: "<stdlib.h>",
 proc fwrite(data: pointer, size, count: csize_t, file: File): csize_t
     {.importc, header: "<stdio.h>".}
 
-proc outputFailure() {.noreturn.} =
-  ## Reports an unrecoverable stdout error without flushing it again.
-  discard fputs("nifty: stdout write failed\n", cStderr)
+proc runtimeFailure(message: cstring) {.noreturn.} =
+  ## Exits before releasing resources that a live worker might still use.
+  discard fputs(message, cStderr)
   discard flush(cStderr)
   exitProcess(1)
+
+proc outputFailure() {.noreturn.} =
+  ## Reports an unrecoverable stdout error without flushing it again.
+  runtimeFailure("nifty: stdout write failed\n")
 
 proc offset(address: pointer, bytes: int): pointer {.inline.} =
   ## Returns a byte offset within a validated runtime allocation.
@@ -178,12 +182,15 @@ proc dispatch(context: pointer, hostId: int64,
 proc enterThread(argument: pointer) =
   ## Enters one native thread with its own preallocated arena.
   let thread = cast[ptr NativeThread](argument)
-  discard lockMutex(addr thread.gate.mutex)
+  if lockMutex(addr thread.gate.mutex) != 0:
+    runtimeFailure("nifty: thread startup synchronization failed\n")
   while thread.gate.decision == 0:
-    discard waitCondition(addr thread.gate.condition,
-      addr thread.gate.mutex)
+    if waitCondition(addr thread.gate.condition,
+        addr thread.gate.mutex) != 0:
+      runtimeFailure("nifty: thread startup synchronization failed\n")
   let run = thread.gate.decision > 0
-  discard unlockMutex(addr thread.gate.mutex)
+  if unlockMutex(addr thread.gate.mutex) != 0:
+    runtimeFailure("nifty: thread startup synchronization failed\n")
   if not run:
     return
   thread.entry(thread.context, nil, nil, thread.arena)
@@ -357,21 +364,26 @@ proc runNative*(program: NativeProgram, memory = NativeMemory(),
     let status = startThread(threads[i],
       threadStart, addr entries[i])
     if status != 0:
-      discard lockMutex(addr gate.mutex)
+      if lockMutex(addr gate.mutex) != 0:
+        runtimeFailure("nifty: thread startup synchronization failed\n")
       gate.decision = -1
-      discard broadcastCondition(addr gate.condition)
-      discard unlockMutex(addr gate.mutex)
+      if broadcastCondition(addr gate.condition) != 0 or
+          unlockMutex(addr gate.mutex) != 0:
+        runtimeFailure("nifty: thread startup synchronization failed\n")
       for j in 0 ..< started:
-        discard joinNativeThread(threads[j])
+        if joinNativeThread(threads[j]) != 0:
+          runtimeFailure("nifty: cannot join native thread\n")
       raise newException(NiftyError, "cannot start native thread: " & $status)
     inc started
-  discard lockMutex(addr gate.mutex)
+  if lockMutex(addr gate.mutex) != 0:
+    runtimeFailure("nifty: thread startup synchronization failed\n")
   gate.decision = 1
-  discard broadcastCondition(addr gate.condition)
-  discard unlockMutex(addr gate.mutex)
+  if broadcastCondition(addr gate.condition) != 0 or
+      unlockMutex(addr gate.mutex) != 0:
+    runtimeFailure("nifty: thread startup synchronization failed\n")
   for i in 0 ..< started:
     if joinNativeThread(threads[i]) != 0:
-      raise newException(NiftyError, "cannot join native thread")
+      runtimeFailure("nifty: cannot join native thread\n")
   if flush(cStdout) != 0:
     outputFailure()
 

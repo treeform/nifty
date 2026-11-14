@@ -29,7 +29,8 @@ Unproven direct access does not compile; allocation failure is a value.
   every thread returns. Every worker waits for all thread creation and
   startup resources to succeed before entering its body. If startup fails,
   waiting workers exit without running user code, and the process reports
-  a startup error after joining them.
+  a startup error after joining them. If a join fails, the process exits
+  with an error before releasing storage that a worker might still use.
 - **No recursion.** Declare-before-use with no forward declarations makes
   the call graph a DAG by construction; a routine calling itself is
   rejected. Stack use is therefore statically bounded — and big locals
