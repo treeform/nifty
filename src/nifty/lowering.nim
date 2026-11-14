@@ -458,7 +458,9 @@ proc path(g: var Lower, e: Expr): ValueId =
     let adjusted = if bt.kind == DenseMapType:
         g.binary(SubtractOp, index, g.constant(l.lower))
       else: index
-    let stride = if bt.kind == StringType: 1 else: g.size(e.typ)
+    let stride = if bt.kind == StringType: 1
+      elif bt.kind == DenseMapType: g.size(bt.val)
+      else: g.size(bt.elem)
     let displacement = g.binary(MultiplyOp, adjusted,
       g.constant(int64(stride)))
     let start = if bt.kind == DenseMapType: l.valOffset
@@ -510,6 +512,10 @@ proc expression(g: var Lower, e: Expr): ValueId =
     result = g.read(g.path(e), e.typ)
     if e.unwrapOpt:
       result = g.read(g.path(e), deOpt(e.typ))
+    if aggregate(e.typ) and e.typ.kind != ArrayType:
+      let captured = g.allocType(e.typ)
+      g.copy(captured, result, e.typ)
+      result = captured
   of IndexExpr:
     let p = g.path(e)
     if e.kids[0].typ.kind == StringType:
@@ -573,6 +579,10 @@ proc expression(g: var Lower, e: Expr): ValueId =
       result = g.load(g.path(e.kids[0]))
     else:
       result = g.read(g.path(e), if e.unwrapOpt: deOpt(e.typ) else: e.typ)
+      if aggregate(e.typ) and e.typ.kind != ArrayType:
+        let captured = g.allocType(e.typ)
+        g.copy(captured, result, e.typ)
+        result = captured
   of MethodExpr:
     let bt = e.kids[0].typ
     if bt.kind == FloatType:
