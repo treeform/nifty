@@ -4,7 +4,7 @@ import ../src/nifty, ../src/nifty/ctoolchains, fixtures
 
 let
   fixture = currentSourcePath().parentDir / "scripts" / "copyrange_edges.nifty"
-  expected = readFile(fixture.changeFileExt("txt")).strip()
+  expected = readFile(fixture.changeFileExt("txt")).replace("\r\n", "\n").strip()
   directory = getTempDir() / ("nifty-copyrange-" & $getCurrentProcessId())
   source = directory / "copyrange.c"
   binary = directory / ("copyrange" &

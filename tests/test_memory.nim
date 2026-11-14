@@ -250,7 +250,8 @@ proc runCase(name, source, expected, workDir: string,
     return false
   let execution = runFixture(binary)
   if execution.exitCode != 0 or
-      execution.output.replace("\r\n", "\n").strip() != expected.strip():
+      execution.output.replace("\r\n", "\n").strip() !=
+        expected.replace("\r\n", "\n").strip():
     echo "  FAIL: memory/", name, " (exit ", execution.exitCode, ")"
     echo "    Expected: ", expected.strip()
     echo "    Actual: ", execution.output.strip()

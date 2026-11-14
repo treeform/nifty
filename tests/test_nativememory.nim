@@ -289,7 +289,7 @@ for optimization in NativeOptimization:
   for name in ["memory_cleanup", "memory_arena", "memory_nested",
       "memory_seqs", "memory_strings", "memory_large",
       "memory_large_get", "memory_generics"]:
-    let expected = readFile(scripts / name & ".txt").strip()
+    let expected = readFile(scripts / name & ".txt").replace("\r\n", "\n").strip()
     doAssert runSource(readFile(scripts / name & ".nifty"), name,
       optimization) == expected, name
     doAssert allocationAttempts > 0, name
