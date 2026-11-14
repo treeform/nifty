@@ -9,8 +9,8 @@ let bytes = when defined(arm64): @[0xc0'u8, 0x03, 0x5f, 0xd6]
   else: @[0xc3'u8]
 let program = NativeProgram(
   image: NativeImage(target: target, bytes: bytes, offsets: @[0, 0]),
-  plan: NativePlan(globalBytes: 32, initialData: @[7'u8],
-    lockOffsets: @[0], channelOffsets: @[8],
+  plan: NativePlan(globalBytes: 64, initialData: @[7'u8],
+    lockOffsets: @[0, 8, 16, 24], channelOffsets: @[32, 40, 48, 56],
     hosts: @[NativeHost(kind: ExternHost, library: "libc", symbol: "getpid")],
     threads: @[
       ThreadPlan(name: "workers", count: 4, functionIndex: 1, arenaBytes: 32),

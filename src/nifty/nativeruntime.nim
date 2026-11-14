@@ -6,10 +6,14 @@ export nativefiles, nativebundles
 
 type
   NativeEntry = proc(context, args, output, arena: pointer) {.cdecl.}
+  NativeMutex {.importc: "pthread_mutex_t", header: "<pthread.h>",
+    bycopy.} = object
+  NativeCondition {.importc: "pthread_cond_t", header: "<pthread.h>",
+    bycopy.} = object
   NativeChannel = object
     address: pointer
-    mutex: Pthread_mutex
-    available, vacant: Pthread_cond
+    mutex: NativeMutex
+    available, vacant: NativeCondition
   NativeContext = object
     prefix: RuntimeContext
     plan: ptr NativePlan
@@ -21,6 +25,23 @@ type
     entry: NativeEntry
     context: ptr NativeContext
     arena: pointer
+
+proc pthread_mutex_init(mutex: ptr NativeMutex, attributes: pointer): cint
+    {.importc, header: "<pthread.h>".}
+proc pthread_mutex_destroy(mutex: ptr NativeMutex): cint
+    {.importc, header: "<pthread.h>".}
+proc pthread_mutex_lock(mutex: ptr NativeMutex): cint
+    {.importc, header: "<pthread.h>".}
+proc pthread_mutex_unlock(mutex: ptr NativeMutex): cint
+    {.importc, header: "<pthread.h>".}
+proc pthread_cond_init(condition: ptr NativeCondition, attributes: pointer): cint
+    {.importc, header: "<pthread.h>".}
+proc pthread_cond_destroy(condition: ptr NativeCondition): cint
+    {.importc, header: "<pthread.h>".}
+proc pthread_cond_signal(condition: ptr NativeCondition): cint
+    {.importc, header: "<pthread.h>".}
+proc pthread_cond_wait(condition: ptr NativeCondition,
+    mutex: ptr NativeMutex): cint {.importc, header: "<pthread.h>".}
 
 var cStdout {.importc: "stdout", header: "<stdio.h>".}: File
 
@@ -97,8 +118,9 @@ proc executeChannel(context: ptr NativeContext, host: NativeHost,
     while length[] >= layout.capacity:
       discard pthread_cond_wait(addr channel.vacant, addr channel.mutex)
     let index = (head[] + length[]) mod layout.capacity
-    copyMem(receiver.offset(layout.dataOffset + int(index * element.bytes)),
-      args.offset(host.paramOffsets[0]), int(element.bytes))
+    copyValue(receiver.offset(layout.dataOffset + int(index * element.bytes)),
+      args.offset(host.paramOffsets[0]), element,
+      context.plan.layouts[host.paramTypes[0]])
     inc length[]
     discard pthread_cond_signal(addr channel.available)
   else:
@@ -121,7 +143,7 @@ proc dispatch(context: pointer, hostId: int64,
   of EchoHost:
     executeEcho(host, runtime.plan.layouts, args)
   of LockHost:
-    let mutex = cast[ptr ptr Pthread_mutex](receiver)[]
+    let mutex = cast[ptr ptr NativeMutex](receiver)[]
     if host.operation == "lock":
       discard pthread_mutex_lock(mutex)
     else:
@@ -182,7 +204,7 @@ proc runNative*(program: NativeProgram) =
     plan = program.plan
     globals = newSeq[byte](max(16, plan.globalBytes))
     hosts = newSeq[pointer](plan.hosts.len)
-    mutexes = newSeq[Pthread_mutex](plan.lockOffsets.len)
+    mutexes = newSeq[NativeMutex](plan.lockOffsets.len)
     channels = newSeq[NativeChannel](plan.channelOffsets.len)
     libraries: seq[LibHandle]
   defer:
