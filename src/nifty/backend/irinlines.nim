@@ -6,6 +6,8 @@ type
     maxCalleeBlocks*: int
     maxCalleeSlots*: int
     maxFunctionInstructions*: int
+    maxFunctionBlocks*: int
+    maxFunctionSlots*: int
     maxFunctionGrowth*: int
     maxModuleGrowth*: int
     maxCalls*: int
@@ -20,8 +22,9 @@ type
 
 proc defaultInlineConfig*(): IrInlineConfig =
   ## Bounds duplication while admitting small helpers with branches and loops.
-  IrInlineConfig(maxCalleeInstructions: 160, maxCalleeBlocks: 24,
+  IrInlineConfig(maxCalleeInstructions: 384, maxCalleeBlocks: 96,
     maxCalleeSlots: 128, maxFunctionInstructions: 8192,
+    maxFunctionBlocks: 512, maxFunctionSlots: 1024,
     maxFunctionGrowth: 8, maxModuleGrowth: 100000, maxCalls: 4096)
 
 proc instructionCount(function: IrFunction): int =
@@ -228,6 +231,10 @@ proc inlineIr*(module: var IrModule,
             size = module.functions[owner].instructionCount() + growth
             limit = max(originals[owner], 16) * config.maxFunctionGrowth
           if size > config.maxFunctionInstructions or size > limit or
+              module.functions[owner].blocks.len + callee.blocks.len + 1 >
+                config.maxFunctionBlocks or
+              module.functions[owner].slots.len + callee.slots.len >
+                config.maxFunctionSlots or
               result.instructionsAdded + growth > config.maxModuleGrowth:
             inc result.budgetRejected
             continue

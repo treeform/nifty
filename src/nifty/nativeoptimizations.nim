@@ -11,6 +11,12 @@ proc optimizeNative*(plan: NativePlan,
   verifyIr(result.module)
   if optimization == SpeedOptimization:
     optimizeIr(result.module)
-    discard inlineIr(result.module)
-    optimizeIr(result.module)
+    var config = defaultInlineConfig()
+    for round in 0 ..< 3:
+      let stats = inlineIr(result.module, config)
+      if stats.callsInlined == 0:
+        break
+      config.maxModuleGrowth -= stats.instructionsAdded
+      config.maxCalls -= stats.callsInlined
+      optimizeIr(result.module)
   verifyIr(result.module)

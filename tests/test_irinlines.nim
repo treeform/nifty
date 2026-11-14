@@ -196,22 +196,65 @@ for optimized in [false, true]:
   doAssert argument == 13
   doAssert answer == 26
 
-var scalar = function("scalar", @[Int64Type], @[Int64Type])
+var scalar = function("scalar", @[AddressType, Int64Type], @[Int64Type])
+scalar.directOnly = true
 let increment = scalar.instruction(ConstantOp, [], bits = 1)
-let incremented = scalar.instruction(AddOp, [ValueId(0), increment])
+let incremented = scalar.instruction(AddOp, [ValueId(1), increment])
 scalar.finish([incremented])
 var scalarCaller = function("scalarCaller", Abi)
 let
   scalarArgument = scalarCaller.instruction(LoadOp, [ValueId(1)])
-  scalarAnswer = scalarCaller.instruction(CallOp, [scalarArgument], target = 0)
+  scalarAnswer = scalarCaller.instruction(CallOp,
+    [ValueId(0), scalarArgument], target = 1)
 discard scalarCaller.instruction(StoreOp, [ValueId(2), scalarAnswer], count = 0)
 scalarCaller.finish()
+var scalarEntry = function("scalarEntry", Abi)
+scalarEntry.finish()
 var scalarModule = IrModule(pointerBytes: 8,
-  functions: @[scalar, scalarCaller])
-verifyIr(scalarModule)
-doAssert scalarModule.inlineIr().callsInlined == 1
-verifyIr(scalarModule)
-doAssert scalarModule.functions[1].blocks[^1].parameters.count == 1
+  functions: @[scalarEntry, scalar, scalarCaller])
+for optimized in [false, true]:
+  if optimized:
+    doAssert scalarModule.inlineIr().callsInlined == 1
+  var
+    argument = 41'i64
+    answer = 0'i64
+  scalarModule.invoke(2, argument.addr, answer.addr)
+  doAssert answer == 42
+doAssert scalarModule.functions[2].blocks[^1].parameters.count == 1
+
+var bundle = function("bundle", @[AddressType, Float32Type],
+  @[Float32Type, Float32Type, Float32Type])
+bundle.directOnly = true
+let
+  bundleTwo = bundle.instruction(ConstantOp, [], Float32Type,
+    bits = uint64(cast[uint32](2.0'f)))
+  bundleThree = bundle.instruction(ConstantOp, [], Float32Type,
+    bits = uint64(cast[uint32](3.0'f)))
+  laneTwo = bundle.instruction(MultiplyOp,
+    [ValueId(1), bundleTwo], Float32Type)
+  laneThree = bundle.instruction(MultiplyOp,
+    [ValueId(1), bundleThree], Float32Type)
+bundle.finish([ValueId(1), laneTwo, laneThree])
+var bundleCaller = function("bundleCaller", Abi)
+let
+  bundleArgument = bundleCaller.instruction(LoadOp, [ValueId(1)], Float32Type)
+  bundleAnswer = bundleCaller.instruction(CallOp,
+    [ValueId(0), bundleArgument], Float32Type, target = 1, count = 3)
+for i in 0 ..< 3:
+  discard bundleCaller.instruction(StoreOp,
+    [ValueId(2), ValueId(int32(bundleAnswer) + int32(i))],
+    offset = int64(i * 4), count = 0)
+bundleCaller.finish()
+var bundleModule = IrModule(pointerBytes: 8,
+  functions: @[scalarEntry, bundle, bundleCaller])
+for optimized in [false, true]:
+  if optimized:
+    doAssert bundleModule.inlineIr().callsInlined == 1
+  var
+    argument = 4.0'f
+    answer: array[3, float32]
+  bundleModule.invoke(2, argument.addr, answer.addr)
+  doAssert answer == [4.0'f, 8.0'f, 12.0'f]
 
 var budgetModule = IrModule(pointerBytes: 8, functions: @[vector, vectorCaller])
 var budget = defaultInlineConfig()
@@ -220,6 +263,18 @@ let budgetStats = budgetModule.inlineIr(budget)
 doAssert budgetStats.callsInlined == 0
 doAssert budgetStats.budgetRejected > 0
 verifyIr(budgetModule)
+
+for limit in 0 ..< 2:
+  var limited = IrModule(pointerBytes: 8, functions: @[vector, vectorCaller])
+  var config = defaultInlineConfig()
+  if limit == 0:
+    config.maxFunctionBlocks = 1
+  else:
+    config.maxFunctionSlots = 0
+  let stats = limited.inlineIr(config)
+  doAssert stats.callsInlined == 0
+  doAssert stats.budgetRejected > 0
+  verifyIr(limited)
 
 var recursive = function("recursive", Abi)
 discard recursive.instruction(CallOp,
