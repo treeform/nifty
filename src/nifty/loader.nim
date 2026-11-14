@@ -11,6 +11,7 @@ import common, lexer
 type
   Loader = object
     dir: string              # imports resolve next to the importing file
+    standardDirs: seq[string] # executable-relative distribution, then development
     seen: HashSet[string]    # canonical paths already spliced
     stack: seq[string]       # canonical import chain, for cycle detection
     names: seq[string]       # display names matching the stack
@@ -20,10 +21,39 @@ proc atIdent(toks: seq[Token], i: int, s: string): bool =
 
 proc processImports(ld: var Loader, toks: seq[Token]): seq[Token]
 
+proc standardLibraryDirs(): seq[string] =
+  ## A distribution can put std beside nifty or under prefix/lib/nifty.
+  ## The source-tree fallback also supports embedding the compiler in tests.
+  let override = getEnv("NIFTY_STDLIB")
+  if override.len > 0:
+    result.add override
+  let executableDir = getAppDir()
+  result.add executableDir / "std"
+  result.add executableDir / "lib" / "nifty"
+  result.add executableDir.parentDir / "lib" / "nifty"
+  result.add executableDir.parentDir / "std"
+  result.add currentSourcePath().parentDir.parentDir.parentDir / "std"
+
+proc importPath(ld: Loader, name: string, line: int): string =
+  let moduleName =
+    if name == "_io_platform":
+      when defined(windows): "_io_windows"
+      else: "_io_posix"
+    else: name
+  result = ld.dir / moduleName & ".nifty"
+  if fileExists(result):
+    return
+  for directory in ld.standardDirs:
+    let candidate = directory / moduleName & ".nifty"
+    if fileExists(candidate):
+      return candidate
+  err(line, "cannot find import '" & name & "' (" &
+    result & " does not exist)")
+
 proc spliceImport(ld: var Loader, name: string, line: int): seq[Token] =
   # Display names keep the full path as the compiler sees it, so errors
   # are directly openable from where the compiler ran.
-  let path = ld.dir / name & ".nifty"
+  let path = ld.importPath(name, line)
   let display = path
   let canon =
     try: expandFilename(path)
@@ -41,7 +71,10 @@ proc spliceImport(ld: var Loader, name: string, line: int): seq[Token] =
   var sub = tokenize(readFile(canon), base)
   if sub.len > 0 and sub[^1].kind == EofToken:
     sub.setLen(sub.len - 1)
+  let parentDir = ld.dir
+  ld.dir = canon.parentDir
   result = ld.processImports(sub)
+  ld.dir = parentDir
   discard ld.stack.pop
   discard ld.names.pop
 
@@ -65,6 +98,6 @@ proc loadTokens*(mainSrc, mainName, dir: string): seq[Token] =
   ## Tokenize a whole program: the main source plus every import,
   ## spliced once each, in import order.
   srcFiles = @[mainName]
-  var ld = Loader(dir: dir)
+  var ld = Loader(dir: dir, standardDirs: standardLibraryDirs())
   var toks = tokenize(mainSrc, 0)
   ld.processImports(toks)
