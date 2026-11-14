@@ -1,6 +1,6 @@
 ## Lowers checked Nifty syntax to explicit native SSA and storage.
 import std/[tables, sets]
-import types, common, nativeplans, backend/irs
+import types, common, nativeplans, nativeirtypes, backend/irs
 
 type
   Binding = object
@@ -13,6 +13,8 @@ type
     globals: Table[string, int]
     constants: Table[string, int64]
     layouts: Table[string, int]
+    storageTypes: seq[int32]
+    argumentTypes: seq[int32]
     bindings: Table[string, Binding]
     fn, current, line: int
     routine: Routine
@@ -107,6 +109,11 @@ proc size(g: var Lower, t: Typ): int =
   ## Returns the fixed native byte count.
   int(g.plan.layouts[g.layout(t)].bytes)
 
+proc storage(g: var Lower, t: Typ): int32 =
+  ## Returns the complete concrete IR representation of a checked type.
+  let index = g.layout(t)
+  g.plan.layoutStorage(g.storageTypes, index)
+
 proc scalar(t: Typ): IrType =
   ## Selects a concrete scalar storage type.
   case t.kind
@@ -134,7 +141,8 @@ proc operands(g: var Lower, values: openArray[ValueId]): Span =
   g.plan.module.functions[g.fn].operands.add(values)
 
 proc emit(g: var Lower, instruction: IrInstruction,
-    values: openArray[ValueId], kind = Int64Type): ValueId =
+    values: openArray[ValueId], kind = Int64Type,
+    storage = 0'i32): ValueId =
   ## Emits a typed instruction in the active basic block.
   var ins = instruction
   ins.arguments = g.operands(values)
@@ -145,7 +153,7 @@ proc emit(g: var Lower, instruction: IrInstruction,
       HostCallOp} or ins.results.count > 0:
     result = ValueId(g.plan.module.functions[g.fn].values.len)
     ins.results = Span(first: int32(result), count: 1)
-    g.plan.module.functions[g.fn].values.add(IrValue(valueType: kind))
+    g.plan.module.functions[g.fn].values.add(IrValue(valueType: kind, storage: storage))
   else:
     result = NoValue
   let index = g.plan.module.functions[g.fn].instructions.len
@@ -196,43 +204,65 @@ proc compare(g: var Lower, op: IrComparison, a, b: ValueId): ValueId =
   g.emit(IrInstruction(op: CompareOp, comparison: op),
     [a, g.convert(b, g.kind(a))], irs.BoolType)
 
+proc untyped(g: var Lower, p: ValueId): ValueId =
+  ## Forms a byte view without changing the original pointer's storage type.
+  g.emit(IrInstruction(op: OffsetAddressOp),
+    [p, g.constant(0)], AddressType)
+
 proc load(g: var Lower, p: ValueId, kind = Int64Type): ValueId =
   ## Loads scalar storage at its declared width.
-  g.emit(IrInstruction(op: LoadOp, alignment: 1), [p], kind)
+  let storage = g.plan.module.functions[g.fn].values[int32(p)].storage
+  var address = p
+  if storage > 0:
+    let data = g.plan.module.storageTypes[storage - 1]
+    if data.kind != ScalarStorage or data.scalar != kind:
+      address = g.untyped(p)
+  g.emit(IrInstruction(op: LoadOp, alignment: 1), [address], kind)
 
 proc store(g: var Lower, p, v: ValueId) =
   ## Stores a concrete scalar value.
-  discard g.emit(IrInstruction(op: StoreOp, alignment: 1), [p, v])
+  let storage = g.plan.module.functions[g.fn].values[int32(p)].storage
+  var address = p
+  if storage > 0:
+    let data = g.plan.module.storageTypes[storage - 1]
+    if data.kind != ScalarStorage or data.scalar != g.kind(v):
+      address = g.untyped(p)
+  discard g.emit(IrInstruction(op: StoreOp, alignment: 1), [address, v])
 
-proc allocate(g: var Lower, bytes: int, align = 8): ValueId =
+proc allocate(g: var Lower, bytes: int, align = 8,
+    storage = 0'i32): ValueId =
   ## Allocates bounded stack storage or a thread arena slice.
   if bytes > int(arenaThreshold):
     g.arena = aligned(g.arena, align)
-    result = g.offset(ValueId(3), g.arena)
+    result = g.emit(IrInstruction(op: OffsetAddressOp,
+      offset: int64(g.arena)), [ValueId(3), g.constant(0)], AddressType)
+    g.plan.module.functions[g.fn].values[int32(result)].storage = storage
     g.arena += bytes
     g.highArena = max(g.highArena, g.arena)
   else:
     let slot = g.plan.module.functions[g.fn].slots.len
     g.plan.module.functions[g.fn].slots.add(IrSlot(
-      byteCount: int32(max(1, bytes)), alignment: int32(align)))
+      byteCount: int32(max(1, bytes)), alignment: int32(align),
+      storage: storage))
     result = g.emit(IrInstruction(op: SlotAddressOp,
-      target: int32(slot)), [], AddressType)
+      target: int32(slot)), [], AddressType, storage)
 
 proc allocType(g: var Lower, t: Typ): ValueId =
   ## Allocates one native value.
   let l = g.plan.layouts[g.layout(t)]
-  g.allocate(int(l.bytes), int(l.align))
+  g.allocate(int(l.bytes), int(l.align), g.storage(t))
 
 proc clear(g: var Lower, p: ValueId, bytes: int) =
   ## Initializes all bytes including padding.
   discard g.emit(IrInstruction(op: ClearBytesOp,
-    byteCount: int32(bytes)), [p])
+    byteCount: int32(bytes),
+    target: g.plan.module.functions[g.fn].values[int32(p)].storage), [p])
 
 proc copy(g: var Lower, p, value: ValueId, t: Typ) =
   ## Writes an expression value into its destination representation.
   if aggregate(t):
     discard g.emit(IrInstruction(op: MoveBytesOp,
-      byteCount: int32(g.size(t))), [p, value])
+      byteCount: int32(g.size(t)), target: g.storage(t)), [p, value])
   else:
     g.store(p, g.convert(value, scalar(t)))
 
@@ -369,7 +399,11 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
       int(g.plan.layouts[g.layout(p.typ)].align))
     offsets.add(bytes)
     bytes += (if p.isVar: 8 else: g.size(p.typ))
-  let args = g.allocate(bytes)
+  let argumentType = g.argumentTypes[index]
+  let argumentLayout = g.plan.module.storageTypes[argumentType - 1]
+  let args = if bytes == 0: g.allocate(0)
+    else: g.allocate(int(argumentLayout.byteCount),
+      int(argumentLayout.alignment), argumentType)
   for i, a in e.kids:
     if r.params[i].isVar:
       g.store(g.offset(args, offsets[i]), g.path(a))
@@ -416,8 +450,15 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
     g.patches.add(g.plan.module.functions[g.fn].instructions.len)
     let arena = g.emit(IrInstruction(op: OffsetAddressOp),
       [ValueId(3), zero], AddressType)
-    discard g.emit(IrInstruction(op: CallOp, target: int32(index)),
-      [ValueId(0), args, output, arena])
+    let signature = g.plan.module.functions[index].signature
+    var passed = @[ValueId(0), args, output, arena]
+    for i, storage in signature.parameterStorage:
+      if g.plan.module.functions[g.fn].values[int32(passed[i])].storage !=
+          storage:
+        passed[i] = g.untyped(passed[i])
+        g.plan.module.functions[g.fn].values[int32(passed[i])].storage =
+          storage
+    discard g.emit(IrInstruction(op: CallOp, target: int32(index)), passed)
     g.calls[g.fn].add(index)
   if r.ret.isNil: NoValue else: g.read(output, r.ret)
 
@@ -427,7 +468,8 @@ proc path(g: var Lower, e: Expr): ValueId =
   of IdentExpr:
     if e.symKind == GlobalSym:
       result = g.emit(IrInstruction(op: GlobalAddressOp,
-        target: int32(g.globals[e.sval])), [], AddressType)
+        target: int32(g.globals[e.sval])), [], AddressType,
+        g.storage(e.typ))
     else:
       result = g.bindings[e.sval].address
   of FieldExpr:
@@ -734,7 +776,8 @@ proc statement(g: var Lower, s: Stmt) =
     let receiver = if s.typ.kind != LockType and s.lhs != nil:
         g.path(s.lhs)
       else: g.emit(IrInstruction(op: GlobalAddressOp,
-        target: int32(g.globals[s.name])), [], AddressType)
+        target: int32(g.globals[s.name])), [], AddressType,
+        g.storage(s.typ))
     if s.typ.kind == LockType:
       let host = NativeHost(kind: LockHost, operation: "lock",
         receiverType: g.layout(s.typ), resultType: -1)
@@ -837,14 +880,42 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
   g.plan.module.pointerBytes = 8
   g.plan.module.files = if srcFiles.len > 0: srcFiles else: @[filename]
   let signature = IrSignature(parameters:
-    @[AddressType, AddressType, AddressType, AddressType])
+    @[AddressType, AddressType, AddressType, AddressType],
+    parameterStorage: @[0'i32, 0, 0, 0])
   g.plan.module.signatures = @[signature]
   g.plan.module.functions.add(IrFunction(name: "nifty.entry",
     signature: signature, failureMode: NoFailCall))
   for i, r in source.routines:
     g.routines[r.name] = i + 1
     g.plan.module.functions.add(IrFunction(name: r.name,
-      signature: signature, failureMode: NoFailCall))
+      signature: signature, failureMode: NoFailCall,
+      directOnly: r.kind != ThreadRoutine and r.externLib == ""))
+  g.argumentTypes = newSeq[int32](g.plan.module.functions.len)
+  for i, r in source.routines:
+    var
+      members: seq[IrField]
+      bytes = 0
+      alignment = 1
+    for p in r.params:
+      let storage = if p.isVar:
+          g.plan.addStorage(IrStorage(kind: PointerStorage,
+            byteCount: 8, alignment: 8))
+        else: g.storage(p.typ)
+      let data = g.plan.module.storageTypes[storage - 1]
+      bytes = aligned(bytes, int(data.alignment))
+      members.add(IrField(name: p.name, storage: storage,
+        offset: int32(bytes)))
+      bytes += int(data.byteCount)
+      alignment = max(alignment, int(data.alignment))
+    let arguments = g.plan.recordStorage("$args." & $i & "." & r.name,
+      members, aligned(bytes, alignment), alignment)
+    g.argumentTypes[i + 1] = arguments
+    let returned = g.storage(r.ret)
+    g.plan.module.functions[i + 1].signature.parameterStorage =
+      @[0'i32, if bytes == 0: 0'i32 else: arguments, returned, 0'i32]
+    g.plan.module.functions[i + 1].signature.passing = @[
+      DirectPassing, if bytes == 0: DirectPassing else: ValuePassing,
+      if returned == 0: DirectPassing else: MutablePassing, DirectPassing]
   g.frames = newSeq[int](g.plan.module.functions.len)
   g.calls = newSeq[seq[int]](g.frames.len)
   for c in source.consts: g.constants[c.name] = c.value
@@ -855,7 +926,7 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
     g.globals[v.name] = g.plan.module.globals.len
     g.plan.module.globals.add(IrGlobal(name: v.name, offset: int64(off),
       bytes: Span(first: int32(off), count: int32(l.bytes)),
-      alignment: int32(l.align)))
+      alignment: int32(l.align), storage: g.storage(v.typ)))
     if v.typ.kind == LockType: g.plan.lockOffsets.add(off)
     if v.typ.kind == ChannelType: g.plan.channelOffsets.add(off)
     g.plan.globalBytes += int(l.bytes)
@@ -869,7 +940,8 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
     g.patches.setLen(0)
     g.bindings.clear()
     for i in 0 ..< 4:
-      g.plan.module.functions[fn].values.add(IrValue(valueType: AddressType))
+      g.plan.module.functions[fn].values.add(IrValue(valueType: AddressType,
+        storage: g.plan.module.functions[fn].signature.parameterStorage[i]))
     g.plan.module.functions[fn].blocks.add(IrBlock(
       parameters: Span(first: 0, count: 4)))
     if fn > 0:
