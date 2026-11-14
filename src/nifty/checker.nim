@@ -774,6 +774,11 @@ proc collectAssigned(c: Ctx, body: seq[Stmt], s: var HashSet[string]) =
         s.incl root.sval
     if st.kind == WithStmt:
       s.incl st.name
+      if st.name notin c.globals or c.globals[st.name].kind != LockType:
+        # Resource entry and exit may change globals between iterations.
+        for protocol in ["start", "end"]:
+          for global in c.routineWrites.getOrDefault(protocol):
+            s.incl global
     c.collectAssigned(st.body, s)
     for br in st.elifs:
       c.collectAssignedExpr(br.cond, s)
@@ -2902,6 +2907,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     dec c.withDepth
     if not isLock:
       # end(x) runs after the body and may write globals too.
+      c.delFacts s.name
       for pn in ["start", "end"]:
         if pn in c.routineWrites:
           for gw in c.routineWrites[pn]:

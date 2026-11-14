@@ -1,0 +1,1 @@
+error_with_foreach_effect.nifty:12: cannot modify 'values' while iterating it

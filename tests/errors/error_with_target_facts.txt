@@ -1,0 +1,1 @@
+error_with_target_facts.nifty:11: cannot prove 'x' is not zero here; guard the division with 'if x != 0:'

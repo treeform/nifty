@@ -1,0 +1,11 @@
+proc start(x: var int) =
+  x = 1
+
+proc end(x: var int) =
+  x = 0
+
+thread main() =
+  var x: int
+  with x:
+    x = 1
+  echo 10 / x

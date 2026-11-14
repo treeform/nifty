@@ -1,0 +1,15 @@
+var values: seq[int]
+
+proc start(x: var int) =
+  values.clear()
+
+proc end(x: var int) =
+  values.clear()
+
+thread main() =
+  discard values.add(1)
+  var resource: int
+  for value in values:
+    with resource:
+      echo value
+  echo values.len
