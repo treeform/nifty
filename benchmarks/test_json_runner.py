@@ -116,9 +116,10 @@ def testConfiguration():
                        f'const ClockId = {run.time.CLOCK_MONOTONIC}\n')
     expectError(lambda: run.configuredSource(source + source, 4, 3))
     expectError(lambda: run.configuredSource("const Records = 128\n", 4, 3))
-  options = run.parseArguments(["--backend", "c-straight,c,amd64",
+  options = run.parseArguments(["--backend", "hand-asm,c-straight,c,amd64",
                                 "--backend", "c-straight"])
-  assert options.backend == ["c-straight", "c", "amd64"]
+  assert options.backend == ["hand-asm", "c-straight", "c", "amd64"]
+  assert options.hand_asm_source == run.Root / "benchmarks/arm64/json_parser_hand.S"
   assert options.straight_c_source == run.Root / "benchmarks/json_parser_straight.c"
   with patch.dict(run.os.environ, {"CC": "test-json-cc"}):
     assert run.parseArguments([]).cc == "test-json-cc"
@@ -142,9 +143,12 @@ def testStraightC():
     source = directory / "standalone.c"
     sourceText = "int main(void) { return 0; }\n"
     source.write_text("changed after snapshot\n", encoding="utf-8")
-    for architecture in ("arm64", "amd64"):
+    for backend, architecture in (("c-straight", "arm64"),
+                                  ("c-straight", "amd64"), ("hand-asm", "arm64")):
       options = SimpleNamespace(
-        output=directory / architecture, records=4, repeat=3,
+        output=directory / backend / architecture, records=4, repeat=3,
+        hand_asm_bytes=b"assembly snapshot\n",
+        hand_asm_manifest_bytes=b'{"origin": "clang baseline"}\n',
         straight_c_source=source, straight_c_text=sourceText,
         cc="test-json-cc", timeout=1, emit_ir=True,
         host={"system": "Darwin", "physical_architecture": "arm64"})
@@ -161,7 +165,7 @@ def testStraightC():
       with patch.object(run.Ray, "runCommand", side_effect=build), \
            patch.object(run.Ray, "binaryArchitectures", return_value=[architecture]), \
            patch.object(run.time, "CLOCK_MONOTONIC", 1, create=True):
-        result = run.buildBackend("c-straight", options, environment)
+        result = run.buildBackend(backend, options, environment)
       assert len(commands) == 1
       command = commands[0]
       assert command[:1 + len(run.Ray.StraightCFlags)] == [
@@ -175,7 +179,18 @@ def testStraightC():
       assert result["executable_sha256"] == hashlib.sha256(b"C executable").hexdigest()
       assert result["compile_wall_ns"] == 123 and result["inspection"] is None
       assert result["execution_architecture"] == architecture
-      assert "C straight" in result["label"]
+      if backend == "hand-asm":
+        assert result["label"] == "Hand ASM (ARM64)"
+        assert command[command.index("-arch") + 1] == "arm64"
+        assert "-DJSON_HAND_ASM" in command
+        assembly = Path(result["assembly"])
+        assert str(assembly) in command
+        assert assembly.read_bytes() == options.hand_asm_bytes
+        assert result["assembly_sha256"] == hashlib.sha256(options.hand_asm_bytes).hexdigest()
+        assert Path(result["assembly_provenance"]).read_bytes() == options.hand_asm_manifest_bytes
+      else:
+        assert "C straight" in result["label"]
+        assert result["assembly"] is None
       assert ("Rosetta translated" in result["label"]) == (architecture == "amd64")
       prefix = ["/usr/bin/arch", "-x86_64"] if architecture == "amd64" else []
       assert result["execution_command"] == prefix + [result["executable"]]
@@ -192,11 +207,16 @@ def testStandaloneMain():
     compiler = directory / "test-cc"
     compiler.write_bytes(b"compiler")
     output = directory / "output"
-    host = {"system": "Linux", "physical_architecture": "amd64"}
+    assembly = directory / "parser.S"
+    assembly.write_bytes(b"assembly snapshot\n")
+    (directory / "json_parser_manifest.json").write_text('{"origin": "clang"}')
+    host = {"system": "Darwin", "physical_architecture": "arm64"}
 
     def benchmark(options, backends, machine, env):
       """Inspect the selected standalone inputs before report publication."""
-      assert backends == ["c-straight"] and machine == host
+      assert backends == selected and machine == host
+      if "hand-asm" in backends:
+        assert options.hand_asm_bytes == assembly.read_bytes()
       assert options.source_text is None and options.library_files == {}
       assert options.straight_c_text == "standalone snapshot\n"
       assert options.cc == str(compiler) and env["CC"] == str(compiler)
@@ -212,14 +232,47 @@ def testStandaloneMain():
          patch.object(run, "markdownReport", return_value="standalone report"), \
          patch.object(run.time, "CLOCK_MONOTONIC", 1, create=True), \
          redirect_stdout(io.StringIO()):
-      assert run.main(["--backend", "c-straight", "--straight-c-source", str(source),
-                       "--output", str(output)]) == 0
+      for selected in (["c-straight"], ["hand-asm"], ["hand-asm", "c-straight"]):
+        assert run.main(["--backend", ",".join(selected),
+                         "--straight-c-source", str(source),
+                         "--hand-asm-source", str(assembly),
+                         "--output", str(output)]) == 0
     report = run.json.loads((output / "results.json").read_text())
     assert report["toolchain"]["compiler"] is None
     assert report["toolchain"]["compiler_architectures"] == []
+    assert report["settings"]["hand_asm_sha256"] == hashlib.sha256(assembly.read_bytes()).hexdigest()
+    assert report["settings"]["hand_asm_provenance"] == {"origin": "clang"}
     assert report["settings"]["source"] is None
     assert report["settings"]["library_sha256"] == {}
     assert report["settings"]["straight_c_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def testAvailability():
+  """Keep assembly host selection separate from the shared ray registry."""
+  apple = {"system": "Darwin", "physical_architecture": "arm64"}
+  intel = {"system": "Darwin", "physical_architecture": "amd64"}
+  linux = {"system": "Linux", "physical_architecture": "arm64"}
+  with patch.object(run.Ray, "availableBackends", return_value=["arm64", "c"]):
+    assert run.availableBackends(apple, Path("nifty"), "cc") == [
+      "c-straight", "hand-asm", "arm64", "c"]
+    assert run.availableBackends(apple, Path("nifty"), None) == ["arm64"]
+    for host in (intel, linux):
+      assert "hand-asm" not in run.availableBackends(host, Path("nifty"), "cc")
+    assert run.availableBackends(apple, Path("missing"), "cc", False) == [
+      "c-straight", "hand-asm"]
+  assert "hand-asm" not in run.Ray.Backends
+  with patch.object(run.Ray, "hostInfo", return_value=linux), \
+       patch.object(run.time, "CLOCK_MONOTONIC", 1, create=True):
+    expectError(lambda: run.main(["--backend", "hand-asm"]))
+  with patch.object(run.Ray, "hostInfo", return_value=apple), \
+       patch.object(run.shutil, "which", return_value=None), \
+       patch.object(run.time, "CLOCK_MONOTONIC", 1, create=True):
+    expectError(lambda: run.main(["--backend", "hand-asm"]))
+  with patch.object(run.Ray, "hostInfo", return_value=apple), \
+       patch.object(run.time, "CLOCK_MONOTONIC", None, create=True):
+    expectError(lambda: run.main(["--backend", "hand-asm"]))
+  with patch.object(run.Ray, "hostInfo", return_value={"system": "Windows"}):
+    expectError(lambda: run.main(["--backend", "hand-asm"]))
 
 
 def testSampling():
@@ -242,14 +295,14 @@ def testSampling():
   with tempfile.TemporaryDirectory() as temporary:
     options = SimpleNamespace(records=1, repeat=2, samples=5, warmups=1,
                               timeout=1, output=Path(temporary))
-    backends = ["c-straight", "c", "arm64", "amd64"]
+    backends = ["c-straight", "hand-asm", "c", "arm64", "amd64"]
     with patch.object(run, "buildBackend", side_effect=build), \
          patch.object(run.Ray, "runCommand", side_effect=execute):
       result = run.benchmark(options, backends, {}, {})
-    assert calls[:4] == [("build", backend) for backend in backends]
-    orders = [backends[index % 4:] + backends[:index % 4] for index in range(6)]
+    assert calls[:5] == [("build", backend) for backend in backends]
+    orders = [backends[index % 5:] + backends[:index % 5] for index in range(6)]
     assert result["sample_order"] == orders
-    assert calls[4:] == [("run", backend) for order in orders for backend in order]
+    assert calls[5:] == [("run", backend) for order in orders for backend in order]
     assert (options.output / "input.json").read_bytes() == expected["input"]
     for backend in result["backends"]:
       assert backend["warmup_checksums"] == [expected["checksum"] * 2]
@@ -278,5 +331,6 @@ testProtocol()
 testConfiguration()
 testStraightC()
 testStandaloneMain()
+testAvailability()
 testSampling()
 print("JSON benchmark oracle, protocol, configuration, and sampling checks passed")

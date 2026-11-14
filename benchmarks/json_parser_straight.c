@@ -44,6 +44,19 @@ typedef struct {
   JsonError *error;
 } JsonParser;
 
+#ifdef JSON_HAND_ASM
+/* The assembly implementation shares the same owned-tree API and layout. */
+void jsonDrop(JsonNode *node);
+bool jsonParse(const unsigned char *data, size_t length, JsonNode *output,
+               JsonError *error);
+uint64_t jsonDigest(const JsonNode *node);
+_Static_assert(sizeof(JsonNode) == 32 && offsetof(JsonNode, as) == 8,
+               "Assembly requires the ARM64 node layout");
+_Static_assert(sizeof(JsonPair) == 48 && offsetof(JsonPair, value) == 16,
+               "Assembly requires the ARM64 object pair layout");
+_Static_assert(sizeof(JsonParser) == 32 && offsetof(JsonParser, error) == 24,
+               "Assembly requires the ARM64 parser layout");
+#else
 /* Releases all owned memory, leaving a reusable null node. */
 void jsonDrop(JsonNode *node) {
   if (node->kind == JsonString || node->kind == JsonNumber) {
@@ -364,6 +377,7 @@ static uint64_t jsonVisit(const JsonNode *node, uint64_t checksum) {
 }
 /* Returns the complete typed tree checksum used by the Python oracle. */
 uint64_t jsonDigest(const JsonNode *node) { return jsonVisit(node, 0); }
+#endif
 
 #ifndef JSON_STRAIGHT_NO_MAIN
 #ifndef RECORDS

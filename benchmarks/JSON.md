@@ -10,9 +10,11 @@ the repository root with `nim r tools/build.nim`, then compare them:
 python3 benchmarks/run_json.py
 python3 benchmarks/run_json.py --backend c-straight,c,arm64 --records 512 --repeat 20 --wall
 python3 benchmarks/run_json.py --backend c-straight
+python3 benchmarks/run_json.py --backend c-straight,hand-asm --repeat 100
 python3 benchmarks/run_json.py --opt none --output /tmp/nifty-json-unoptimized
 python3 benchmarks/test_json_runner.py
 python3 benchmarks/test_json_straight.py
+python3 benchmarks/test_json_hand_asm.py
 ```
 
 The runner uses Python's standard library. Timed programs use POSIX
@@ -30,6 +32,15 @@ through Nifty's C backend. Both C entries use the same C compiler and
 that compiler; its default respects `CC` and otherwise uses `cc`. The
 standalone-only command needs no Nifty compiler, source modules, or runtime.
 `--straight-c-source` selects an alternate standalone source.
+
+`hand-asm` uses the same standalone C driver and tree layout, linked to a
+persisted ARM64 assembly implementation. It starts with Clang's C output
+and manually optimizes ASCII string copying and checksum arithmetic. It
+appears as `Hand ASM (ARM64)` and is automatically available on ARM64 Macs
+with a C compiler. It requires no Nifty compiler or runtime. The assembly
+uses Mach-O syntax and is not enabled on Linux or Windows. See
+[HAND_ASM.md](HAND_ASM.md) for the original assembly listing, changes,
+provenance, and validation. `--hand-asm-source` selects another listing.
 
 The default input is an array of 128 records, totaling 26,753 bytes. Each
 record includes all six JSON value types, nested arrays and objects, an
@@ -89,6 +100,8 @@ The default output directory is `benchmarks/output/json`, ignored by Git:
 - `build/nRECORDS-rREPEAT/BACKEND/` preserves generated source, a snapshot
   of the four Nifty parser modules where applicable, the executable, and
   build output. The standalone build contains a snapshot of the C source.
+  Hand ASM also preserves the assembly, adjacent provenance manifest when
+  present, and their hashes.
 - `--emit-ir` preserves native IR through a separate compiler call outside
   compile timing and workload timing.
 

@@ -1,0 +1,56 @@
+{
+  "name": "Hand ASM",
+  "target": "arm64-apple-darwin",
+  "platform": "macOS ARM64",
+  "base_revision": "73a346057e626cdf0d1e91ba93cf73d020196650",
+  "base_source": "benchmarks/json_parser_straight.c",
+  "base_source_sha256": "4573802e52081f10cb07bb2a40dd95b1bae720aa501684fd548d48fded6786d6",
+  "compiler": "Apple clang version 16.0.0 (clang-1600.0.26.4)\nTarget: arm64-apple-darwin24.1.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+  "command": [
+    "cc",
+    "-O2",
+    "-pthread",
+    "-fno-strict-aliasing",
+    "-ffp-contract=off",
+    "-DJSON_STRAIGHT_NO_MAIN",
+    "-S",
+    "benchmarks/json_parser_straight.c",
+    "-o",
+    "benchmarks/arm64/json_parser_clang.s"
+  ],
+  "baseline_assembly_sha256": "b5fba18a8712bea4ed9a9d3d54e679ff96f7ff159e42d82e81b5a4df8033b566",
+  "hand_assembly_sha256": "70a688be785d2e79b2ba67ff3b149b620ef566dd002eef2db14d936315079930",
+  "changes": [
+    {
+      "function": "jsonString",
+      "change": "Append ASCII runs directly within existing capacity, with explicit input/output bounds; retain allocation boundaries and scalar Unicode/escape handling."
+    },
+    {
+      "function": "jsonVisit",
+      "change": "Accumulate four key/string bytes before reduction and use exact reciprocal multiplication; retain byte order, NUL handling, and modulo 1000000007 checksum."
+    },
+    {
+      "function": "jsonVisit jump table",
+      "change": "Widen jump offsets to signed 32-bit entries for the expanded function."
+    },
+    {
+      "function": "object metadata",
+      "change": "Lower deployment marker to macOS 11; instructions and libc symbols use baseline Apple Silicon facilities."
+    }
+  ],
+  "rejected_candidates": [
+    {
+      "function": "jsonDrop",
+      "reason": "Independent cleanup speed difference was below 1 percent in screening; preserve the simpler original cleanup."
+    }
+  ],
+  "abi": {
+    "JsonNode_size": 32,
+    "JsonNode_payload": 8,
+    "JsonPair_size": 48,
+    "JsonPair_value": 16,
+    "JsonParser_size": 32,
+    "JsonParser_error": 24
+  },
+  "timing_scope": "Same C driver, input, owned tree, checksum, and complete cleanup as c-straight; no Nifty compiler invocation."
+}

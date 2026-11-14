@@ -17,7 +17,8 @@ Spec = importlib.util.spec_from_file_location("ray_benchmark", Root / "benchmark
 Ray = importlib.util.module_from_spec(Spec)
 Spec.loader.exec_module(Ray)
 BenchmarkError = Ray.BenchmarkError
-Backends = ("c-straight",) + Ray.Backends
+StandaloneBackends = ("c-straight", "hand-asm")
+Backends = StandaloneBackends + Ray.Backends
 RecordText = (r'{"name":"Nifty\nJSON","unicode":"\u00e9\uD83D\uDE03",'
               r'"nul":"a\u0000b","integer":9007199254740993,'
               r'"fraction":-12.50e+2,"enabled":true,"disabled":false,'
@@ -33,7 +34,8 @@ ComparisonScope = ("C straight is an independent handwritten parser that builds 
                    "an owned tree and transfers children into their parents. "
                    "Nifty's parser currently copies completed subtrees. Timing "
                    "differences reflect parser implementation and ownership "
-                   "costs as well as code generation.")
+                   "costs as well as code generation. Hand ASM starts from Clang-generated "
+                   "C parser assembly with manually tuned string and checksum code.")
 
 
 class Number(str):
@@ -161,12 +163,25 @@ def buildBackend(backend, options, env):
   directory = options.output / "build" / f"n{options.records}-r{options.repeat}" / backend
   directory.mkdir(parents=True, exist_ok=True)
   executable = directory / "json_parser"
-  if backend == "c-straight":
+  assembly = None
+  provenance = None
+  if backend in StandaloneBackends:
     source = directory / "json_parser_straight.c"
     source.write_text(options.straight_c_text, encoding="utf-8")
-    command = [options.cc] + Ray.StraightCFlags + [
+    flags = Ray.StraightCFlags.copy()
+    if backend == "hand-asm":
+      flags += ["-arch", "arm64", "-DJSON_HAND_ASM"]
+      assembly = directory / "json_parser_hand.S"
+      assembly.write_bytes(options.hand_asm_bytes)
+      if getattr(options, "hand_asm_manifest_bytes", None) is not None:
+        provenance = directory / "json_parser_manifest.json"
+        provenance.write_bytes(options.hand_asm_manifest_bytes)
+    command = [options.cc] + flags + [
       f"-DRECORDS={options.records}", f"-DREPETITIONS={options.repeat}",
-      f"-DCLOCK_ID={time.CLOCK_MONOTONIC}", "-o", str(executable), str(source)]
+      f"-DCLOCK_ID={time.CLOCK_MONOTONIC}", str(source)]
+    if assembly is not None:
+      command.append(str(assembly))
+    command += ["-o", str(executable)]
   else:
     (directory / "lib").mkdir(parents=True, exist_ok=True)
     for name, data in options.library_files.items():
@@ -181,26 +196,32 @@ def buildBackend(backend, options, env):
   (directory / "build.stderr").write_bytes(response.stderr)
   architectures = Ray.binaryArchitectures(executable)
   if len(architectures) != 1 or (
-      backend in ("arm64", "amd64") and architectures != [backend]):
+      backend in ("arm64", "amd64", "hand-asm") and
+      architectures != ["arm64" if backend == "hand-asm" else backend]):
     raise BenchmarkError(f"Unexpected executable architecture for {backend}: {architectures}")
   architecture = architectures[0]
   execution = [str(executable)]
   if architecture == "amd64" and options.host["physical_architecture"] == "arm64":
     execution = ["/usr/bin/arch", "-x86_64"] + execution
   inspection = None
-  if options.emit_ir and backend not in ("c", "c-straight"):
+  if options.emit_ir and backend not in ("c",) + StandaloneBackends:
     ir = directory / "json_parser.ir"
     inspectCommand = [str(options.compiler), str(source), f"--backend:{backend}",
                       f"--opt:{options.opt}", "--emit-ir", "-o", str(ir)]
     _, inspectionNs = Ray.runCommand(inspectCommand, options.timeout, env)
     inspection = {"path": str(ir), "command": inspectCommand, "wall_ns": inspectionNs}
-  label = Ray.backendLabel(backend, options.host, architecture)
+  label = "Hand ASM (ARM64)" if backend == "hand-asm" else Ray.backendLabel(
+    backend, options.host, architecture)
   if backend == "c":
     label = label.replace("C (", "Nifty C backend (", 1)
   return {"backend": backend, "label": label,
           "execution_architecture": architecture, "executable": str(executable),
           "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
           "source": str(source), "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+          "assembly": str(assembly) if assembly else None,
+          "assembly_sha256": hashlib.sha256(assembly.read_bytes()).hexdigest() if assembly else None,
+          "assembly_provenance": str(provenance) if provenance else None,
+          "assembly_provenance_sha256": hashlib.sha256(provenance.read_bytes()).hexdigest() if provenance else None,
           "compile_command": command, "compile_wall_ns": elapsed,
           "execution_command": execution, "inspection": inspection,
           "cycle_ns_per_parse": [], "process_wall_ns": [], "raw_samples": [],
@@ -246,7 +267,7 @@ def parseArguments(arguments=None):
   """Reject unbounded or unsupported configuration before building."""
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--backend", action="append", default=[],
-                      help="Repeat or use comma-separated c-straight,c,arm64,amd64")
+                      help="Repeat or use comma-separated c-straight,hand-asm,c,arm64,amd64")
   parser.add_argument("--records", type=int, default=128)
   parser.add_argument("--repeat", type=int, default=10)
   parser.add_argument("--samples", type=int, default=5)
@@ -256,6 +277,8 @@ def parseArguments(arguments=None):
   parser.add_argument("--source", type=Path, default=Root / "benchmarks/json_parser.nifty")
   parser.add_argument("--straight-c-source", type=Path,
                       default=Root / "benchmarks/json_parser_straight.c")
+  parser.add_argument("--hand-asm-source", type=Path,
+                      default=Root / "benchmarks/arm64/json_parser_hand.S")
   parser.add_argument("--cc", default=os.environ.get("CC", "cc"),
                       help="C compiler for standalone and Nifty-generated C")
   parser.add_argument("--output", type=Path, default=Root / "benchmarks/output/json")
@@ -277,7 +300,7 @@ def parseArguments(arguments=None):
       if backend not in selected:
         selected.append(backend)
   options.backend = selected
-  for name in ("compiler", "source", "straight_c_source", "output"):
+  for name in ("compiler", "source", "straight_c_source", "hand_asm_source", "output"):
     setattr(options, name, getattr(options, name).expanduser().resolve())
   return options
 
@@ -287,7 +310,7 @@ def markdownReport(report, wall):
   result = report["benchmark"]
   lines = [f"Nifty JSON parser: {result['records']} records, {result['input_bytes']} input bytes",
            "", TimingScope]
-  if any(backend["backend"] == "c-straight" for backend in result["backends"]):
+  if any(backend["backend"] in StandaloneBackends for backend in result["backends"]):
     lines += ["", ComparisonScope]
   lines += ["", f"Correctness: {result['correctness']}.", "",
            f"Native optimization: {report['settings']['opt']}. C uses -O2.", "",
@@ -307,13 +330,35 @@ def markdownReport(report, wall):
   return "\n".join(lines)
 
 
+def handAsmSupported(host):
+  """Restrict the persisted Mach-O assembly to physical Apple ARM64 hosts."""
+  return host["system"] == "Darwin" and host["physical_architecture"] == "arm64"
+
+
+def availableBackends(host, compiler, cc, needsNifty=True):
+  """Select JSON backends without changing the shared ray backend registry."""
+  available = list(Ray.availableBackends(host, compiler)) if needsNifty else []
+  if cc:
+    available.insert(0, "c-straight")
+    if handAsmSupported(host):
+      available.insert(1, "hand-asm")
+    if needsNifty and "c" not in available:
+      available.append("c")
+  else:
+    available = [backend for backend in available if backend != "c"]
+  return available
+
+
 def main(arguments=None):
   """Publish reproducible results after every backend passes validation."""
   options = parseArguments(arguments)
   host = Ray.hostInfo()
-  if host["system"] not in ("Darwin", "Linux") or not hasattr(time, "CLOCK_MONOTONIC"):
+  if host["system"] not in ("Darwin", "Linux") or getattr(time, "CLOCK_MONOTONIC", None) is None:
     raise BenchmarkError("JSON timing requires POSIX clock_gettime on macOS or Linux")
-  needsNifty = options.backend != ["c-straight"]
+  if "hand-asm" in options.backend and not handAsmSupported(host):
+    raise BenchmarkError("Hand ASM requires macOS on physical ARM64 with a C compiler")
+  needsNifty = not options.backend or any(
+    backend not in StandaloneBackends for backend in options.backend)
   options.source_text = None
   options.library_files = {}
   if needsNifty:
@@ -322,24 +367,24 @@ def main(arguments=None):
     options.source_text = options.source.read_text(encoding="utf-8")
     options.library_files = {name: (Root / "lib" / name).read_bytes() for name in LibraryNames}
   options.cc = shutil.which(options.cc)
-  available = Ray.availableBackends(host, options.compiler) if needsNifty else []
-  if options.cc:
-    available.insert(0, "c-straight")
-    if needsNifty and "c" not in available:
-      available.append("c")
-  else:
-    available = [backend for backend in available if backend != "c"]
+  if "hand-asm" in options.backend and not options.cc:
+    raise BenchmarkError("Hand ASM requires an available C compiler (--cc or CC)")
+  available = availableBackends(host, options.compiler, options.cc, needsNifty)
   backends = options.backend or available
   if not backends or any(backend not in available for backend in backends):
     raise BenchmarkError("Requested backend or runtime is unavailable; available: " +
                          ", ".join(available))
   options.straight_c_text = options.straight_c_source.read_text(encoding="utf-8") \
-      if "c-straight" in backends else None
+      if any(backend in StandaloneBackends for backend in backends) else None
+  options.hand_asm_bytes = options.hand_asm_source.read_bytes() if "hand-asm" in backends else None
+  manifest = options.hand_asm_source.parent / "json_parser_manifest.json"
+  options.hand_asm_manifest_bytes = manifest.read_bytes() \
+      if "hand-asm" in backends and manifest.is_file() else None
   options.output.mkdir(parents=True, exist_ok=True)
   for name in ("results.json", "results.md"):
     (options.output / name).unlink(missing_ok=True)
   inputs = [options.compiler] if needsNifty else []
-  if options.cc and any(backend in ("c", "c-straight") for backend in backends):
+  if options.cc and any(backend in ("c",) + StandaloneBackends for backend in backends):
     inputs.append(Path(options.cc))
   fingerprints = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
   env = os.environ.copy()
@@ -355,14 +400,16 @@ def main(arguments=None):
     raise BenchmarkError("Compiler changed during benchmark")
   report = {"schema": "nifty-json-benchmark-v1", "machine": host,
             "timing_scope": TimingScope,
-            "comparison_scope": ComparisonScope if "c-straight" in backends else None,
+            "comparison_scope": ComparisonScope if any(backend in StandaloneBackends for backend in backends) else None,
             "toolchain": {"compiler": str(options.compiler) if needsNifty else None,
                           "compiler_sha256": fingerprints.get(options.compiler),
                           "compiler_architectures": Ray.binaryArchitectures(options.compiler) if needsNifty else [],
                           "compiler_help": Ray.optionalCommand([str(options.compiler), "--help"]) if needsNifty else None,
                           "cc": Ray.optionalCommand([options.cc, "--version"]) if options.cc else None,
                           "cc_path": options.cc,
-                          "c_flags": Ray.StraightCFlags},
+                          "c_flags": Ray.StraightCFlags,
+                          "hand_asm_flags": Ray.StraightCFlags + ["-arch", "arm64", "-DJSON_HAND_ASM"]
+                              if "hand-asm" in backends else None},
             "inputs_sha256": {str(path): value for path, value in fingerprints.items()},
             "settings": {"records": options.records, "repeat": options.repeat,
                          "samples": options.samples, "warmups": options.warmups,
@@ -370,9 +417,16 @@ def main(arguments=None):
                          "timeout_seconds": options.timeout,
                          "source": str(options.source) if needsNifty else None,
                          "source_sha256": hashlib.sha256(options.source_text.encode()).hexdigest() if needsNifty else None,
-                         "straight_c_source": str(options.straight_c_source) if "c-straight" in backends else None,
+                         "straight_c_source": str(options.straight_c_source) if options.straight_c_text is not None else None,
                          "straight_c_sha256": hashlib.sha256(options.straight_c_text.encode()).hexdigest()
                              if options.straight_c_text is not None else None,
+                         "hand_asm_source": str(options.hand_asm_source) if options.hand_asm_bytes is not None else None,
+                         "hand_asm_sha256": hashlib.sha256(options.hand_asm_bytes).hexdigest()
+                             if options.hand_asm_bytes is not None else None,
+                         "hand_asm_provenance": json.loads(options.hand_asm_manifest_bytes)
+                             if options.hand_asm_manifest_bytes is not None else None,
+                         "hand_asm_provenance_sha256": hashlib.sha256(options.hand_asm_manifest_bytes).hexdigest()
+                             if options.hand_asm_manifest_bytes is not None else None,
                          "library_sha256": {name: hashlib.sha256(data).hexdigest()
                                             for name, data in options.library_files.items()}},
             "benchmark": result}

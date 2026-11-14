@@ -46,5 +46,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python benchmarks/test_json_straight.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python benchmarks/test_json_hand_asm.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python tests/test_optimization_benchmark.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

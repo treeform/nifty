@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import random
+import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -71,26 +73,91 @@ def cases():
 Harness = r'''
 #include <assert.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef JSON_HAND_ASM
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 static size_t attempts, failAt, live;
+#ifdef JSON_HAND_ASM
+typedef union {
+  max_align_t alignment;
+  struct { size_t size; unsigned char guard[32]; } value;
+} Allocation;
+static void verifyAllocation(Allocation *header) {
+  unsigned char *tail = (unsigned char *)(header + 1) + header->value.size;
+  for (size_t i = 0; i < 32; ++i) {
+    assert(header->value.guard[i] == 0x6d && tail[i] == 0xb7);
+  }
+}
+#endif
 static void *trackedMalloc(size_t size) {
   if (++attempts == failAt) return NULL;
+#ifdef JSON_HAND_ASM
+  Allocation *header = malloc(sizeof(*header) + size + 32);
+  if (!header) return NULL;
+  header->value.size = size;
+  memset(header->value.guard, 0x6d, 32);
+  void *result = header + 1;
+  memset((unsigned char *)result + size, 0xb7, 32);
+#else
   void *result = malloc(size);
+#endif
   if (result) ++live;
   return result;
 }
 static void *trackedRealloc(void *old, size_t size) {
   if (++attempts == failAt) return NULL;
+#ifdef JSON_HAND_ASM
+  /* Force every successful growth to move, exposing stale child pointers. */
+  Allocation *header = old ? (Allocation *)old - 1 : NULL;
+  if (header) verifyAllocation(header);
+  size_t savedAttempts = attempts;
+  size_t savedFailure = failAt;
+  failAt = 0;
+  void *result = trackedMalloc(size);
+  failAt = savedFailure;
+  attempts = savedAttempts;
+  if (result && header) {
+    memcpy(result, old, header->value.size < size ? header->value.size : size);
+    memset(old, 0xdd, header->value.size);
+    free(header);
+    --live;
+  }
+  /* trackedMalloc already counted this allocation. */
+  if (result && !old) --live;
+#else
   void *result = realloc(old, size);
+#endif
   assert(size != 0);
   if (result && !old) ++live;
   return result;
 }
 static void trackedFree(void *value) {
-  if (value) { assert(live); --live; free(value); }
+  if (value) {
+    assert(live);
+    --live;
+#ifdef JSON_HAND_ASM
+    Allocation *header = (Allocation *)value - 1;
+    verifyAllocation(header);
+    memset(value, 0xdd, header->value.size);
+    free(header);
+#else
+    free(value);
+#endif
+  }
 }
+#ifdef JSON_HAND_ASM
+/* External names allow assembly allocations to share fault accounting. */
+void *jsonAsmTestMalloc(size_t size) { return trackedMalloc(size); }
+void *jsonAsmTestRealloc(void *old, size_t size) {
+  return trackedRealloc(old, size);
+}
+void jsonAsmTestFree(void *value) { trackedFree(value); }
+#endif
 #define JSON_MALLOC trackedMalloc
 #define JSON_REALLOC trackedRealloc
 #define JSON_FREE trackedFree
@@ -118,6 +185,27 @@ static void check(struct Case test, size_t index) {
   free(input);
   if (result) assert(jsonDigest(&node) == test.digest);
   else { assert(node.kind == JsonNull); assert(error.message); assert(error.offset <= test.size); }
+#ifdef JSON_HAND_ASM
+  /* Assembly accesses are not instrumented by ASan: protect both input ends. */
+  size_t page = (size_t)sysconf(_SC_PAGESIZE);
+  size_t span = ((test.size + page - 1) / page + 1) * page;
+  unsigned char *mapping = mmap(NULL, span + 2 * page,
+    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+  assert(mapping != MAP_FAILED);
+  assert(!mprotect(mapping, page, PROT_NONE));
+  assert(!mprotect(mapping + page + span, page, PROT_NONE));
+  for (int side = 0; side < 2; ++side) {
+    unsigned char *bounded = side ? mapping + page + span - test.size
+                                  : mapping + page;
+    memcpy(bounded, test.data, test.size);
+    JsonNode guarded = {0};
+    JsonError guardedError = {0};
+    assert(jsonParse(bounded, test.size, &guarded, &guardedError) == test.valid);
+    if (test.valid) assert(jsonDigest(&guarded) == test.digest);
+    jsonDrop(&guarded);
+  }
+  assert(!munmap(mapping, span + 2 * page));
+#endif
   jsonDrop(&node);
   jsonDrop(&node);
   assert(node.kind == JsonNull && live == 0);
@@ -168,7 +256,13 @@ def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--suite', type=Path,
                       help='Optional JSONTestSuite test_parsing directory')
+  parser.add_argument('--assembly', type=Path,
+                      help='macOS ARM64 assembly implementation to test')
   options = parser.parse_args()
+  if options.assembly and (platform.system() != 'Darwin' or
+                           platform.machine() != 'arm64'):
+    print('SKIP: assembly tests require macOS ARM64')
+    return
   tests = cases()
   if options.suite:
     paths = sorted(options.suite.glob('*.json'))
@@ -201,6 +295,21 @@ def main():
     command = compiler + ['-std=c11', '-O1', '-g', '-Wall', '-Wextra',
                           '-I', str(Path(__file__).resolve().parent),
                           str(harness), '-o', str(executable)]
+    if options.assembly:
+      # Rewrite only external allocator branch operands in a temporary copy.
+      assembly = directory / 'implementation.s'
+      contents = options.assembly.read_text(encoding='utf-8')
+      contents = re.sub(r'(?m)(\b(?:bl|b)\s+)_malloc\b',
+                        r'\1_jsonAsmTestMalloc', contents)
+      contents = re.sub(r'(?m)(\b(?:bl|b)\s+)_realloc\b',
+                        r'\1_jsonAsmTestRealloc', contents)
+      contents = re.sub(r'(?m)(\b(?:bl|b)\s+)_free\b',
+                        r'\1_jsonAsmTestFree', contents)
+      assembly.write_text(contents, encoding='utf-8')
+      object_path = directory / 'implementation.o'
+      subprocess.run(compiler + ['-c', str(assembly), '-o', str(object_path)],
+                     check=True, timeout=60)
+      command += ['-DJSON_HAND_ASM', '-D_DARWIN_C_SOURCE', str(object_path)]
     sanitizers = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
     if os.name != 'nt':
       probe = directory / 'probe.c'
