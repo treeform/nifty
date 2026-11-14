@@ -49,6 +49,8 @@ func padded(x: float64): Padded =
   value.flag = true
   value.value = x
   return value
+func optional(value: Padded): Padded? =
+  return value
 proc mutate(value: var Pair) =
   value.x = value.y
 extern "libc":
@@ -58,6 +60,9 @@ thread main() =
   global = complete(2.0, 3.0)
   mutate(global)
   echo global.x
+  let maybe = optional(padded(9.0))
+  if maybe.ok:
+    echo maybe.value
 """)
 let
   complete = module.routine("complete")
@@ -65,6 +70,13 @@ let
   observed = module.routine("observed")
   padded = module.routine("padded")
   main = module.routine("main")
+var optionalField = false
+for instruction in main.instructions:
+  if instruction.op == FieldAddressOp:
+    let field = module.fields[instruction.target]
+    if field.name == "value" and field.offset == 8:
+      optionalField = true
+doAssert optionalField
 doAssert complete.directOnly and not main.directOnly
 doAssert complete.count(ClearBytesOp) == 0
 doAssert complete.count(MoveBytesOp) == 1

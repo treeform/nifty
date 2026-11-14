@@ -185,12 +185,6 @@ proc fieldAddress(g: var Lower, p: ValueId, name: string,
         if field.name == name:
           return g.emit(IrInstruction(op: FieldAddressOp,
             target: int32(i)), [p], AddressType, field.storage)
-      for i in owner.fields.indices:
-        let field = g.plan.module.fields[i]
-        if field.name == "value":
-          let base = g.emit(IrInstruction(op: FieldAddressOp,
-            target: int32(i)), [p], AddressType, field.storage)
-          return g.fieldAddress(base, name, fallback)
   g.offset(p, fallback)
 
 proc kind(g: Lower, v: ValueId): IrType =
@@ -497,10 +491,12 @@ proc path(g: var Lower, e: Expr): ValueId =
   of FieldExpr:
     if not e.isOptOk and e.kids[0].typ.kind != ObjectType:
       return g.expression(e)
-    let p = g.path(e.kids[0])
+    var p = g.path(e.kids[0])
     let l = g.plan.layouts[g.layout(e.kids[0].typ)]
     if e.isOptOk:
       return g.fieldAddress(p, "ok", l.okOffset)
+    if e.kids[0].typ.opt or e.kids[0].unwrapOpt:
+      p = g.fieldAddress(p, "value", 0)
     for f in l.fields:
       if f.name == e.sval:
         return g.fieldAddress(p, f.name, f.offset)
