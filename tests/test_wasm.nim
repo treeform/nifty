@@ -69,6 +69,10 @@ proc exclusion(directory, name: string): string =
     case name
     of "channels", "locks", "queue", "thread_count", "ffi_net":
       return "requires multiple thread instances or channels"
+    of "union_containers":
+      return "requires two threads and a channel; WASM supports one thread"
+    of "union_defaults":
+      return "requires two threads; WASM supports one thread"
     of "ffi":
       return "requires process, pipe, and sleep host interfaces"
     of "opaque_handles":
@@ -181,6 +185,42 @@ proc main() =
           let cleanup = run(node, @[probe, output, "--cleanup"], isolated = true)
           verify(cleanup.code == 0, label & "/bounded-owner-storage",
             cleanup.output)
+
+    for name in ["json_parser", "snappy"]:
+      let
+        source = root / "examples" / (name & ".nifty")
+        label = mode & "/examples/" & name
+        native = work / (name & "_" & mode)
+        output = native & ".wasm"
+        referenceBuild = run(compiler, @["build", source, "--backend:c",
+          "--opt:" & mode, "-o", native])
+      verify(referenceBuild.code == 0 and fileExists(native),
+        label & "/reference-build", referenceBuild.output)
+      if referenceBuild.code != 0 or not fileExists(native):
+        continue
+      let reference = run(native, @[])
+      verify(reference.code == 0, label & "/reference-run", reference.output)
+      if reference.code != 0:
+        continue
+      if name == "json_parser":
+        verify("object with 7 fields" in reference.output and
+          "array with 3 children" in reference.output and
+          "JSON error at byte" in reference.output,
+          label & "/reference-content", reference.output)
+      else:
+        verify("Round trip: true" in reference.output,
+          label & "/reference-content", reference.output)
+      let built = build(source, output, mode)
+      verify(built.code == 0 and fileExists(output), label & "/build",
+        built.output)
+      if built.code != 0 or not fileExists(output):
+        continue
+      for engine in 0 .. 1:
+        let actual = execute(output, engine)
+        verify(actual.code == 0 and actual.output == reference.output,
+          label & "/" & (if engine == 0: "node" else: "wasmtime"),
+          "Exit: " & $actual.code & "\nExpected:\n" & reference.output &
+            "\nActual:\n" & actual.output)
 
     let sample = work / "scripts" / "helloworld.nifty"
     let first = work / ("deterministic_" & mode & ".wasm")

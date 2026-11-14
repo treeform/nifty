@@ -1,0 +1,36 @@
+object Left =
+  value: int
+object Right =
+  value: int
+type Choice = Left or Right
+
+object Holder =
+  value: Choice
+
+func make(): Choice =
+  return Right(7)
+
+proc show(value: Left) =
+  echo "left ", value.value
+proc show(value: Right) =
+  echo "right ", value.value
+
+thread main() =
+  let holder = Holder(Left(3))
+  show(holder.value)
+  show(make())
+  var values: array[2, Choice]
+  values[0] = Left(4)
+  values[1] = Right(5)
+  for i in 0 ..< 2:
+    show(values[i])
+  var fixed: seq[2, Choice]
+  discard fixed.push(Left(6))
+  discard fixed.push(Right(8))
+  for value in fixed:
+    show(value)
+  var dynamic: seq[Choice]
+  discard dynamic.push(Left(9))
+  discard dynamic.push(Right(10))
+  for value in dynamic:
+    show(value)

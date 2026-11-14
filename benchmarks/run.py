@@ -17,6 +17,8 @@ import time
 import zlib
 
 Backends = ("c", "arm64", "amd64", "wasm64")
+RayBackends = ("hand-asm", "c-straight") + Backends
+StraightCFlags = ["-O2", "-pthread", "-fno-strict-aliasing", "-ffp-contract=off"]
 Root = Path(__file__).resolve().parent.parent
 
 
@@ -140,6 +142,17 @@ def wasmtimeExecutable(env=None):
   return shutil.which(requested, path=environment.get("PATH"))
 
 
+def engineMetadata(backends, env=None):
+  """Capture the actual WASI engine executable, version, and content hash."""
+  if "wasm64" not in backends:
+    return None
+  executable = wasmtimeExecutable(env)
+  if not executable:
+    raise BenchmarkError("wasm64 requires Wasmtime; set NIFTY_WASMTIME")
+  return {"path": executable, "version": optionalCommand([executable, "--version"]),
+          "sha256": hashlib.sha256(Path(executable).read_bytes()).hexdigest()}
+
+
 def executionCommand(backend, executable, host, env=None):
   """Run WASM with Wasmtime or retain the host's native execution convention."""
   if backend == "wasm64":
@@ -207,12 +220,15 @@ def backendLabel(backend, host, architecture):
   """Describe native execution and translated AMD64 results explicitly."""
   if backend == "wasm64":
     return "WASM64 (Wasmtime WASI)"
+  if backend == "hand-asm":
+    return "Hand ASM (ARM64)"
   if backend == "amd64" and host["physical_architecture"] == "arm64":
     return "AMD64 (Rosetta translated)"
-  if backend == "c":
+  if backend in ("c", "c-straight"):
     suffix = ", Rosetta translated" if (
       architecture == "amd64" and host["physical_architecture"] == "arm64") else ""
-    return f"C (-O2, {architecture}{suffix})"
+    name = "Hand C" if backend == "c-straight" else "Nifty C backend"
+    return f"{name} (-O2, {architecture}{suffix})"
   return f"{backend.upper()} (native)"
 
 
@@ -311,27 +327,54 @@ def buildBackend(backend, size, repeat, options, env):
   """Build once per backend and configuration, preserving all artifacts."""
   directory = options.output / "build" / f"{size}x{size}-r{repeat}" / backend
   directory.mkdir(parents=True, exist_ok=True)
-  sourcePath = directory / "raytracer.nifty"
-  sourcePath.write_text(configuredSource(
-    options.source.read_text(), size, repeat, backend))
-  executable = directory / ("raytracer.wasm" if backend == "wasm64"
-                            else "raytracer")
-  command = [str(options.compiler), "build", str(sourcePath),
-             f"--backend:{backend}", "-o", str(executable)]
+  executable = directory / ("raytracer.wasm" if backend == "wasm64" else "raytracer")
+  executable.unlink(missing_ok=True)
+  snapshots = {}
+  if backend in ("c-straight", "hand-asm"):
+    sourcePath = directory / "raytracer_straight.c"
+    sourcePath.write_bytes(options.straight_c_source.read_bytes())
+    snapshots[sourcePath.name] = hashlib.sha256(sourcePath.read_bytes()).hexdigest()
+    command = [options.cc] + StraightCFlags + [
+      f"-DIMAGE_SIZE={size}", f"-DREPETITIONS={repeat}",
+      f"-DCLOCK_ID={time.CLOCK_MONOTONIC}", "-DEMIT_PIXELS=1",
+      "-o", str(executable), str(sourcePath), "-lm"]
+    if backend == "hand-asm":
+      assemblyPath = directory / "raytracer_hand.S"
+      assemblyPath.write_bytes(options.hand_asm_source.read_bytes())
+      snapshots[assemblyPath.name] = hashlib.sha256(assemblyPath.read_bytes()).hexdigest()
+      command += ["-DRAY_HAND_ASM", "-arch", "arm64", str(assemblyPath)]
+      manifestPath = options.hand_asm_source.with_name("raytracer_manifest.json")
+      if manifestPath.is_file():
+        manifestCopy = directory / manifestPath.name
+        manifestCopy.write_bytes(manifestPath.read_bytes())
+        snapshots[manifestCopy.name] = hashlib.sha256(manifestCopy.read_bytes()).hexdigest()
+  else:
+    sourcePath = directory / "raytracer.nifty"
+    originalPath = directory / "raytracer.original.nifty"
+    originalPath.write_bytes(options.source.read_bytes())
+    snapshots[originalPath.name] = hashlib.sha256(originalPath.read_bytes()).hexdigest()
+    sourcePath.write_bytes(configuredSource(
+      originalPath.read_bytes().decode("utf-8").replace("\r\n", "\n"),
+      size, repeat, backend).encode("utf-8"))
+    command = [str(options.compiler), "build", str(sourcePath),
+               f"--backend:{backend}", "-o", str(executable)]
   result, compileNs = runCommand(command, options.timeout, env)
   (directory / "build.stdout").write_bytes(result.stdout)
   (directory / "build.stderr").write_bytes(result.stderr)
   if backend == "wasm64" and binaryArchitectures(executable) != ["wasm64"]:
     raise BenchmarkError("Compiler did not produce a memory64 WASM module")
   inspection = None
-  if options.emit_ir and backend != "c":
+  if options.emit_ir and backend not in ("c", "c-straight", "hand-asm"):
     irPath = directory / "raytracer.ir"
     inspectCommand = [str(options.compiler), str(sourcePath),
                       f"--backend:{backend}", "--emit-ir", "-o", str(irPath)]
     _, inspectNs = runCommand(inspectCommand, options.timeout, env)
     inspection = {"path": str(irPath), "wall_ns": inspectNs}
   return {"backend": backend, "executable": str(executable),
-          "source": str(sourcePath), "compile_wall_ns": compileNs,
+          "source": str(sourcePath), "source_snapshots_sha256": snapshots,
+          "compile_wall_ns": compileNs,
+          "source_sha256": hashlib.sha256(sourcePath.read_bytes()).hexdigest(),
+          "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
           "compile_command": command, "inspection": inspection,
           "render_ns_per_frame": [], "process_wall_ns": [],
           "clock_fields": [], "warmup_checksums": []}
@@ -366,13 +409,27 @@ def benchmark(size, repeat, options, backends, host, env):
   expected = golden
   results = {backend: buildBackend(backend, size, repeat, options, env)
              for backend in backends}
+  for backend, result in results.items():
+    architectures = binaryArchitectures(Path(result["executable"]))
+    if len(architectures) != 1 or (
+        backend in ("arm64", "amd64", "wasm64", "hand-asm") and
+        architectures != ["arm64" if backend == "hand-asm" else backend]):
+      raise BenchmarkError(f"Wrong executable architecture for {backend}: {architectures}")
+    if (backend == "wasm64") != (architectures == ["wasm64"]):
+      raise BenchmarkError(f"Wrong module ABI for {backend}: {architectures}")
+    architecture = architectures[0]
+    result["execution_architecture"] = architecture
+    result["label"] = backendLabel(backend, host, architecture)
+    command = executionCommand(architecture, result["executable"], host, env)
+    result["execution_command"] = command
+  rounds = []
   for roundIndex in range(options.warmups + options.samples):
     offset = roundIndex % len(backends)
     order = backends[offset:] + backends[:offset]
+    rounds.append(order)
     for backend in order:
       result = results[backend]
-      command = executionCommand(backend, result["executable"], host, env)
-      response, wallNs = runCommand(command, options.timeout, env)
+      response, wallNs = runCommand(result["execution_command"], options.timeout, env)
       parsed = parseOutput(response.stdout, size, repeat)
       if response.stderr:
         raise BenchmarkError(f"Unexpected renderer stderr ({backend}): " +
@@ -392,19 +449,11 @@ def benchmark(size, repeat, options, backends, host, env):
         result["process_wall_ns"].append(wallNs)
         result["clock_fields"].append(parsed["clock_fields"])
   for backend, result in results.items():
-    architectures = binaryArchitectures(Path(result["executable"]))
-    preferred = backend if backend != "c" else host["physical_architecture"]
-    architecture = (preferred if preferred in architectures else
-                    architectures[0] if architectures else "unknown")
-    if backend != "c" and architecture != backend:
-      raise BenchmarkError(f"Wrong executable architecture for {backend}: {architectures}")
-    result["execution_architecture"] = architecture
-    result["label"] = backendLabel(backend, host, architecture)
     result["render_ns_per_frame"] = summarize(result["render_ns_per_frame"])
     result["process_wall_ns"] = summarize(result["process_wall_ns"])
     result["checksum"] = sum(expected)
     result["pixel_sha256"] = hashlib.sha256(expected).hexdigest()
-  return {"size": size, "repeat": repeat,
+  return {"size": size, "repeat": repeat, "round_order": rounds,
           "independent_golden": str(referencePath) if golden is not None else None,
           "correctness": "independent golden and exact cross-run RGB" if golden
                          is not None else "exact cross-run RGB; no independent golden",
@@ -413,9 +462,10 @@ def benchmark(size, repeat, options, backends, host, env):
 
 def parseArguments(arguments=None):
   """Validate bounded configuration before invoking any compiler."""
-  parser = argparse.ArgumentParser(description=__doc__)
+  parser = argparse.ArgumentParser(description=__doc__,
+      epilog="Standalone C baseline details: benchmarks/C_STRAIGHT.md")
   parser.add_argument("--backend", action="append", default=[],
-                      help="Repeat or use comma-separated c,arm64,amd64,wasm64 (alias wasm)")
+                      help="Repeat or use comma-separated hand-asm,hand-c,c,arm64,amd64,wasm64 (aliases c-straight and wasm)")
   parser.add_argument("--size", type=int, default=64)
   parser.add_argument("--samples", type=int, default=5)
   parser.add_argument("--warmups", type=int, default=1)
@@ -425,6 +475,12 @@ def parseArguments(arguments=None):
   parser.add_argument("--compiler", type=Path, default=Root / "nifty")
   parser.add_argument("--source", type=Path,
                       default=Root / "benchmarks" / "raytracer.nifty")
+  parser.add_argument("--hand-c-source", "--straight-c-source", dest="straight_c_source", type=Path,
+                      default=Root / "benchmarks" / "raytracer_straight.c")
+  parser.add_argument("--hand-asm-source", type=Path,
+                      default=Root / "benchmarks" / "arm64" / "raytracer_hand.S")
+  parser.add_argument("--cc", default=os.environ.get("CC", "cc"),
+                      help="C compiler for standalone and Nifty-generated C")
   parser.add_argument("--timeout", type=float, default=300,
                       help="Seconds allowed for each build or process")
   parser.add_argument("--emit-ir", action="store_true",
@@ -443,13 +499,13 @@ def parseArguments(arguments=None):
   selected = []
   for entry in options.backend:
     for backend in entry.split(","):
-      backend = "wasm64" if backend == "wasm" else backend
-      if backend not in Backends:
+      backend = {"hand-c": "c-straight", "wasm": "wasm64"}.get(backend, backend)
+      if backend not in RayBackends:
         parser.error(f"unknown backend: {backend}")
       if backend not in selected:
         selected.append(backend)
-  options.backend = selected
-  for name in ("compiler", "source", "output"):
+  options.backend = [backend for backend in RayBackends if backend in selected]
+  for name in ("compiler", "source", "straight_c_source", "hand_asm_source", "output"):
     setattr(options, name, getattr(options, name).expanduser().resolve())
   return options
 
@@ -462,7 +518,8 @@ def markdownReport(report, wall):
            "Render times use the renderer's monotonic clock and exclude startup, "
            "final checksum, RGB formatting, and PNG writing. Values are per frame. "
            "Each timed frame includes an RGB checksum reduction to keep every "
-           "repetition observable.", "",
+           "repetition observable. Each sample starts a fresh process; first-use "
+           "execution and translation within the loop remain timed.", "",
            "| Backend | Compile (ms) | Render median (ms) | Min (ms) | Max (ms) |",
            "| --- | ---: | ---: | ---: | ---: |"]
   for result in benchmarkResult["backends"]:
@@ -483,14 +540,31 @@ def markdownReport(report, wall):
 def main(arguments=None):
   """Publish timing artifacts only after every correctness check succeeds."""
   options = parseArguments(arguments)
-  if not options.compiler.is_file() or not os.access(options.compiler, os.X_OK):
-    raise BenchmarkError(f"Compiler is not executable: {options.compiler}")
-  if not options.source.is_file():
-    raise BenchmarkError(f"Renderer source does not exist: {options.source}")
   host = hostInfo()
-  available = availableBackends(host, options.compiler, includeWasm=True)
-  backends = options.backend or [backend for backend in available
-                                 if backend != "wasm64"]
+  if host["system"] not in ("Darwin", "Linux") or getattr(time, "CLOCK_MONOTONIC", None) is None:
+    raise BenchmarkError("Ray timing requires POSIX clock_gettime on macOS or Linux")
+  options.cc = shutil.which(options.cc)
+  handAsmSupported = (host["system"] == "Darwin" and
+                      host["physical_architecture"] == "arm64" and options.cc)
+  if "hand-asm" in options.backend and not handAsmSupported:
+    raise BenchmarkError("Hand ASM requires macOS on physical ARM64 and a C compiler")
+  needsNifty = not options.backend or any(
+    backend in Backends for backend in options.backend)
+  if needsNifty:
+    if not options.compiler.is_file() or not os.access(options.compiler, os.X_OK):
+      raise BenchmarkError(f"Compiler is not executable: {options.compiler}")
+    if not options.source.is_file():
+      raise BenchmarkError(f"Renderer source does not exist: {options.source}")
+  available = availableBackends(host, options.compiler, includeWasm=True) if needsNifty else []
+  if options.cc:
+    available.insert(0, "c-straight")
+    if handAsmSupported:
+      available.insert(0, "hand-asm")
+    if needsNifty and "c" not in available:
+      available.append("c")
+  else:
+    available = [backend for backend in available if backend != "c"]
+  backends = options.backend or [backend for backend in RayBackends if backend in available]
   if not backends:
     raise BenchmarkError("No executable backend is available on this host")
   for backend in backends:
@@ -501,10 +575,30 @@ def main(arguments=None):
       raise BenchmarkError(f"Backend {backend} is unsupported on this host or its "
                            "runtime template is unavailable; available: " +
                            ", ".join(available))
+  standalone = any(backend in ("hand-asm", "c-straight") for backend in backends)
+  if standalone and not options.straight_c_source.is_file():
+    raise BenchmarkError(f"Standalone C source does not exist: {options.straight_c_source}")
+  inputs = ([options.compiler, options.source] if needsNifty else [])
+  if standalone:
+    inputs.append(options.straight_c_source)
+  if "hand-asm" in backends:
+    if not options.hand_asm_source.is_file():
+      raise BenchmarkError(f"Hand ASM source does not exist: {options.hand_asm_source}")
+    inputs.append(options.hand_asm_source)
+    assemblyManifest = options.hand_asm_source.with_name("raytracer_manifest.json")
+    if assemblyManifest.is_file():
+      inputs.append(assemblyManifest)
+  if options.cc and any(backend in ("c", "c-straight", "hand-asm") for backend in backends):
+    inputs.append(Path(options.cc))
+  if "wasm64" in backends:
+    inputs.append(Path(wasmtimeExecutable()))
+  fingerprints = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
   options.output.mkdir(parents=True, exist_ok=True)
   for name in ("results.json", "results.md", "raytracer.png"):
     (options.output / name).unlink(missing_ok=True)
   env = os.environ.copy()
+  if options.cc:
+    env["CC"] = options.cc
   for backend in ("arm64", "amd64"):
     template = options.compiler.parent / f"nifty-runtime-{backend}"
     if template.is_file():
@@ -519,28 +613,39 @@ def main(arguments=None):
         checks.append(checked)
   result, pixels = benchmark(options.size, options.repeat, options, backends,
                              host, env)
+  if any(hashlib.sha256(path.read_bytes()).hexdigest() != value
+         for path, value in fingerprints.items()):
+    raise BenchmarkError("Compiler or renderer source changed during benchmark")
   imagePath = options.output / "raytracer.png"
   writePng(imagePath, options.size, pixels)
   manifest = Root / "benchmarks" / "reference" / "manifest.json"
+  provenance = Root / "benchmarks" / "reference" / "c_straight.json"
   report = {
     "schema": "nifty-ray-benchmark-v1", "machine": host,
-    "toolchain": {"compiler": str(options.compiler),
-                  "compiler_architectures": binaryArchitectures(options.compiler),
-                  "compiler_sha256": hashlib.sha256(
-                    options.compiler.read_bytes()).hexdigest(),
-                  "compiler_help": optionalCommand([str(options.compiler), "--help"]),
-                  "cc": optionalCommand(["cc", "--version"]),
+    "toolchain": {"compiler": str(options.compiler) if needsNifty else None,
+                  "compiler_architectures": binaryArchitectures(options.compiler) if needsNifty else [],
+                  "compiler_sha256": fingerprints.get(options.compiler),
+                  "compiler_help": optionalCommand([str(options.compiler), "--help"]) if needsNifty else None,
+                  "cc": optionalCommand([options.cc, "--version"]) if options.cc else None,
+                  "cc_path": options.cc,
+                  "straight_c_flags": StraightCFlags if standalone else None,
+                  "hand_asm_flags": StraightCFlags + ["-DRAY_HAND_ASM", "-arch", "arm64"] if "hand-asm" in backends else None,
                   "nim": optionalCommand(["nim", "--version"]),
-                  "wasmtime": optionalCommand([wasmtimeExecutable(), "--version"])
-                  if "wasm64" in backends else None},
+                  "wasmtime": engineMetadata(backends)},
     "settings": {"size": options.size, "samples": options.samples,
                  "warmups": options.warmups, "repeat": options.repeat,
                  "backends": backends, "timeout_seconds": options.timeout,
-                 "source": str(options.source), "source_sha256": hashlib.sha256(
-                   options.source.read_bytes()).hexdigest(),
+                 "source": str(options.source) if needsNifty else None,
+                 "source_sha256": fingerprints.get(options.source),
+                 "straight_c_source": str(options.straight_c_source) if standalone else None,
+                 "hand_asm_source": str(options.hand_asm_source) if "hand-asm" in backends else None,
                  "sample_order": "rotate backend order each warmup/sample round",
                  "native_ir": options.emit_ir},
     "reference_manifest": json.loads(manifest.read_text()) if manifest.is_file() else None,
+    "inputs_sha256": {str(path): value for path, value in fingerprints.items()},
+    "straight_c_provenance": json.loads(provenance.read_text())
+        if "c-straight" in backends and provenance.is_file() and
+        options.straight_c_source == Root / "benchmarks" / "raytracer_straight.c" else None,
     "checks": checks, "benchmark": result, "image": str(imagePath),
   }
   markdown = markdownReport(report, options.wall)

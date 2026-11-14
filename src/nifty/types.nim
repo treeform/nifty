@@ -1,6 +1,6 @@
 ## The AST and type representation shared by the parser, checker, and codegen.
 
-import std/tables
+import std/[sets, tables]
 import lexer, common
 
 type
@@ -10,6 +10,7 @@ type
     ChannelType, # channel[N, T]: a blocking bounded queue (the semaphore system)
     TypeVarType, # a generic $T waiting to be bound at instantiation
     FloatType, # IEEE float32/float64: data values, outside the proof engine
+    UnionType, # A tagged union of nominal object alternatives.
     OpaqueType, # nominal foreign pointer; only null testing and equality
     CStringType # Immutable owned NUL-terminated bytes; borrowed pointer at FFI.
   Field* = object
@@ -22,6 +23,8 @@ type
     elem*: Typ           # ArrayType/SeqType; SetType: the range element type
     name*: string        # ObjectType/OpaqueType: nominal identity
     fields*: seq[Field]  # ObjectType
+    members*: seq[Typ]   # UnionType alternatives in declaration order.
+    typeId*: int64       # Canonical identity within the checked program.
     val*: Typ            # DenseMapType/SparseMapType: the value type
     rlo*, rhi*: int64    # IntType: declared range; full range = plain int
     opt*: bool           # T?: an optional (value + ok flag)
@@ -58,7 +61,11 @@ type
   ExprKind* = enum
     IntExpr, FloatExpr, BoolExpr, StrExpr, IdentExpr, BinExpr, NotExpr, NegExpr, IndexExpr, CallExpr,
     FieldExpr, MethodExpr, # MethodExpr: builtin op on a container, kids[0] = base
-    NoneExpr # the absent optional value; typed by its destination
+    NoneExpr, # The absent optional value; typed by its destination.
+    ObjectExpr, # Constructor payloads in declaration field order.
+    UnionWrapExpr, # kids[0] is the concrete payload; typ is the union.
+    UnionProjectExpr, # Proven concrete payload view into kids[0].
+    TypeIdExpr # kids[0] is evaluated; ival=0 loads a union tag.
   Expr* = ref object
     kind*: ExprKind
     line*: int
@@ -71,6 +78,7 @@ type
     typ*: Typ       # set by the checker
     binding*: BindingId # Resolved declaration; zero for non-binding nodes.
     borrowedView*: bool # Checked fixed storage to growable readonly view.
+    directCall*: bool # Synthesized call already has a resolved callee.
     symKind*: SymKind
     isVarParam*: bool
     mut*: bool
@@ -137,6 +145,7 @@ type
     bodyScope*: int
     externLib*: string         # extern routines: the library ("libc", ...)
     cname*: string             # extern routines: the C symbol, if renamed
+    unionDispatcher*: bool    # Synthesized exhaustive union overload.
     generic*: bool             # has $ variables; body kept as tokens
     toks*: seq[Token]          # generic only: the whole declaration
     constsSnap*: Table[string, int64] # consts visible at declaration
@@ -166,6 +175,7 @@ type
     moduleLookups*: seq[ModuleLookup]
     sourceNames*: Table[string, string]
     files*: seq[string]
+    typeIds*: Table[string, int64] # Build-local, collision-free identities.
 
 const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
   "put", "remove", "setLen", "addByte", "addNum", "copyRange",
@@ -187,29 +197,37 @@ proc deOpt*(t: Typ): Typ =
   if t == nil or not t.opt:
     return t
   Typ(kind: t.kind, len: t.len, elem: t.elem, name: t.name,
-    fields: t.fields, val: t.val, rlo: t.rlo, rhi: t.rhi, opt: false,
+    fields: t.fields, members: t.members, val: t.val,
+    rlo: t.rlo, rhi: t.rhi, opt: false,
     width: t.width, dname: t.dname, dynamic: t.dynamic,
     gname: t.gname, lenVar: t.lenVar)
 
 proc optOf*(t: Typ): Typ =
   ## The optional flavor of a type (a copy with the flag set).
   Typ(kind: t.kind, len: t.len, elem: t.elem, name: t.name,
-    fields: t.fields, val: t.val, rlo: t.rlo, rhi: t.rhi, opt: true,
+    fields: t.fields, members: t.members, val: t.val,
+    rlo: t.rlo, rhi: t.rhi, opt: true,
     width: t.width, dname: t.dname, dynamic: t.dynamic,
     gname: t.gname, lenVar: t.lenVar)
 
 proc hasOwned*(t: Typ): bool =
   ## Whether a value owns heap storage directly or through its contents.
-  if t.isNil:
-    return false
-  if t.dynamic:
-    return true
-  if hasOwned(t.elem) or hasOwned(t.val):
-    return true
-  for field in t.fields:
-    if hasOwned(field.typ):
+  var seen: HashSet[pointer]
+  proc visit(current: Typ): bool =
+    ## Walks recursive type graphs without following a node twice.
+    if current.isNil or cast[pointer](current) in seen:
+      return false
+    seen.incl(cast[pointer](current))
+    if current.dynamic or visit(current.elem) or visit(current.val):
       return true
-  false
+    for field in current.fields:
+      if visit(field.typ):
+        return true
+    for member in current.members:
+      if visit(member):
+        return true
+    false
+  visit(t)
 
 proc intType*(lo = low(int64), hi = high(int64)): Typ =
   ## An int type, optionally restricted to a declared range.
@@ -256,70 +274,110 @@ proc sizeAlign*(bytes, alignment: int64, line = 0): int64 =
   if remainder == 0: bytes
   else: sizeAdd(bytes, alignment - remainder, line)
 
-proc typeAlign*(t: Typ): int64 =
-  case t.kind
-  of BoolType:
-    result = 1
-  of IntType, FloatType:
-    result = if t.width > 0: t.width else: 8
-  of ArrayType:
-    result = typeAlign(t.elem)
-  of ObjectType:
-    result = 1
-    for f in t.fields:
-      result = max(result, typeAlign(f.typ))
-  else:
-    result = 8 # containers (int64 length field first), Lock
+proc typeLayout(t: Typ, line = 0): tuple[bytes, alignment: int64] =
+  ## Computes finite inline layouts while allowing growable indirection.
+  var visiting: HashSet[pointer]
+  proc layout(current: Typ): tuple[bytes, alignment: int64] =
+    ## Rejects only cycles that require infinitely large inline storage.
+    if current.isNil:
+      return (0'i64, 1'i64)
+    let key = cast[pointer](current)
+    if key in visiting:
+      err(line, "recursive type requires a growable seq indirection")
+    visiting.incl(key)
+    defer: visiting.excl(key)
+    if current.opt:
+      let base = layout(deOpt(current))
+      return (sizeAlign(sizeAdd(base.bytes, 1, line),
+        base.alignment, line), base.alignment)
+    case current.kind
+    of BoolType:
+      result = (1'i64, 1'i64)
+    of IntType, FloatType:
+      let width = if current.width > 0: int64(current.width) else: 8'i64
+      result = (width, width)
+    of OpaqueType:
+      result = (8'i64, 8'i64)
+    of CStringType:
+      result = (24'i64, 8'i64)
+    of ArrayType:
+      let item = layout(current.elem)
+      result = (sizeMul(current.len, item.bytes, line), item.alignment)
+    of SeqType, StringType:
+      result.alignment = 8
+      if current.dynamic:
+        result.bytes = 24
+      else:
+        let bytes =
+          if current.kind == StringType: current.len
+          else: sizeMul(current.len, layout(current.elem).bytes, line)
+        result.bytes = sizeAlign(sizeAdd(8, bytes, line), 8, line)
+    of SetType:
+      result = (sizeAdd(8,
+        sizeMul(sizeAdd(current.setSize, 63, line) div 64, 8, line),
+        line), 8'i64)
+    of QueueType, ChannelType:
+      let header = if current.kind == ChannelType: 176'i64 else: 16'i64
+      result = (sizeAlign(sizeAdd(header,
+        sizeMul(current.len, layout(current.elem).bytes, line), line),
+        8, line), 8'i64)
+    of DenseMapType:
+      let bytes = sizeAdd(sizeAdd(8,
+        sizeMul(sizeAdd(current.setSize, 63, line) div 64, 8, line), line),
+        sizeMul(current.setSize, layout(current.val).bytes, line), line)
+      result = (sizeAlign(bytes, 8, line), 8'i64)
+    of SparseMapType:
+      let bytes = sizeAdd(8, sizeAdd(
+        sizeMul(current.len, layout(current.elem).bytes, line),
+        sizeMul(current.len, layout(current.val).bytes, line), line), line)
+      result = (sizeAlign(bytes, 8, line), 8'i64)
+    of ObjectType:
+      result.alignment = 1
+      for field in current.fields:
+        let item = layout(field.typ)
+        result.alignment = max(result.alignment, item.alignment)
+        result.bytes = sizeAlign(result.bytes, item.alignment, line)
+        result.bytes = sizeAdd(result.bytes, item.bytes, line)
+      result.bytes = sizeAlign(max(1'i64, result.bytes),
+        result.alignment, line)
+    of UnionType:
+      result.alignment = 8
+      var payload = 0'i64
+      for member in current.members:
+        let item = layout(member)
+        result.alignment = max(result.alignment, item.alignment)
+        payload = max(payload, item.bytes)
+      result.bytes = sizeAlign(sizeAdd(
+        sizeAlign(8, result.alignment, line), payload, line),
+        result.alignment, line)
+    else:
+      result = (0'i64, 8'i64)
+  layout(t)
 
-proc bigRet*(t: Typ): bool
-  ## Returns of arrays (C cannot) and of values bigger than the arena
-  ## threshold go through a caller-provided destination pointer instead
-  ## of a by-value C return, so no copy ever lands on the C stack.
+proc typeAlign*(t: Typ): int64 =
+  ## Returns the common alignment used by all compiler backends.
+  typeLayout(t).alignment
 
 proc typeSize*(t: Typ, line = 0): int64 =
-  ## Computes representable C layout size, including checked padding.
-  if t.opt:
-    let base = deOpt(t)
-    return sizeAlign(sizeAdd(typeSize(base, line), 1, line),
-      typeAlign(base), line)
-  case t.kind
-  of BoolType: 1
-  of IntType: (if t.width > 0: t.width else: 8)
-  of OpaqueType: 8
-  of FloatType: t.width
-  of ArrayType: sizeMul(t.len, typeSize(t.elem, line), line)
-  of SeqType:
-    if t.dynamic: 24
-    else: sizeAlign(sizeAdd(8,
-      sizeMul(t.len, typeSize(t.elem, line), line), line), 8, line)
-  of CStringType: 24
-  of StringType:
-    if t.dynamic: 24
-    else: sizeAlign(sizeAdd(8, t.len, line), 8, line)
-  of SetType:
-    sizeAdd(8, sizeMul(sizeAdd(t.setSize, 63, line) div 64, 8, line), line)
-  of QueueType:
-    sizeAlign(sizeAdd(16,
-      sizeMul(t.len, typeSize(t.elem, line), line), line), 8, line)
-  of ChannelType:
-    # Ring plus the embedded mutex and two conditions (Darwin sizes).
-    sizeAlign(sizeAdd(176,
-      sizeMul(t.len, typeSize(t.elem, line), line), line), 8, line)
-  of DenseMapType:
-    sizeAlign(sizeAdd(sizeAdd(8,
-      sizeMul(sizeAdd(t.setSize, 63, line) div 64, 8, line), line),
-      sizeMul(t.setSize, typeSize(t.val, line), line), line), 8, line)
-  of SparseMapType:
-    sizeAlign(sizeAdd(8, sizeAdd(
-      sizeMul(t.len, typeSize(t.elem, line), line),
-      sizeMul(t.len, typeSize(t.val, line), line), line), line), 8, line)
-  of ObjectType:
-    var off = 0'i64
-    for f in t.fields:
-      off = sizeAlign(off, typeAlign(f.typ), line)
-      off = sizeAdd(off, typeSize(f.typ, line), line)
-    sizeAlign(off, typeAlign(t), line)
-  else: 0 # Lock is platform-sized; generic types are not concrete yet.
+  ## Computes representable storage size, including checked padding.
+  typeLayout(t, line).bytes
+
+proc unionPayloadOffset*(t: Typ): int64 =
+  ## Locates the inline payload immediately after its 64-bit tag.
+  sizeAlign(8, typeAlign(t))
+
+proc unionMember*(union, member: Typ): bool =
+  ## Tests membership by nominal type identity, never by payload shape.
+  if union.isNil or member.isNil or union.kind != UnionType:
+    return false
+  for candidate in union.members:
+    if candidate.kind == member.kind and candidate.name == member.name and
+        candidate.opt == member.opt:
+      return true
+  false
+
+proc bigRet*(t: Typ): bool
+  ## Identifies returns that require a caller-provided destination.
 
 proc sameStorage(a, b: Typ): bool =
   ## Match scalar carriers inside otherwise compatible aggregate types.
@@ -360,7 +418,7 @@ proc typeEq*(a, b: Typ): bool =
     return a.len == b.len and typeEq(a.elem, b.elem) and
       sameStorage(a.elem, b.elem) and
       typeEq(a.val, b.val) and sameStorage(a.val, b.val)
-  if a.kind in {ObjectType, OpaqueType}:
+  if a.kind in {ObjectType, UnionType, OpaqueType}:
     return a.name == b.name
   if a.kind == ChannelType:
     return false # channels are never copied or compared
@@ -396,8 +454,113 @@ proc `$`*(t: Typ): string =
   of ChannelType: "channel[" & t.sizeStr & ", " & $t.elem & "]"
   of DenseMapType: "map[" & $t.elem & ", " & $t.val & "]"
   of SparseMapType: "map[" & $t.len & ", " & $t.elem & ", " & $t.val & "]"
-  of ObjectType, OpaqueType: t.name
+  of ObjectType, UnionType, OpaqueType: t.name
   of TypeVarType: "$" & t.gname
 
 proc bigRet*(t: Typ): bool =
   t != nil and (t.kind == ArrayType or typeSize(t) > arenaThreshold)
+
+proc needsDefaultInit*(t: Typ): bool =
+  ## Finds inline default values that need a valid nonzero union tag.
+  var seen: HashSet[pointer]
+  proc visit(current: Typ): bool =
+    ## Empty containers and absent optionals have no active payloads.
+    if current.isNil or current.opt or current.dynamic or
+        cast[pointer](current) in seen:
+      return false
+    seen.incl(cast[pointer](current))
+    case current.kind
+    of UnionType:
+      return true
+    of ObjectType:
+      for field in current.fields:
+        if visit(field.typ):
+          return true
+    of ArrayType:
+      return visit(current.elem)
+    else:
+      discard
+    false
+  visit(t)
+
+proc typeIdentity*(t: Typ): string =
+  ## Canonicalizes program-local identities without relying on hashes.
+  if t.isNil:
+    return "void"
+  if t.opt:
+    return "optional[" & typeIdentity(deOpt(t)) & "]"
+  case t.kind
+  of ObjectType:
+    "object:" & t.name
+  of UnionType:
+    "union:" & t.name
+  of IntType:
+    "int[" & $(if t.width == 0: 8 else: t.width) & "," &
+      $t.rlo & "," & $t.rhi & "]"
+  of FloatType:
+    "float[" & $t.width & "]"
+  of TypeVarType:
+    "variable:" & t.gname
+  of ArrayType, SeqType, StringType, SetType, QueueType, ChannelType,
+      DenseMapType, SparseMapType:
+    $t.kind & "[" & $t.dynamic & "," & $t.len & "," & t.lenVar &
+      "," & typeIdentity(t.elem) & "," & typeIdentity(t.val) & "]"
+  else:
+    $t.kind
+
+proc ensureTypeId*(m: Module, t: Typ): int64 =
+  ## Assigns a unique identity shared by all equivalent type nodes.
+  if t.isNil:
+    return 0
+  let key = typeIdentity(t)
+  if key notin m.typeIds:
+    m.typeIds[key] = int64(m.typeIds.len + 1)
+  result = m.typeIds[key]
+  t.typeId = result
+
+proc assignTypeIds*(m: Module) =
+  ## Interns every type reachable from parsed or checked declarations.
+  var seen: HashSet[pointer]
+  proc visit(t: Typ) =
+    ## Assigns identity before traversing recursive nominal definitions.
+    if t.isNil or cast[pointer](t) in seen:
+      return
+    seen.incl(cast[pointer](t))
+    discard m.ensureTypeId(t)
+    visit(t.elem)
+    visit(t.val)
+    for field in t.fields:
+      visit(field.typ)
+    for member in t.members:
+      visit(member)
+  proc expression(e: Expr) =
+    ## Includes inferred and synthesized expression types after checking.
+    if e.isNil:
+      return
+    visit(e.typ)
+    visit(e.wrapSource)
+    for child in e.kids:
+      expression(child)
+  proc statements(body: seq[Stmt]) =
+    ## Includes local annotations and nested checked expression types.
+    for s in body:
+      visit(s.typ)
+      visit(s.typ2)
+      for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
+        expression(e)
+      for e in s.args:
+        expression(e)
+      statements(s.body)
+      for branch in s.elifs:
+        expression(branch.cond)
+        statements(branch.body)
+      statements(s.elseBody)
+  for definition in m.types:
+    visit(definition.typ)
+  for global in m.globals:
+    visit(global.typ)
+  for routine in m.routines:
+    for parameter in routine.params:
+      visit(parameter.typ)
+    visit(routine.ret)
+    statements(routine.body)

@@ -1,0 +1,39 @@
+object Left =
+  value: int
+
+object Right =
+  value: int
+
+type Choice = Left or Right
+
+proc identify(value: Choice) =
+  echo "union"
+
+proc identify(value: Left) =
+  echo "left ", value.value
+
+proc identify(value: Right) =
+  echo "right ", value.value
+
+proc inspect(value: Choice) =
+  identify(value)
+  if type(value) == Left:
+    identify(value)
+  else:
+    identify(value)
+
+func amount(value: Left): int =
+  return value.value
+
+func amount(value: Right): int =
+  return value.value
+
+thread main() =
+  var value: Choice = Left(7)
+  identify(value)
+  inspect(value)
+  echo amount(value)
+  value = Right(8)
+  inspect(value)
+  echo amount(value)
+  echo type(Left(1)) == type(Right(1))

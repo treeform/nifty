@@ -1,0 +1,186 @@
+import "../lib/json"
+
+# The runner substitutes workload constants and the host monotonic clock ID.
+const Records = 128
+const Repetitions = 10
+const ClockId = 6
+
+object Timespec =
+  sec: int64
+  nsec: int64
+
+object ParseResult =
+  ok: bool
+  checksum: int
+  error: JsonError
+
+extern "libc":
+  proc clock_gettime(clock: int32, value: var Timespec): int32
+
+func feed(checksum: int, byte: int): int =
+  # Keeps the streaming digest bounded without machine integer overflow.
+  if checksum >= 0 and checksum < 1000000007 and byte >= 0 and byte <= 255:
+    return (checksum * 257 + byte) % 1000000007
+  return -1
+
+func digestText(text: string, checksum: int): int =
+  # Consumes all UTF-8 bytes, including embedded NUL, then a delimiter.
+  var value = checksum
+  for i in 0 ..< text.len:
+    if i >= 0 and i < text.len:
+      value = feed(value, text[i])
+  return feed(value, 0)
+
+proc digest0(node: JsonNode, checksum: int): int =
+  # Traverses borrowed nodes with a statically bounded fixture depth.
+  if type(node) == NullNode:
+    return feed(checksum, 1)
+  elif type(node) == BoolNode:
+    var value = feed(checksum, 2)
+    if node.value:
+      value = feed(value, 1)
+    else:
+      value = feed(value, 0)
+    return value
+  elif type(node) == NumNode:
+    return digestText(node.text, feed(checksum, 3))
+  elif type(node) == StrNode:
+    return digestText(node.value, feed(checksum, 4))
+  elif type(node) == ArrNode:
+    if node.items.len == 0:
+      return feed(feed(checksum, 5), 255)
+  else:
+    if type(node) == ObjNode:
+      if node.fields.len == 0:
+        return feed(feed(checksum, 6), 255)
+  return -1
+
+proc digest1(node: JsonNode, checksum: int): int =
+  # Consumes one container level and borrows children at the next level.
+  if type(node) == ArrNode:
+    var value = feed(checksum, 5)
+    for i in 0 ..< node.items.len:
+      if i >= 0 and i < node.items.len:
+        value = digest0(node.items[i], value)
+    return feed(value, 255)
+  elif type(node) == ObjNode:
+    var value = feed(checksum, 6)
+    for i in 0 ..< node.fields.len:
+      if i >= 0 and i < node.fields.len:
+        value = digestText(node.fields[i].name, value)
+        value = digest0(node.fields[i].value, value)
+    return feed(value, 255)
+  return digest0(node, checksum)
+
+proc digest2(node: JsonNode, checksum: int): int =
+  # Consumes one container level and borrows children at the next level.
+  if type(node) == ArrNode:
+    var value = feed(checksum, 5)
+    for i in 0 ..< node.items.len:
+      if i >= 0 and i < node.items.len:
+        value = digest1(node.items[i], value)
+    return feed(value, 255)
+  elif type(node) == ObjNode:
+    var value = feed(checksum, 6)
+    for i in 0 ..< node.fields.len:
+      if i >= 0 and i < node.fields.len:
+        value = digestText(node.fields[i].name, value)
+        value = digest1(node.fields[i].value, value)
+    return feed(value, 255)
+  return digest0(node, checksum)
+
+proc digest3(node: JsonNode, checksum: int): int =
+  # Consumes one container level and borrows children at the next level.
+  if type(node) == ArrNode:
+    var value = feed(checksum, 5)
+    for i in 0 ..< node.items.len:
+      if i >= 0 and i < node.items.len:
+        value = digest2(node.items[i], value)
+    return feed(value, 255)
+  elif type(node) == ObjNode:
+    var value = feed(checksum, 6)
+    for i in 0 ..< node.fields.len:
+      if i >= 0 and i < node.fields.len:
+        value = digestText(node.fields[i].name, value)
+        value = digest2(node.fields[i].value, value)
+    return feed(value, 255)
+  return digest0(node, checksum)
+
+proc digest4(node: JsonNode, checksum: int): int =
+  # Consumes one container level and borrows children at the next level.
+  if type(node) == ArrNode:
+    var value = feed(checksum, 5)
+    for i in 0 ..< node.items.len:
+      if i >= 0 and i < node.items.len:
+        value = digest3(node.items[i], value)
+    return feed(value, 255)
+  elif type(node) == ObjNode:
+    var value = feed(checksum, 6)
+    for i in 0 ..< node.fields.len:
+      if i >= 0 and i < node.fields.len:
+        value = digestText(node.fields[i].name, value)
+        value = digest3(node.fields[i].value, value)
+    return feed(value, 255)
+  return digest0(node, checksum)
+
+proc parseAndConsume(input: string): ParseResult =
+  # The local owning tree is destroyed before this timed call returns.
+  var tree: JsonNode
+  var result: ParseResult
+  result.checksum = -1
+  result.ok = parseJson(input, tree, result.error)
+  if result.ok:
+    result.checksum = digest4(tree, 0)
+  return result
+
+proc run() =
+  # Constructs input before timing and reports every parse after timing.
+  var input: string
+  if not input.add("["):
+    echo "setup_error opening"
+    return
+  for i in 0 ..< Records:
+    if i > 0:
+      if not input.add(","):
+        echo "setup_error comma"
+        return
+    # RecordText is the fixed JSON fixture literal.
+    if not input.add("{\"name\":\"Nifty\\nJSON\",\"unicode\":\"\\u00e9\\uD83D\\uDE03\",\"nul\":\"a\\u0000b\",\"integer\":9007199254740993,\"fraction\":-12.50e+2,\"enabled\":true,\"disabled\":false,\"nothing\":null,\"nested\":[1,\"x\",{\"k\":false},[]],\"empty\":{}}"):
+      echo "setup_error record"
+      return
+  if not input.add("]"):
+    echo "setup_error closing"
+    return
+  var started: Timespec
+  var finished: Timespec
+  var results: array[Repetitions, ParseResult]
+  let startStatus = clock_gettime(ClockId, started)
+  for repetition in 0 ..< Repetitions:
+    results[repetition] = parseAndConsume(input)
+  let finishStatus = clock_gettime(ClockId, finished)
+  var successes = 0
+  var batchChecksum = 0
+  echo "NIFTY_JSON_V1"
+  echo "records ", Records
+  echo "repeat ", Repetitions
+  echo "input_bytes ", input.len
+  echo "start_sec ", started.sec
+  echo "start_nsec ", started.nsec
+  echo "end_sec ", finished.sec
+  echo "end_nsec ", finished.nsec
+  echo "clock_status ", startStatus, " ", finishStatus
+  for repetition in 0 ..< Repetitions:
+    if results[repetition].ok:
+      successes = successes + 1
+  echo "successes ", successes
+  for repetition in 0 ..< Repetitions:
+    if not results[repetition].ok:
+      echo "parse_error ", repetition, " ", results[repetition].error.offset, " ", results[repetition].error.code, " ", results[repetition].error.message
+    echo "parse_checksum ", repetition, " ", results[repetition].checksum
+    let checksum = results[repetition].checksum
+    if batchChecksum >= 0 and batchChecksum <= 9223372035854775800 and checksum >= 0 and checksum < 1000000007:
+      batchChecksum = batchChecksum + checksum
+  echo "batch_checksum ", batchChecksum
+
+thread main() =
+  run()

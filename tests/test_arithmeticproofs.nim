@@ -120,8 +120,8 @@ let nativeLimit = "thread main() =\n" &
   "  var data: array[2147483648, uint8]\n" &
   "  data[0] = 1\n  echo data[0]\n"
 discard compileToC(nativeLimit, "native-limit.nifty")
-# The exact C arena includes the array and echo's fixed scratch buffer.
-doAssert "2147487760 bytes" in reportFor(nativeLimit, "native-limit.nifty")
+# The exact C arena includes the array and echo's planned helper storage.
+doAssert "2147491856 bytes" in reportFor(nativeLimit, "native-limit.nifty")
 var rejectedNative = false
 try:
   discard lowerNative(checkedModule(nativeLimit, "native-limit.nifty"))

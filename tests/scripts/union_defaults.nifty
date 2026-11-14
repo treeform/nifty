@@ -1,0 +1,42 @@
+object NumNode =
+  value: int
+
+object FlagNode =
+  value: bool
+
+type Node = NumNode or FlagNode
+
+object Holder =
+  node: Node
+
+var shared: Node
+
+func number(node: Node): int =
+  if type(node) == NumNode:
+    return node.value
+  return -1
+
+thread observer() =
+  discard number(shared)
+
+thread main() =
+  var node: Node
+  echo number(node), " ", number(shared)
+  node = FlagNode(false)
+  var holder: Holder
+  echo number(holder.node)
+  holder.node = FlagNode(false)
+  let constructed = Holder()
+  echo number(constructed.node)
+  var values: array[2, Node]
+  echo number(values[0]), " ", number(values[1])
+  values[0] = NumNode(0)
+  var dynamic: seq[Node]
+  echo dynamic.resize(2)
+  for value in dynamic:
+    echo number(value)
+  var fixed: seq[2, Node]
+  fixed.add(FlagNode(true))
+  fixed.add(NumNode(7))
+  for value in fixed:
+    echo number(value)

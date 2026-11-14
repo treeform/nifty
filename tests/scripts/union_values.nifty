@@ -1,0 +1,50 @@
+object NumNode =
+  value: int
+
+object TextNode =
+  value: string[16]
+
+object FlagNode =
+  value: bool
+
+type JsonLeaf = NumNode or TextNode or FlagNode
+
+func measure(node: NumNode): int =
+  return node.value
+
+func measure(node: TextNode): int =
+  return node.value.len
+
+func measure(node: FlagNode): int =
+  if node.value:
+    return 1
+  return 0
+
+func inspect(node: JsonLeaf): int =
+  if type(node) == NumNode:
+    return node.value
+  elif type(node) == TextNode:
+    return node.value.len
+  else:
+    if node.value:
+      return 1
+    return 0
+
+proc replace(node: var JsonLeaf) =
+  node = TextNode("changed")
+
+func number(value: int): JsonLeaf =
+  return NumNode(value)
+
+thread main() =
+  var node: JsonLeaf = NumNode(9)
+  echo measure(node), " ", inspect(node)
+  node = TextNode("hello")
+  echo measure(node), " ", inspect(node)
+  node = FlagNode(true)
+  echo measure(node), " ", inspect(node)
+  replace(node)
+  echo measure(node), " ", type(node) == TextNode
+  node = number(12)
+  echo inspect(node)
+  echo type(NumNode(1)) == NumNode

@@ -1,0 +1,21 @@
+import "../lib/snappy"
+
+proc roundTrip(input: string) =
+  # Compresses a string, then restores it with an explicit output limit.
+  var compressed: string
+  var restored: string
+  var error: SnappyError
+  if not compressSnappy(input, compressed, error):
+    echo "Compression failed: ", error.message
+    return
+  if not uncompressSnappy(compressed, restored, 1048576, error):
+    echo "Decompression failed at byte ", error.offset, ": ", error.message
+    return
+  echo "Original bytes: ", input.len
+  echo "Compressed bytes: ", compressed.len
+  echo "Restored bytes: ", restored.len
+  echo "Round trip: ", restored.len == input.len and restored.startsWith(input)
+  echo restored
+
+thread main() =
+  roundTrip("Snappy in Nifty! Snappy in Nifty! Snappy in Nifty! Snappy in Nifty!")

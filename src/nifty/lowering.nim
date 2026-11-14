@@ -1,6 +1,7 @@
 ## Lowers checked Nifty syntax to explicit native SSA and storage.
 import std/[tables, sets]
-import types, common, semantics, nativeplans, nativeirtypes, echolowering, backend/irs
+import types, common, semantics, nativeplans, nativeirtypes, nativecontainers,
+  echolowering, backend/irs
 
 type
   Binding = object
@@ -37,11 +38,13 @@ proc layout(g: var Lower, t: Typ): int =
     return g.layouts[key]
   result = g.plan.layouts.len
   g.layouts[key] = result
-  g.plan.layouts.add(NativeLayout())
+  # Recursive sequence elements may refer back before registration finishes.
+  g.plan.layouts.add(NativeLayout(bytes: typeSize(t), align: typeAlign(t),
+    typeId: t.typeId))
   var l = NativeLayout(kind: t.kind, align: 8, capacity: t.len,
     elem: -1, key: -1, val: -1, okOffset: -1, display: t.dname,
     lower: t.rlo, upper: t.rhi, optional: t.opt,
-    dynamic: t.dynamic, owned: hasOwned(t))
+    dynamic: t.dynamic, owned: hasOwned(t), typeId: t.typeId)
   if t.opt:
     let base = g.layout(deOpt(t))
     l = g.plan.layouts[base]
@@ -73,6 +76,13 @@ proc layout(g: var Lower, t: Typ): int =
         l.bytes += fl.bytes
         l.align = max(l.align, fl.align)
       l.bytes = int64(aligned(int(l.bytes), int(l.align)))
+      l.bytes = max(1'i64, l.bytes)
+    of UnionType:
+      l.align = typeAlign(t)
+      l.bytes = typeSize(t)
+      l.dataOffset = int(unionPayloadOffset(t))
+      for member in t.members:
+        l.members.add(g.layout(member))
     of CStringType:
       l.kind = StringType # Runtime owner descriptor; nominality is checked in the frontend.
       l.dynamic = true
@@ -533,6 +543,11 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
 proc path(g: var Lower, e: Expr): ValueId =
   ## Evaluates a storage path, including every index, left to right.
   case e.kind
+  of UnionProjectExpr:
+    result = g.offset(g.path(e.kids[0]),
+      int(unionPayloadOffset(e.kids[0].typ)))
+    g.plan.module.functions[g.fn].values[int32(result)].storage =
+      g.storage(e.typ)
   of IdentExpr:
     if e.symKind == GlobalSym:
       result = g.emit(IrInstruction(op: GlobalAddressOp,
@@ -603,6 +618,39 @@ proc expression(g: var Lower, e: Expr): ValueId =
       g.constant(1, irs.BoolType))
     return output
   case e.kind
+  of ObjectExpr:
+    result = g.allocType(e.typ)
+    g.clear(result, g.size(e.typ))
+    if e.kids.len == 0:
+      if needsDefaultInit(e.typ):
+        let host = NativeHost(kind: ContainerHost, operation: "initialize",
+          receiverType: g.layout(e.typ), resultType: -1)
+        g.hostCall(host, result, g.null, g.null)
+    else:
+      let layout = g.plan.layouts[g.layout(e.typ)]
+      for i, child in e.kids:
+        let field = layout.fields[i]
+        g.assignExpression(g.fieldAddress(result, field.name, field.offset),
+          child, e.typ.fields[i].typ)
+  of UnionWrapExpr:
+    result = g.allocType(e.typ)
+    g.clear(result, g.size(e.typ))
+    g.assignExpression(g.offset(result, int(unionPayloadOffset(e.typ))),
+      e.kids[0], e.kids[0].typ)
+    g.store(result, g.constant(e.kids[0].typ.typeId))
+  of UnionProjectExpr:
+    result = g.read(g.path(e), e.typ)
+    if aggregate(e.typ):
+      let captured = g.allocType(e.typ)
+      g.copy(captured, result, e.typ)
+      result = captured
+  of TypeIdExpr:
+    if e.ival > 0:
+      if e.kids.len > 0:
+        discard g.expression(e.kids[0])
+      result = g.constant(e.ival)
+    else:
+      result = g.load(g.path(e.kids[0]))
   of NoneExpr:
     result = g.allocType(e.typ)
     g.clear(result, g.size(e.typ))
@@ -753,7 +801,8 @@ proc assignExpression(g: var Lower, dest: ValueId, e: Expr, t: Typ) =
         (aggregate(t) or scalar(ret) == scalar(t)):
       discard g.routineCall(e, dest)
       return
-  if aggregate(t) and e.kind in {IdentExpr, FieldExpr, IndexExpr} and
+  if aggregate(t) and e.kind in
+      {IdentExpr, FieldExpr, IndexExpr, UnionProjectExpr} and
       not e.wrapOpt and not e.unwrapOpt:
     g.copy(dest, g.path(e), t)
     return
@@ -819,6 +868,10 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
     if s.init.isNil:
       if initialize:
         g.clear(p, g.size(s.typ))
+        if needsDefaultInit(s.typ):
+          let host = NativeHost(kind: ContainerHost, operation: "initialize",
+            receiverType: g.layout(s.typ), resultType: -1)
+          g.hostCall(host, p, g.null, g.null)
     else:
       g.assignExpression(p, s.init, s.typ)
     g.arena = retained
@@ -835,6 +888,12 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
       let p = g.path(s.lhs)
       if s.lhs.kind == IndexExpr and s.lhs.kids[0].typ.kind == StringType:
         g.store(p, g.convert(g.expression(s.rhs), UInt8Type))
+      elif hasOwned(s.lhs.typ):
+        let value = g.expression(s.rhs)
+        let host = NativeHost(kind: ContainerHost, operation: "drop",
+          receiverType: g.layout(s.lhs.typ), resultType: -1)
+        g.hostCall(host, p, g.null, g.null)
+        g.copy(p, value, s.lhs.typ)
       else:
         g.assignExpression(p, s.rhs, s.lhs.typ)
   of IfStmt:
@@ -1096,6 +1155,10 @@ proc lowerNative*(checked: Module, filename = "",
     g.plan.ownedGlobals.add(OwnedGlobal(offset: int(global.offset),
       layout: g.layout(owner.typ)))
   g.plan.initialData = newSeq[byte](g.plan.globalBytes)
+  for v in source.globals:
+    let global = g.plan.module.globals[g.globals[v.name]]
+    initializeValue(g.plan.layouts, g.layout(v.typ),
+      addr g.plan.initialData[int(global.offset)])
   g.plan.module.data = g.plan.initialData
   for fn in 0 ..< g.plan.module.functions.len:
     g.fn = fn

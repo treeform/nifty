@@ -53,9 +53,9 @@ for (name, source, label) in cases:
   if name == "silent":
     doAssert actual == 0
   elif name == "fixed":
-    doAssert actual > 4112
+    doAssert actual > 8208
   else:
-    doAssert actual == 4112
+    doAssert actual == 8208
   if name == "scalar":
     doAssert "main: 2 ops total" in value
   if name == "dynamic":

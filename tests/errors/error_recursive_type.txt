@@ -1,1 +1,1 @@
-error_recursive_type.nifty:2: unknown type: 'Node'
+error_recursive_type.nifty:1: recursive type requires a growable seq indirection

@@ -4,7 +4,7 @@ globals:
   total: 0 bytes
 
 stack, worst case per thread (estimate: locals + params + 16 bytes/frame; big locals are on the arena):
-  main: 4345 bytes (main -> niftyEchoSupport_echoInt -> niftyEchoSupport_echoText -> niftyEchoSupport_consoleWrite -> niftyEchoSupport_ioWriteChunk -> niftyEchoSupport_ioRawWrite)
+  main: 249 bytes (main -> niftyEchoSupport_echoInt -> niftyEchoSupport_echoText -> niftyEchoSupport_consoleWrite -> niftyEchoSupport_ioWriteChunk -> niftyEchoSupport_ioRawWrite)
 
 arena per thread (exact; big locals, allocated up front):
   main: 25165824 bytes (main -> layer -> crunch)

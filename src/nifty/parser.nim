@@ -1,8 +1,7 @@
 ## Recursive-descent parser: tokens -> Module AST.
-## Declare-before-use is enforced structurally: consts and types must exist
-## before they are referenced in later declarations.
+## Named type shapes support forward references; routines retain source order.
 
-import std/[strutils, tables]
+import std/[strutils, tables, sequtils]
 import common, lexer, types
 
 type
@@ -11,6 +10,10 @@ type
     pos: int
     consts: Table[string, int64] # needed at parse time for array lengths
     types: Table[string, Typ]    # declared object types
+    optionals: seq[tuple[source, target: Typ]]
+    pendingSizes: seq[tuple[typ: Typ, line: int]]
+    predeclared: bool
+    aliases: Table[string, Typ]
     allowTypeVar: bool           # $names legal (generic parameter lists only)
     symbolicExpr: bool           # Scan clause boundaries in deferred generic bodies.
 
@@ -161,12 +164,13 @@ proc parseTypeCore(p: var Parser): Typ =
       if not dynamic:
         p.expectOp(",")
       let e = p.parseType()
-      if e.kind == LockType:
+      if not p.predeclared and e.kind == LockType:
         err(t.line, "Lock cannot be a " & t.text & " element")
-      if t.text in ["seq", "queue", "channel"] and e.kind == ArrayType:
+      if not p.predeclared and
+          t.text in ["seq", "queue", "channel"] and e.kind == ArrayType:
         err(t.line, "a " & t.text & " element cannot be a plain array; " &
           "wrap it in an object")
-      if e.kind == ChannelType:
+      if not p.predeclared and e.kind == ChannelType:
         err(t.line, "a channel can only be a global, not a " & t.text &
           " element")
       p.expectOp("]")
@@ -194,7 +198,7 @@ proc parseTypeCore(p: var Parser): Typ =
           err(t.line, "map key range is too large (max 16777216 keys)")
         p.expectOp(",")
         let v = p.parseType()
-        if v.kind in {LockType, ChannelType, ArrayType}:
+        if not p.predeclared and v.kind in {LockType, ChannelType, ArrayType}:
           err(t.line, "a map value cannot be a " & $v &
             "; wrap arrays in an object")
         p.expectOp("]")
@@ -204,12 +208,12 @@ proc parseTypeCore(p: var Parser): Typ =
           err(t.line, "map capacity must be positive")
         p.expectOp(",")
         let k = p.parseType()
-        if not (k.kind == IntType or k.kind == StringType) or
-            k.opt or k.dynamic:
+        if not p.predeclared and
+            (k.kind notin {IntType, StringType} or k.opt or k.dynamic):
           err(t.line, "map keys must be ints (or ranges) or string[N], got " & $k)
         p.expectOp(",")
         let v = p.parseType()
-        if v.kind in {LockType, ChannelType, ArrayType}:
+        if not p.predeclared and v.kind in {LockType, ChannelType, ArrayType}:
           err(t.line, "a map value cannot be a " & $v &
             "; wrap arrays in an object")
         p.expectOp("]")
@@ -217,10 +221,12 @@ proc parseTypeCore(p: var Parser): Typ =
     of "set":
       p.expectOp("[")
       let e = p.parseType()
-      if e.kind != IntType or e.isFullRange or e.opt:
+      if not p.predeclared and
+          (e.kind != IntType or e.isFullRange or e.opt):
         err(t.line, "set needs a range element type, e.g. set[0 .. 63]")
-      if e.rlo < -1_000_000_000 or e.rhi > 1_000_000_000 or
-          e.rhi - e.rlo + 1 > 16_777_216:
+      if not p.predeclared and
+          (e.rlo < -1_000_000_000 or e.rhi > 1_000_000_000 or
+          e.rhi - e.rlo + 1 > 16_777_216):
         err(t.line, "set range is too large (max 16777216 values)")
       p.expectOp("]")
       Typ(kind: SetType, elem: e)
@@ -277,11 +283,18 @@ proc parseType(p: var Parser): Typ =
   result = p.parseTypeCore()
   if p.atOp("?"):
     discard p.next
-    if result.kind notin {IntType, ObjectType, StringType, OpaqueType}:
-      err(p.peek.line, "only ints, objects, strings, and opaque handles " &
-        "can be optional")
+    if result.kind notin {IntType, ObjectType, UnionType, StringType,
+        OpaqueType}:
+      err(p.peek.line, "only ints, objects, unions, strings, and opaque " &
+        "handles can be optional")
+    let source = result
     result = optOf(result)
-  discard typeSize(result, line)
+    if p.predeclared:
+      p.optionals.add (source, result)
+  if p.predeclared:
+    p.pendingSizes.add (result, line)
+  else:
+    discard typeSize(result, line)
 
 proc parseAtom(p: var Parser): Expr =
   let t = p.peek
@@ -650,37 +663,25 @@ proc parseModule(p: var Parser): Module =
         err(t.line, "globals are zero-initialized; initializers are not allowed")
       result.globals.add GlobalDef(name: name, typ: typ, line: t.line)
       p.expectNewline()
-    of "type":
-      discard p.next
-      let name = p.expectIdent()
-      if name in p.types or name in p.consts or
-          name in ["int", "bool", "Lock", "array", "seq", "string", "set",
-            "queue", "channel", "map", "int8", "uint8", "char", "int16",
-            "uint16", "int32", "uint32", "int64", "uint64", "float32",
-            "float64", "opaque", "cstring"]:
-        err(t.line, "duplicate or reserved type name: '" & name & "'")
-      p.expectOp("=")
-      p.expectKeyword("opaque")
-      p.expectNewline()
-      let typ = Typ(kind: OpaqueType, name: name)
-      p.types[name] = typ
-      result.types.add TypeDef(name: name, typ: typ, line: t.line)
     of "object":
-      # object Name = with fields on indented lines. A type can only refer
-      # to types declared above it, so recursive types (and thus unknown
-      # sizes) are impossible by construction.
+      # Named shapes are reserved before parsing their field graphs.
       discard p.next
       let name = p.expectIdent()
-      if name in p.types or name in p.consts or
+      if (name in p.types and not p.predeclared) or name in p.consts or
           name in ["int", "bool", "Lock", "array"]:
         err(t.line, "duplicate or reserved type name: '" & name & "'")
       p.expectOp("=")
       p.expectNewline()
-      if p.peek.kind != IndentToken:
-        err(t.line, "object needs at least one field on an indented line")
-      discard p.next
-      var typ = Typ(kind: ObjectType, name: name)
-      while p.peek.kind notin {DedentToken, EofToken}:
+      let hasFields = p.peek.kind == IndentToken
+      if hasFields:
+        discard p.next
+      let typ =
+        if name in p.types: p.types[name]
+        else: Typ(kind: ObjectType, name: name)
+      if hasFields and p.atIdent("discard"):
+        discard p.next
+        p.expectNewline()
+      while hasFields and p.peek.kind notin {DedentToken, EofToken}:
         var names = @[p.expectIdent()]
         while p.atOp(","):
           discard p.next
@@ -695,11 +696,34 @@ proc parseModule(p: var Parser): Module =
               err(p.peek.line, "duplicate field: '" & n & "'")
           typ.fields.add Field(name: n, typ: ft)
         p.expectNewline()
-      if p.peek.kind == DedentToken:
+      if hasFields and p.peek.kind == DedentToken:
         discard p.next
-      discard typeSize(typ, t.line)
       p.types[name] = typ
       result.types.add TypeDef(name: name, typ: typ, line: t.line)
+    of "type":
+      discard p.next
+      let name = p.expectIdent()
+      if name in p.consts:
+        err(t.line, "duplicate or reserved type name: '" & name & "'")
+      p.expectOp("=")
+      let typ = p.types[name]
+      if p.atIdent("opaque"):
+        discard p.next
+        typ.kind = OpaqueType
+        result.types.add TypeDef(name: name, typ: typ, line: t.line)
+        p.expectNewline()
+        continue
+      let first = p.parseType()
+      if p.atIdent("or"):
+        typ.kind = UnionType
+        typ.members = @[first]
+        while p.atIdent("or"):
+          discard p.next
+          typ.members.add p.parseType()
+      else:
+        p.aliases[name] = first
+      result.types.add TypeDef(name: name, typ: typ, line: t.line)
+      p.expectNewline()
     of "extern":
       # extern "lib": - binary bindings. We declare the shapes ourselves
       # in plain sized types and link against the symbols; no headers.
@@ -846,10 +870,132 @@ proc parseModule(p: var Parser): Module =
         "' (expected const, var, type, object, func, proc, thread, or extern; " &
         "import must be at the top of the file)")
 
+proc predeclare(p: var Parser) =
+  ## Reserve named shapes without making later routines visible.
+  var depth = 0
+  for i, token in p.toks:
+    case token.kind
+    of IndentToken: inc depth
+    of DedentToken: dec depth
+    else: discard
+    if depth != 0 or token.kind != IdentToken or
+        token.text notin ["object", "type"]:
+      continue
+    if i > 0 and p.toks[i - 1].kind notin {NewlineToken, DedentToken}:
+      continue
+    if i + 1 >= p.toks.len or p.toks[i + 1].kind != IdentToken:
+      continue
+    let name = p.toks[i + 1].text
+    if name in p.types or name in ["int", "bool", "Lock", "array", "seq",
+        "string", "set", "queue", "channel", "map", "int8", "uint8",
+        "char", "int16", "uint16", "int32", "uint32", "int64",
+        "uint64", "float32", "float64", "opaque", "cstring"]:
+      err(token.line, "duplicate or reserved type name: '" & name & "'")
+    p.types[name] = Typ(kind: ObjectType, name: name)
+  p.predeclared = true
+
+proc resolveAlias(p: var Parser, name: string, visiting: var seq[string],
+    finished: var seq[string]) =
+  ## Resolve structural aliases without accepting recursive alias graphs.
+  if name in finished or name notin p.aliases:
+    return
+  if name in visiting:
+    err(0, "recursive type alias: '" & name & "'")
+  visiting.add name
+  let aliases = p.aliases
+  proc dependencies(t: Typ): seq[string] =
+    if t.isNil:
+      return
+    if t.name in aliases:
+      return @[t.name]
+    if t.kind notin {ObjectType, UnionType}:
+      result.add dependencies(t.elem)
+      result.add dependencies(t.val)
+  for dependency in dependencies(p.aliases[name]):
+    p.resolveAlias(dependency, visiting, finished)
+  for optional in p.optionals:
+    if optional.source.kind in {IntType, ObjectType, UnionType, StringType, OpaqueType}:
+      optional.target[] = optional.source[]
+      optional.target.opt = true
+  p.types[name][] = p.aliases[name][]
+  discard visiting.pop()
+  finished.add name
+
+proc finishTypes(p: var Parser, m: Module) =
+  ## Resolve aliases before checking nominal members and finite layouts.
+  var visiting: seq[string]
+  var finished: seq[string]
+  let names = p.aliases.keys.toSeq
+  for name in names:
+    p.resolveAlias(name, visiting, finished)
+  for optional in p.optionals:
+    if optional.source.kind notin {IntType, ObjectType, UnionType, StringType, OpaqueType}:
+      err(0, "only ints, objects, unions, strings, and opaque handles can be optional")
+    optional.target[] = optional.source[]
+    optional.target.opt = true
+  for definition in m.types:
+    let typ = definition.typ
+    if typ.kind == UnionType:
+      var names: seq[string]
+      for member in typ.members:
+        if member.kind != ObjectType or member.opt:
+          err(definition.line, "union members must be nominal objects")
+        if member.name in names:
+          err(definition.line, "duplicate union member: '" & member.name & "'")
+        names.add member.name
+    if typ.kind == ObjectType:
+      for field in typ.fields:
+        if field.typ.kind in {LockType, ChannelType}:
+          err(definition.line, $field.typ &
+            " cannot be a field; it must be a global")
+  for pending in p.pendingSizes:
+    let typ = pending.typ
+    case typ.kind
+    of ArrayType, SeqType, QueueType, ChannelType:
+      let container = case typ.kind
+        of ArrayType: "array"
+        of SeqType: "seq"
+        of QueueType: "queue"
+        else: "channel"
+      if typ.elem.kind == LockType:
+        err(pending.line, "Lock cannot be a " & container & " element")
+      if typ.kind != ArrayType and typ.elem.kind == ArrayType:
+        err(pending.line, "a " & container &
+          " element cannot be a plain array; wrap it in an object")
+      if typ.elem.kind == ChannelType:
+        err(pending.line, "a channel can only be a global, not a " &
+          container & " element")
+    of DenseMapType, SparseMapType:
+      if typ.val.kind in {LockType, ChannelType, ArrayType}:
+        err(pending.line, "a map value cannot be a " & $typ.val &
+          "; wrap arrays in an object")
+      if typ.kind == SparseMapType and
+          (typ.elem.kind notin {IntType, StringType} or
+          typ.elem.opt or typ.elem.dynamic):
+        err(pending.line, "map keys must be ints (or ranges) or string[N], got " &
+          $typ.elem)
+    of SetType:
+      let elem = typ.elem
+      if elem.kind != IntType or elem.isFullRange or elem.opt:
+        err(pending.line, "set needs a range element type, e.g. set[0 .. 63]")
+      if elem.rlo < -1_000_000_000 or elem.rhi > 1_000_000_000 or
+          elem.rhi - elem.rlo + 1 > 16_777_216:
+        err(pending.line, "set range is too large (max 16777216 values)")
+    else:
+      discard
+  for definition in m.types:
+    discard typeSize(definition.typ, definition.line)
+  for global in m.globals:
+    discard typeSize(global.typ, global.line)
+  for pending in p.pendingSizes:
+    discard typeSize(pending.typ, pending.line)
+
 proc parse*(toks: seq[Token]): Module =
   ## Parse a token stream into a Module AST.
   var p = Parser(toks: toks)
+  p.predeclare()
   result = p.parseModule()
+  p.finishTypes(result)
   result.files.add(srcFiles)
   if toks.len > 0:
     result.moduleLookups = toks[^1].moduleLookups

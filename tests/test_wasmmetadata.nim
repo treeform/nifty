@@ -83,4 +83,36 @@ nested.layouts[2].owned = true
 nested.layouts[2].fields[0].offset = 8
 rejects(nested)
 
+var unions = base
+unions.layouts = @[
+  NativeLayout(kind: UnionType, bytes: 32, align: 8,
+    dataOffset: 8, typeId: 1, members: @[1, 2], owned: true),
+  NativeLayout(kind: IntType, bytes: 8, align: 8, typeId: 2),
+  NativeLayout(kind: SeqType, bytes: 24, align: 8,
+    dynamic: true, owned: true, dataOffset: 16, elem: 0, typeId: 3)]
+unions.globalBytes = 32
+unions.ownedGlobals = @[OwnedGlobal(offset: 0, layout: 0)]
+let unionBytes = serializeWasmMetadata(unions)
+let decodedUnion = deserializeWasmMetadata(unionBytes)
+doAssert serializeWasmMetadata(decodedUnion) == unionBytes
+doAssert decodedUnion.layouts[0].members == @[1, 2]
+doAssert decodedUnion.layouts[0].typeId == 1
+doAssert decodedUnion.layouts[0].dataOffset == 8
+doAssert decodedUnion.layouts[2].elem == 0
+unions.layouts[0].owned = false
+rejects(unions)
+unions.layouts[0].owned = true
+unions.layouts[0].members = @[1]
+rejects(unions)
+unions.layouts[0].members = @[1, 3]
+rejects(unions)
+unions.layouts[0].members = @[1, 2]
+unions.layouts[2].typeId = 0
+rejects(unions)
+unions.layouts[2].typeId = 3
+unions.layouts[0].dataOffset = 16
+rejects(unions)
+unions.layouts[0].dataOffset = 0
+rejects(unions)
+
 echo "WASM metadata validation passed"

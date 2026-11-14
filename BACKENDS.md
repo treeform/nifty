@@ -134,13 +134,16 @@ backends. Compilation, engine startup, and the timed render are reported
 separately; engine compilation and tiering can still affect measurements.
 
 Validation on the Apple M4 Pro with Node 26.3.1 and Wasmtime 49.0.0 passes
-484 WASM checks across both optimization modes. Eight corpus fixtures require
-threads/channels or unavailable native host APIs and are explicitly excluded
-in each mode. The native C/ARM64/AMD64 suite passes 783 checks, inspecting 152
-native executables; the Windows-specific fixture is skipped on this Mac.
-All 264 C golden/integration checks also pass, with memory sanitizers enabled.
+568 WASM checks across both optimization modes, including the union-based
+JSON parser and Snappy examples. Ten corpus fixtures require threads/channels
+or unavailable native host APIs and are explicitly excluded in each mode.
+The native C/ARM64/AMD64 suite passes 819 checks per optimization mode,
+inspecting 176 native executables; the Windows-specific fixture is skipped
+on this Mac. All 276 C golden/integration checks also pass, with memory
+sanitizers enabled. The full raytrace/JSON/Snappy comparison is recorded in
+[benchmarks/COMPARISON.md](benchmarks/COMPARISON.md).
 
-The 64x64 raytracer matches the independent reference exactly. Five measured
+The earlier 64x64 raytracer run matched the independent reference exactly. Five measured
 processes after two warmups, ten frames per process, yield median render times
 of 0.467 ms for C, 0.504 ms for ARM64, 0.792 ms for AMD64 through Rosetta, and
 2.755 ms for WASM64 through Wasmtime. This establishes correctness and a WASM
@@ -290,7 +293,8 @@ different-architecture template can be supplied with `NIFTY_RUNTIME_AMD64` or
 `nifty-runtime-amd64` or `nifty-runtime-arm64`.
 Windows runtime template filenames have an `.exe` suffix.
 
-Native images use the `NIFTYN02` format, which includes ownership metadata.
+Native images use the `NIFTYN03` format, which includes union tags, member
+layouts, and ownership metadata.
 Rebuild the compiler and runtime templates together after this update, and
 re-emit images created with the earlier format.
 

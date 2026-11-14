@@ -1,0 +1,26 @@
+object Large =
+  values: array[4096, int]
+object Small =
+  value: int
+type Choice = Large or Small
+
+func make(): Choice =
+  var values: array[4096, int]
+  values[4095] = 7
+  return Large(values)
+
+func last(value: Choice): int =
+  if type(value) == Large:
+    return value.values[4095]
+  return value.value
+
+thread main() =
+  var values: array[4096, int]
+  values[4095] = 3
+  let objectValue = Large(values)
+  echo objectValue.values[4095]
+  let unionValue: Choice = Large(values)
+  echo last(unionValue)
+  echo last(Large(values))
+  let returned = make()
+  echo last(returned)

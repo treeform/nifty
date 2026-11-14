@@ -1,0 +1,237 @@
+import snappytypes
+
+# Ported from Supersnappy. See SNAPPY_LICENSE for its MIT license.
+func snappyInputByte(input: string, pos: int): 0 .. 255 =
+  # Reads a byte at a guarded position.
+  if pos >= 0 and pos < input.len:
+    return input[pos]
+  return 0
+
+func snappyWord(input: string, pos: int): 0 .. 4294967295 =
+  # Loads a little-endian word from a guarded position.
+  if pos >= 0 and pos <= 4294967295 and pos < input.len - 3:
+    return snappyInputByte(input, pos) + snappyInputByte(input, pos + 1) * 256 + snappyInputByte(input, pos + 2) * 65536 + snappyInputByte(input, pos + 3) * 16777216
+  return 0
+
+func snappyHash(word: 0 .. 4294967295, divisor: 262144 .. 16777216): int =
+  # Computes the original wrapping 32-bit multiplicative hash.
+  return ((word * 506832829) % 4294967296) / divisor
+
+proc snappyByte(output: var string, pos: var int, value: int): bool =
+  # Writes one byte within the preallocated output.
+  if value < 0 or value > 255:
+    return false
+  let cursor = pos
+  if cursor >= 0 and cursor < output.len and cursor < 9223372036854775807:
+    output[cursor] = value
+    pos = cursor + 1
+    return true
+  return false
+
+proc snappyLiteral(input: string, output: var string, pos: var int, start: int, count: int): bool =
+  # Emits a literal with its minimal length trailer.
+  if count <= 0 or count > 65536:
+    return false
+  var n = count - 1
+  if n < 60:
+    if not snappyByte(output, pos, n * 4):
+      return false
+  else:
+    var bytes = 0
+    var remaining = n
+    while remaining > 0 max 4:
+      remaining = remaining / 256
+      bytes = bytes + 1
+    if not snappyByte(output, pos, (59 + bytes) * 4):
+      return false
+    while n > 0 max 4:
+      if not snappyByte(output, pos, n % 256):
+        return false
+      n = n / 256
+  if start < 0 or start > 4294967295 or start > input.len - count:
+    return false
+  for i in 0 ..< count:
+    let index = start + i
+    if index >= 0 and index < input.len:
+      if not snappyByte(output, pos, input[index]):
+        return false
+    else:
+      return false
+  return true
+
+proc snappyCopyPart(output: var string, pos: var int, offset: int, count: int): bool =
+  # Emits a copy of at most 64 bytes.
+  if count < 4 or count > 64 or offset <= 0 or offset > 65535:
+    return false
+  if count < 12 and offset < 2048:
+    if not snappyByte(output, pos, 1 + (count - 4) * 4 + (offset / 256) * 32):
+      return false
+  else:
+    if not snappyByte(output, pos, 2 + (count - 1) * 4):
+      return false
+  if not snappyByte(output, pos, offset % 256):
+    return false
+  if count >= 12 or offset >= 2048:
+    if not snappyByte(output, pos, offset / 256):
+      return false
+  return true
+
+proc snappyCopy(output: var string, pos: var int, offset: int, count: int): bool =
+  # Splits copies using the original 64 and 60 byte rules.
+  if count < 4 or count > 65536:
+    return false
+  var remaining = count
+  while remaining >= 68 max 1024:
+    if not snappyCopyPart(output, pos, offset, 64):
+      return false
+    remaining = remaining - 64
+  if remaining > 64:
+    if not snappyCopyPart(output, pos, offset, 60):
+      return false
+    remaining = remaining - 60
+  return snappyCopyPart(output, pos, offset, remaining)
+
+proc snappyFragment(input: string, output: var string, pos: var int, start: int, count: int, table: var array[16384, uint16]): bool =
+  # Compresses a 64 KiB fragment with adaptive hashing and skipping.
+  if start < 0 or start > 4294967295 or count <= 0 or count > 65536:
+    return false
+  if start > input.len - count:
+    return false
+  let finish = start + count
+  var tableSize: 256 .. 16384 = 256
+  var divisor: 262144 .. 16777216 = 16777216
+  while tableSize < 16384 and tableSize < count max 6:
+    if tableSize <= 8192:
+      tableSize = tableSize * 2
+    else:
+      tableSize = 16384
+    if divisor >= 524288:
+      divisor = divisor / 2
+  for i in 0 ..< tableSize:
+    if i >= 0 and i < 16384:
+      table[i] = 0
+  var ip: 0 .. 4295032831 = start
+  var nextEmit: 0 .. 4295032831 = start
+  if count >= 15:
+    let limit = finish - 15
+    ip = ip + 1
+    var nextHash = snappyHash(snappyWord(input, ip), divisor)
+    var done = false
+    while not done max 65536:
+      var skip: 32 .. 65568 = 32
+      var nextIp: 0 .. 4295098399 = ip
+      var candidate: 0 .. 4295032830 = start
+      var found = false
+      while not found max 65536:
+        if nextIp > 4295032831:
+          return false
+        ip = nextIp
+        let h = nextHash
+        let step = skip / 32
+        if skip >= 65568:
+          return false
+        skip = skip + 1
+        if ip < 0 or ip > 4295032831:
+          return false
+        nextIp = ip + step
+        if nextIp > limit:
+          done = true
+          break
+        nextHash = snappyHash(snappyWord(input, nextIp), divisor)
+        if h < 0 or h >= 16384:
+          return false
+        candidate = start + table[h]
+        let relative = ip - start
+        if relative < 0 or relative > 65535:
+          return false
+        table[h] = relative
+        found = snappyWord(input, ip) == snappyWord(input, candidate)
+      if done:
+        break
+      if not snappyLiteral(input, output, pos, nextEmit, ip - nextEmit):
+        return false
+      var repeat = true
+      while repeat max 16384:
+        if ip < start or ip > finish - 4 or candidate < start or candidate >= ip:
+          return false
+        var matched: 4 .. 65536 = 4
+        while matched < finish - ip max 65536:
+          let a = ip + matched
+          let b = candidate + matched
+          if a < 0 or a >= input.len or b < 0 or b >= input.len:
+            return false
+          if input[a] != input[b]:
+            break
+          if matched >= 65536:
+            return false
+          matched = matched + 1
+        if not snappyCopy(output, pos, ip - candidate, matched):
+          return false
+        let matchedEnd = ip + matched
+        if matchedEnd > 4295032831:
+          return false
+        ip = matchedEnd
+        nextEmit = ip
+        if ip >= limit:
+          done = true
+          break
+        let prevHash = snappyHash(snappyWord(input, ip - 1), divisor)
+        let curHash = snappyHash(snappyWord(input, ip), divisor)
+        if prevHash < 0 or prevHash >= 16384 or curHash < 0 or curHash >= 16384:
+          return false
+        let relative = ip - start
+        if relative < 1 or relative > 65535:
+          return false
+        table[prevHash] = relative - 1
+        candidate = start + table[curHash]
+        table[curHash] = relative
+        repeat = snappyWord(input, ip) == snappyWord(input, candidate)
+      if not done:
+        nextHash = snappyHash(snappyWord(input, ip + 1), divisor)
+        if ip >= 4295032831:
+          return false
+        ip = ip + 1
+  if nextEmit < finish:
+    return snappyLiteral(input, output, pos, nextEmit, finish - nextEmit)
+  return true
+
+proc compressSnappy(input: string, output: var string, error: var SnappyError): bool =
+  # Compresses raw Snappy data, clearing output on every failure.
+  output.clear()
+  error.offset = 0
+  error.code = 0
+  error.message = ""
+  let size = input.len
+  if size > 4294967295:
+    return snappyFail(error, 0, SnappyLimitError, "Snappy input exceeds uint32")
+  if not output.resize(32 + size + size / 6):
+    return snappyFail(error, 0, SnappyAllocationError, "Unable to allocate Snappy output")
+  var pos = 0
+  var remaining = size
+  while remaining >= 128 max 5:
+    if not snappyByte(output, pos, remaining % 128 + 128):
+      output.clear()
+      return snappyFail(error, 0, SnappyLimitError, "Snappy output capacity exceeded")
+    remaining = remaining / 128
+  if not snappyByte(output, pos, remaining):
+    output.clear()
+    return snappyFail(error, 0, SnappyLimitError, "Snappy output capacity exceeded")
+  var table: array[16384, uint16]
+  var ip: 0 .. 4294967295 = 0
+  while ip < size max 65536:
+    var count = size - ip
+    if count > 65536:
+      count = 65536
+    if not snappyFragment(input, output, pos, ip, count, table):
+      output.clear()
+      return snappyFail(error, ip, SnappyLimitError, "Snappy compression failed")
+    let fragmentEnd = ip + count
+    if fragmentEnd < 0 or fragmentEnd > 4294967295:
+      output.clear()
+      return snappyFail(error, ip, SnappyLimitError, "Snappy fragment overflow")
+    ip = fragmentEnd
+  if pos >= 0 and pos <= output.cap:
+    if output.setLen(pos):
+      return true
+  output.clear()
+  return snappyFail(error, 0, SnappyLimitError, "Snappy output capacity exceeded")

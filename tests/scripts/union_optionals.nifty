@@ -1,0 +1,40 @@
+object A =
+  value: int
+object B =
+  flag: bool
+type U = A or B
+
+proc clear(value: var U?) =
+  value = none
+
+proc show(value: U) =
+  if type(value) == A:
+    echo value.value
+  else:
+    echo value.flag
+
+thread main() =
+  var values: seq[U]
+  var found = values.get(0)
+  echo found.ok
+  show(found.or(A(3)))
+  found = A(7)
+  echo found.ok
+  if found.ok:
+    if type(found) == A:
+      echo found.value
+  show(found.or(B(false)))
+  found = none
+  echo found.ok
+  show(found.or(B(true)))
+  echo values.push(B(false))
+  found = values.get(0)
+  if found.ok:
+    show(found)
+  found = none
+  echo found.ok
+  found = A(9)
+  if found.ok:
+    show(found)
+  clear(found)
+  echo found.ok

@@ -39,7 +39,7 @@ const keywords = ["const", "var", "let", "type", "opaque", "object",
   "extern", "func", "proc", "thread", "return", "break", "echo", "discard",
   "if", "elif", "else", "while", "max", "for", "in", "loop", "block",
   "with", "and", "or", "not", "true", "false", "none", "boundedBy"]
-const builtins = ["int", "bool", "Lock", "array", "seq", "string", "cstring",
+const builtins = ["type", "int", "bool", "Lock", "array", "seq", "string", "cstring",
   "set", "queue", "channel", "map", "int8", "uint8", "char", "int16",
   "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64"]
 const methods = ["add", "push", "pop", "clear", "incl", "excl", "put",
@@ -99,6 +99,8 @@ proc importPath(ld: Loader, parent: SourceModule, name: string, bare: bool,
   let directory = if parent.remote: ld.root else: parent.directory
   let local = if source.isAbsolute: source else: directory / source
   if fileExists(local): return local
+  if not bare and not source.isUrl and fileExists(local & ".nifty"):
+    return local & ".nifty"
   if bare:
     for directory in ld.standardDirs:
       let candidate = directory / source
@@ -188,7 +190,6 @@ proc load(ld: Loader, source, path: string, main: bool,
       of "var": kind = GlobalSymbol
       of "type":
         kind = TypeSymbol
-        alias = not result.tokens.at(position + 3, "opaque")
       of "object": kind = TypeSymbol
       of "func", "proc", "thread":
         kind = RoutineSymbol
@@ -493,6 +494,11 @@ proc rewrite(ld: Loader, module: SourceModule): seq[Token] =
             if symbol == nil: err(member.line, "unknown module member: '" & member.text & "'")
             next += 2
             if tokens.at(next, "."): symbol = qualifiedSymbol(symbol)
+          if depth == 0 and word == "type" and
+              position == index + 3 and next == finish and
+              symbol != nil and symbol.kind != TypeSymbol:
+            err(token.line, "type alias '" & tokens[index + 1].text &
+              "' must name a type")
           if symbol != nil and symbol.kind == AmbiguousSymbol:
             err(token.line, "ambiguous imported name '" & name &
               "'; qualify it with a module name or add an alias")

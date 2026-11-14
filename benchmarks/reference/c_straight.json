@@ -1,0 +1,49 @@
+{
+  "baseline": "Hand C",
+  "upstream": "https://github.com/treeform/nimkey",
+  "upstream_revision": "adcacefce18748630dccde5943bd3314dfcb422b",
+  "source_last_change_revision": "ae1b868c34fb155588cd7a5b81133aaa9b9613e5",
+  "upstream_path": "tests/benchmarks/raytracer.c",
+  "source_sha256": "3531f5ca83c7e922da2657fdcbe99d2c88fe08848d98a127a1fcdace0f3f70a3",
+  "license": "../LICENSE (MIT), copyright 2021 Andre von Houck and Edin Omeragic",
+  "precision": "float64",
+  "transformations": [
+    "Changed float scalars and suffixed constants to double; sqrtf/floorf/powf/roundf to their double equivalents.",
+    "Preserved original scene arrays, intersection/shading operation order, recursive reflections through depth five, and round-then-wrap RGB quantization.",
+    "Replaced tile/text rendering harness with standalone POSIX main and compile-time IMAGE_SIZE, REPETITIONS, CLOCK_ID, EMIT_PIXELS configuration.",
+    "Moved camera setup/allocation and final protocol/RGB output outside timing; timed each full RGB render plus checksum, publishing each frame checksum through a volatile scalar sink.",
+    "Made render dimensions a runtime parameter shared with the ARM64 assembly core; retained compile-time IMAGE_SIZE in the driver."
+  ],
+  "validation": {
+    "compiler_flags": [
+      "-O2",
+      "-fno-strict-aliasing",
+      "-ffp-contract=off",
+      "-Wall",
+      "-Wextra",
+      "-Werror"
+    ],
+    "protocol": "NIFTY_RAY_V1, decoded by benchmarks/run.py parseOutput",
+    "reference": "Existing independent Nimkey interpreter RGB goldens (manifest.json)",
+    "images": {
+      "4": {
+        "exact_rgb_match": true,
+        "repetitions": 3,
+        "checksum": 1864,
+        "sha256": "c3eb740c1611974dd843ef60d822e9bad4bc576c6278552f5b4f60273e24de6c"
+      },
+      "16": {
+        "exact_rgb_match": true,
+        "repetitions": 3,
+        "checksum": 36400,
+        "sha256": "e549bed5b7b652a9f09819bcf857941fdbb29f11b5ff7fcddf066bec1de1afba"
+      },
+      "64": {
+        "exact_rgb_match": true,
+        "repetitions": 3,
+        "checksum": 544407,
+        "sha256": "59ec3da30b3909f86cb60e472f6de5929921b8bb13913566f9d453c4a8457818"
+      }
+    }
+  }
+}

@@ -115,6 +115,17 @@ proc layoutStorage*(plan: var NativePlan, mapping: var seq[int32],
         let storage = plan.layoutStorage(mapping, field.typ)
         members.add(IrField(name: field.name, storage: storage,
           offset: int32(field.offset)))
+    of UnionType:
+      let tag = plan.addStorage(IrStorage(kind: ScalarStorage,
+        scalar: Int64Type, byteCount: 8, alignment: 8))
+      let payload = plan.addStorage(IrStorage(name: "$union.payload." & $index,
+        kind: OpaqueStorage,
+        byteCount: nativeSize(data.bytes - data.dataOffset),
+        alignment: int32(data.align)))
+      members.add(IrField(name: "tag", storage: tag,
+        role: DiscriminatorField))
+      members.add(IrField(name: "payload", storage: payload,
+        offset: int32(data.dataOffset)))
     of LockType:
       result = plan.addStorage(IrStorage(name: "$lock." & $index,
         kind: OpaqueStorage, byteCount: int32(data.bytes),

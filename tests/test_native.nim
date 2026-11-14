@@ -77,7 +77,7 @@ proc executableTarget(path, target: string): bool =
 proc imageTarget(path, target: string): bool =
   ## Inspect the target metadata of a versioned native image artifact.
   let bytes = readFile(path)
-  if bytes.len < 40 or bytes[0 ..< 8] != "NIFTYN02":
+  if bytes.len < 40 or bytes[0 ..< 8] != "NIFTYN03":
     return false
   var metadataSize = 0'u64
   for i in 0 ..< 8:

@@ -1,0 +1,102 @@
+import "../lib/snappy"
+
+const Size = 262144
+const Repetitions = 10
+const ClockId = 6
+
+object Timespec =
+  sec: int64
+  nsec: int64
+
+extern "libc":
+  proc clock_gettime(clock: int32, value: var Timespec): int32
+
+func digest(text: string): int =
+  # Hashes bytes outside every measured interval.
+  var value = 0
+  for i in 0 ..< text.len:
+    if i >= 0 and i < text.len:
+      if value >= 0 and value < 1000000007:
+        value = (value * 257 + text[i]) % 1000000007
+  return value
+
+func equalBytes(left: string, right: string): bool =
+  # Compares the complete decoded payload outside timing.
+  if left.len != right.len:
+    return false
+  for i in 0 ..< left.len:
+    if i >= 0 and i < left.len and i < right.len:
+      if left[i] != right[i]:
+        return false
+  return true
+
+proc run(kind: int) =
+  # Warms retained output capacities before timing individual codec calls.
+  var input: string
+  var state = 1
+  let text: string[64] = "The quick brown fox jumps over the lazy dog.\n"
+  for i in 0 ..< Size:
+    var byte = 0
+    if kind == 0:
+      let index = i % text.len
+      if index >= 0 and index < text.len:
+        byte = text[index]
+    elif kind == 1:
+      byte = 32 + ((i / 97 + i % 13) % 95)
+      if i % 97 < 70:
+        byte = 65 + (i % 7)
+    else:
+      if state >= 0 and state < 2147483647:
+        state = (state * 48271) % 2147483647
+      byte = state % 256
+    if byte >= 0 and byte <= 255:
+      if not input.addByte(byte):
+        echo "setup_error"
+        return
+  var compressed: string
+  var decoded: string
+  var error: SnappyError
+  if not compressSnappy(input, compressed, error):
+    echo "compress_error"
+    return
+  if not uncompressSnappy(compressed, decoded, Size, error):
+    echo "decode_error"
+    return
+  if not equalBytes(input, decoded):
+    echo "mismatch"
+    return
+  var hex: string
+  let digits: string[16] = "0123456789abcdef"
+  for i in 0 ..< compressed.len:
+    if i >= 0 and i < compressed.len:
+      let high = compressed[i] / 16
+      let low = compressed[i] % 16
+      if high >= 0 and high < 16 and low >= 0 and low < 16:
+        if not hex.addByte(digits[high]):
+          return
+        if not hex.addByte(digits[low]):
+          return
+  echo "NIFTY_SNAPPY_V1"
+  echo "kind ", kind
+  echo "size ", Size
+  echo "repeat ", Repetitions
+  echo "compressed_hex ", hex
+  for repetition in 0 ..< Repetitions:
+    var cs: Timespec
+    var ce: Timespec
+    var ds: Timespec
+    var de: Timespec
+    let ca = clock_gettime(ClockId, cs)
+    let compressedOk = compressSnappy(input, compressed, error)
+    let cb = clock_gettime(ClockId, ce)
+    let da = clock_gettime(ClockId, ds)
+    let decodedOk = uncompressSnappy(compressed, decoded, Size, error)
+    let db = clock_gettime(ClockId, de)
+    if not compressedOk or not decodedOk or not equalBytes(input, decoded):
+      echo "roundtrip_error"
+      return
+    echo "iteration ", repetition, " ", cs.sec, " ", cs.nsec, " ", ce.sec, " ", ce.nsec, " ", ds.sec, " ", ds.nsec, " ", de.sec, " ", de.nsec, " ", ca, " ", cb, " ", da, " ", db, " ", compressed.len, " ", digest(compressed), " ", digest(decoded)
+
+thread main() =
+  for kind in 0 ..< 3:
+    run(kind)

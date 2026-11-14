@@ -1,0 +1,30 @@
+object Number =
+  value: int
+object Array =
+  items: seq[Node]
+type Node = Number or Array
+
+proc leave() =
+  var node: Node = Array()
+  if type(node) == Array:
+    discard node.items.push(Array())
+    if node.items.len > 0:
+      if type(node.items[0]) == Array:
+        discard node.items[0].items.push(Array())
+        if node.items[0].items.len > 0:
+          if type(node.items[0].items[0]) == Array:
+            discard node.items[0].items[0].items.push(Number(42))
+            for leaf in node.items[0].items[0].items:
+              if type(leaf) == Number:
+                echo leaf.value
+  node = Number(7)
+  if type(node) == Number:
+    echo node.value
+  node = Array()
+  if type(node) == Array:
+    discard node.items.push(Array())
+  return
+
+thread main() =
+  leave()
+  echo "released"

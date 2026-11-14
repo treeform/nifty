@@ -91,8 +91,8 @@ proc reserveDynamic(base: pointer, layout: NativeLayout,
     return false
   if wanted <= capacity(base):
     return true
-  if uint64(wanted) > uint64(high(int)) div uint64(elementBytes) or
-      uint64(wanted) > uint64(high(csize_t)) div uint64(elementBytes):
+  if uint64(wanted) > uint64(high(int) - 24) div uint64(elementBytes) or
+      uint64(wanted) > uint64(high(csize_t) - 24) div uint64(elementBytes):
     return false
   var grown = max(8'i64, capacity(base))
   while grown < wanted:
@@ -100,11 +100,12 @@ proc reserveDynamic(base: pointer, layout: NativeLayout,
       grown = wanted
       break
     grown *= 2
-  if uint64(grown) > uint64(high(int)) div uint64(elementBytes) or
-      uint64(grown) > uint64(high(csize_t)) div uint64(elementBytes):
+  if uint64(grown) > uint64(high(int) - 24) div uint64(elementBytes) or
+      uint64(grown) > uint64(high(csize_t) - 24) div uint64(elementBytes):
     grown = wanted
+  # Reserved tail frames let destruction traverse trees without allocation.
   let address = reallocate(memory, dataSlot(base),
-    csize_t(grown) * csize_t(elementBytes))
+    csize_t(grown) * csize_t(elementBytes) + 24)
   if address == nil:
     return false
   zeroMem(at(address, capacity(base) * elementBytes),
@@ -113,117 +114,176 @@ proc reserveDynamic(base: pointer, layout: NativeLayout,
   capacity(base) = grown
   true
 
-proc dropOwned*(layouts: seq[NativeLayout], layoutId: int,
-    base: pointer, memory = NativeMemory()) =
-  ## Recursively destroy one owned value and restore zero storage.
-  let layout = layouts[layoutId]
+proc dropInline(layouts: seq[NativeLayout], id: int, address: pointer,
+    memory: NativeMemory, pending: var pointer) =
+  ## Release inline leaves and enqueue dynamic sequence descendants.
+  let layout = layouts[id]
   if not layout.owned:
     return
   if layout.optional:
-    if cast[ptr bool](at(base, layout.okOffset))[]:
+    if cast[ptr bool](at(address, layout.okOffset))[]:
       for i, candidate in layouts:
         if candidate.kind == layout.kind and
             candidate.bytes == int64(layout.okOffset) and
             not candidate.optional and candidate.dynamic == layout.dynamic:
-          dropOwned(layouts, i, base, memory)
+          dropInline(layouts, i, address, memory, pending)
           break
-    zeroMem(base, int(layout.bytes))
     return
   case layout.kind
+  of UnionType:
+    for member in layout.members:
+      if layouts[member].typeId == length(address):
+        dropInline(layouts, member, at(address, layout.dataOffset),
+          memory, pending)
+        break
   of StringType:
     if layout.dynamic:
-      release(memory, dataSlot(base))
+      release(memory, dataSlot(address))
   of SeqType:
-    if layout.elem >= 0 and layouts[layout.elem].owned:
-      let element = layouts[layout.elem]
-      let data = dataPointer(base, layout)
-      for i in countdown(length(base) - 1, 0'i64):
-        dropOwned(layouts, layout.elem,
-          at(data, i * element.bytes), memory)
     if layout.dynamic:
-      release(memory, dataSlot(base))
+      let element = layouts[layout.elem]
+      if dataSlot(address) != nil:
+        let frame = at(dataSlot(address), capacity(address) * element.bytes)
+        cast[ptr pointer](frame)[] = pending
+        cast[ptr pointer](at(frame, 8))[] = address
+        cast[ptr int64](at(frame, 16))[] = int64(id)
+        pending = frame
+    else:
+      let element = layouts[layout.elem]
+      for i in countdown(length(address) - 1, 0'i64):
+        dropInline(layouts, layout.elem,
+          at(dataPointer(address, layout), i * element.bytes), memory, pending)
   of ArrayType:
     let element = layouts[layout.elem]
     for i in countdown(layout.capacity - 1, 0'i64):
-      dropOwned(layouts, layout.elem,
-        at(base, i * element.bytes), memory)
+      dropInline(layouts, layout.elem, at(address, i * element.bytes),
+        memory, pending)
   of ObjectType:
-    for i in countdown(layout.fields.high, 0):
-      let field = layout.fields[i]
-      if layouts[field.typ].owned:
-        dropOwned(layouts, field.typ,
-          at(base, field.offset), memory)
+    for field in layout.fields:
+      dropInline(layouts, field.typ, at(address, field.offset),
+        memory, pending)
   else:
     discard
-  zeroMem(base, int(layout.bytes))
+
+proc dropOwned*(layouts: seq[NativeLayout], layoutId: int,
+    base: pointer, memory = NativeMemory()) =
+  ## Destroy owned trees using reserved allocation tails as a work stack.
+  if not layouts[layoutId].owned:
+    return
+  var pending: pointer
+  dropInline(layouts, layoutId, base, memory, pending)
+  while pending != nil:
+    let
+      frame = pending
+      address = cast[ptr pointer](at(frame, 8))[]
+      id = int(cast[ptr int64](at(frame, 16))[])
+      layout = layouts[id]
+    if length(address) > 0 and layouts[layout.elem].owned:
+      dec length(address)
+      dropInline(layouts, layout.elem, at(dataSlot(address),
+        length(address) * layouts[layout.elem].bytes), memory, pending)
+    else:
+      pending = cast[ptr pointer](frame)[]
+      release(memory, dataSlot(address))
+  zeroMem(base, int(layouts[layoutId].bytes))
 
 proc copyOwnedZero(layouts: seq[NativeLayout], layoutId: int,
     destination, source: pointer, memory: NativeMemory): bool =
-  ## Copy into zero storage, cleaning partial children after failure.
-  let layout = layouts[layoutId]
-  if not layout.owned:
-    copyMem(destination, source, int(layout.bytes))
-    return true
-  if layout.optional:
-    if cast[ptr bool](at(source, layout.okOffset))[]:
-      for i, candidate in layouts:
-        if candidate.kind == layout.kind and
-            candidate.bytes == int64(layout.okOffset) and
-            not candidate.optional and candidate.dynamic == layout.dynamic:
-          if not copyOwnedZero(layouts, i, destination, source, memory):
-            return false
-          cast[ptr bool](at(destination, layout.okOffset))[] = true
-          return true
-    return true
-  case layout.kind
-  of StringType, SeqType:
-    if layout.dynamic:
+  ## Clone with a fallible task stack, cleaning partial trees on failure.
+  type Task = object
+    id: int
+    destination, source: pointer
+  var
+    local: array[32, Task]
+    tasks = cast[ptr UncheckedArray[Task]](addr local[0])
+    count = 0
+    slots = local.len
+    allocated: pointer
+  defer:
+    release(memory, allocated)
+  template push(taskId, target, input: untyped): bool =
+    block:
+      var success = true
+      if count == slots:
+        if slots > high(int) div (2 * sizeof(Task)):
+          success = false
+        else:
+          let grown = reallocate(memory, allocated,
+            csize_t(slots * 2 * sizeof(Task)))
+          if grown == nil:
+            success = false
+          else:
+            if allocated == nil:
+              copyMem(grown, addr local[0], count * sizeof(Task))
+            allocated = grown
+            tasks = cast[ptr UncheckedArray[Task]](grown)
+            slots *= 2
+      if success:
+        tasks[count] = Task(id: taskId, destination: target, source: input)
+        inc count
+      success
+  template enqueue(id, destination, source: untyped) =
+    if not push(id, destination, source):
+      dropOwned(layouts, layoutId, destinationRoot, memory)
+      return false
+  let destinationRoot = destination
+  discard push(layoutId, destination, source)
+  while count > 0:
+    dec count
+    let
+      task = tasks[count]
+      layout = layouts[task.id]
+      destination = task.destination
+      source = task.source
+    if not layout.owned:
+      copyMem(destination, source, int(layout.bytes))
+      continue
+    if layout.optional:
+      if cast[ptr bool](at(source, layout.okOffset))[]:
+        for i, candidate in layouts:
+          if candidate.kind == layout.kind and
+              candidate.bytes == int64(layout.okOffset) and
+              not candidate.optional and candidate.dynamic == layout.dynamic:
+            cast[ptr bool](at(destination, layout.okOffset))[] = true
+            enqueue(i, destination, source)
+            break
+      continue
+    case layout.kind
+    of UnionType:
+      length(destination) = length(source)
+      for member in layout.members:
+        if layouts[member].typeId == length(source):
+          enqueue(member, at(destination, layout.dataOffset),
+            at(source, layout.dataOffset))
+          break
+    of StringType, SeqType:
       let elementBytes = if layout.kind == StringType: 1'i64
         else: layouts[layout.elem].bytes
-      if not reserveDynamic(destination, layout, elementBytes,
-          length(source), memory):
-        return false
-      if layout.kind == SeqType and layouts[layout.elem].owned:
-        for i in 0 ..< length(source):
-          if not copyOwnedZero(layouts, layout.elem,
-              at(dataPointer(destination, layout), i * elementBytes),
-              at(dataPointer(source, layout), i * elementBytes), memory):
-            dropOwned(layouts, layoutId, destination, memory)
-            return false
-          inc length(destination)
-      else:
-        if length(source) > 0:
-          copyMem(dataPointer(destination, layout),
-            dataPointer(source, layout), int(length(source) * elementBytes))
-        length(destination) = length(source)
-      return true
-    if layout.kind == SeqType and layouts[layout.elem].owned:
-      let elementBytes = layouts[layout.elem].bytes
-      for i in 0 ..< length(source):
-        if not copyOwnedZero(layouts, layout.elem,
-            at(dataPointer(destination, layout), i * elementBytes),
-            at(dataPointer(source, layout), i * elementBytes), memory):
-          dropOwned(layouts, layoutId, destination, memory)
+      if layout.dynamic:
+        if not reserveDynamic(destination, layout, elementBytes,
+            length(source), memory):
+          dropOwned(layouts, layoutId, destinationRoot, memory)
           return false
-        inc length(destination)
-      return true
-    copyMem(destination, source, int(layout.bytes))
-  of ArrayType:
-    let element = layouts[layout.elem]
-    for i in 0 ..< layout.capacity:
-      if not copyOwnedZero(layouts, layout.elem,
-          at(destination, i * element.bytes),
-          at(source, i * element.bytes), memory):
-        dropOwned(layouts, layoutId, destination, memory)
-        return false
-  of ObjectType:
-    for field in layout.fields:
-      if not copyOwnedZero(layouts, field.typ,
-          at(destination, field.offset), at(source, field.offset), memory):
-        dropOwned(layouts, layoutId, destination, memory)
-        return false
-  else:
-    copyMem(destination, source, int(layout.bytes))
+      length(destination) = length(source)
+      if layout.kind == SeqType and layouts[layout.elem].owned:
+        for i in countdown(length(source) - 1, 0'i64):
+          enqueue(layout.elem,
+            at(dataPointer(destination, layout), i * elementBytes),
+            at(dataPointer(source, layout), i * elementBytes))
+      elif length(source) > 0:
+        copyMem(dataPointer(destination, layout),
+          dataPointer(source, layout), int(length(source) * elementBytes))
+    of ArrayType:
+      let element = layouts[layout.elem]
+      for i in countdown(layout.capacity - 1, 0'i64):
+        enqueue(layout.elem, at(destination, i * element.bytes),
+          at(source, i * element.bytes))
+    of ObjectType:
+      for field in layout.fields:
+        enqueue(field.typ, at(destination, field.offset),
+          at(source, field.offset))
+    else:
+      copyMem(destination, source, int(layout.bytes))
   true
 
 proc copyOwned*(layouts: seq[NativeLayout], layoutId: int,
@@ -448,6 +508,27 @@ proc copyDynamicFrom(layouts: seq[NativeLayout], layoutId: int,
   copyMem(destination, target, 24)
   true
 
+proc initializeValue*(layouts: seq[NativeLayout], id: int, base: pointer) =
+  ## Initialize declared defaults recursively within zeroed storage.
+  let layout = layouts[id]
+  if layout.optional:
+    return
+  case layout.kind
+  of UnionType:
+    if layout.members.len > 0:
+      let member = layout.members[0]
+      length(base) = layouts[member].typeId
+      initializeValue(layouts, member, at(base, layout.dataOffset))
+  of ObjectType:
+    for field in layout.fields:
+      initializeValue(layouts, field.typ, at(base, field.offset))
+  of ArrayType:
+    for i in 0 ..< layout.capacity:
+      initializeValue(layouts, layout.elem,
+        at(base, i * layouts[layout.elem].bytes))
+  else:
+    discard
+
 proc executeDynamic(host: NativeHost, layouts: seq[NativeLayout],
     receiver, args, output: pointer, memory: NativeMemory) =
   ## Dispatch fallible growable string and sequence operations.
@@ -490,9 +571,14 @@ proc executeDynamic(host: NativeHost, layouts: seq[NativeLayout],
       for i in countdown(length(receiver) - 1, wanted):
         dropOwned(layouts, layout.elem,
           at(dataSlot(receiver), i * elementBytes), memory)
-    if host.operation == "resize" and wanted > length(receiver):
+    if wanted > length(receiver) and
+        (host.operation == "resize" or layout.kind == SeqType):
       zeroMem(at(dataSlot(receiver), length(receiver) * elementBytes),
         int((wanted - length(receiver)) * elementBytes))
+      if layout.kind == SeqType:
+        for i in length(receiver) ..< wanted:
+          initializeValue(layouts, layout.elem,
+            at(dataSlot(receiver), i * elementBytes))
     length(receiver) = wanted
     boolean(true)
   of "copyFrom":
@@ -649,6 +735,9 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
     integer(argument(index), argumentLayout(index))
   template boolean(value: bool) =
     cast[ptr bool](output)[] = value
+  if host.operation == "initialize":
+    initializeValue(layouts, host.receiverType, receiver)
+    return
   if host.operation == "toCString":
     let target = layouts[host.resultType]
     zeroMem(output, int(target.bytes))

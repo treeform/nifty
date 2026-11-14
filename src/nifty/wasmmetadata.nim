@@ -65,7 +65,7 @@ proc validateWasmMetadata*(plan: NativePlan) =
           (layout.bytes != 32 or layout.okOffset != 24))):
       invalid("dynamic layout")
     if layout.owned and layout.kind notin
-        {StringType, SeqType, ArrayType, ObjectType}:
+        {StringType, SeqType, ArrayType, ObjectType, UnionType}:
       invalid("ownership layout")
     if layout.kind in {ArrayType, SeqType, QueueType}:
       if layout.elem < 0 or layout.elem >= plan.layouts.len:
@@ -101,6 +101,16 @@ proc validateWasmMetadata*(plan: NativePlan) =
       owned = owned or plan.layouts[layout.elem].owned
     if layout.kind in {DenseMapType, SparseMapType}:
       owned = owned or plan.layouts[layout.val].owned
+    if layout.kind == UnionType:
+      if layout.members.len < 2 or layout.dataOffset < 8 or
+          layout.dataOffset > layout.bytes:
+        invalid("union layout")
+      for member in layout.members:
+        if member < 0 or member >= plan.layouts.len or
+            plan.layouts[member].typeId <= 0 or
+            plan.layouts[member].bytes > layout.bytes - layout.dataOffset:
+          invalid("union member")
+        owned = owned or plan.layouts[member].owned
     for field in layout.fields:
       if field.typ < 0 or field.typ >= plan.layouts.len or
           field.offset < 0 or field.offset > layout.bytes or

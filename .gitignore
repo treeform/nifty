@@ -15,6 +15,8 @@
 /tests/test_memoryfiles
 /tests/test_memory
 /tests/test_semantics
+/tests/test_snappy
+/tests/test_unusedarena
 /tests/test_progress
 /tests/test_arithmeticproofs
 /tests/test_runtimefailures
