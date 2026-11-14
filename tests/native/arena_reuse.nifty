@@ -1,0 +1,34 @@
+object Packet =
+  bytes: array[1024, uint8]
+  stamp: int32
+
+func packet(mark: uint8): Packet =
+  var result: Packet
+  result.bytes[1023] = mark
+  result.stamp = mark
+  return result
+
+func forward(mark: uint8): Packet =
+  return packet(mark)
+
+thread main() =
+  let saved = forward(9)
+  var changed = forward(3)
+  changed.bytes[1023] = 4
+  echo saved.bytes[0], " ", saved.bytes[1023], " ", saved.stamp
+  echo changed.bytes[0], " ", changed.bytes[1023], " ", changed.stamp
+
+  block:
+    var reused: array[2048, int32]
+    for i in 0 ..< 2048:
+      reused[i] = 17
+    echo reused[0], " ", reused[2047]
+  block:
+    var reused: array[2048, int32]
+    reused[2047] = 5
+    echo reused[0], " ", reused[2047]
+
+  for i in 0 ..< 3:
+    var scratch: array[2048, int32]
+    scratch[1] = i
+    echo scratch[0], " ", scratch[1]
