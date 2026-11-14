@@ -543,6 +543,8 @@ Read-only parameters borrow owned values for the duration of the call.
 Mutable parameters borrow exclusively: while the borrow is active, the
 container and its elements are accessible only through it or a temporary
 borrow forwarded to a child call. Two read-only borrows may coexist.
+Exclusivity applies to every `var` parameter, including scalars and fixed
+arrays. Read-only fixed arrays also participate in borrow conflict checks.
 Overlapping arguments are rejected when either permits mutation, including
 passing a container alongside a reference to one of its elements. Calls
 cannot bypass a borrow through a global alias, and borrowed references
@@ -808,22 +810,24 @@ containment (`m@k`), presence (`r@ok`), and dynamic index/length relations.
 - dynamic bounds tests: `if i >= 0 and i < s.len:` prove a direct index
   until either the index or the owning container changes. A loop over a
   stable `0 ..< s.len` range supplies the same relationship;
-- arithmetic: ranges combine through `+ - * / %` exactly.
+- arithmetic: conservative bounds combine through `+ - * / %`; an
+  unrepresentable intermediate bound cannot establish a narrower range.
 
 **What invalidates a fact:** assigning something wider, passing the
 variable as a `var` argument, using it as a `with` target, mutating it
 through a method, calling a routine that may write it (including a
 `with` block's `start`/`end`), releasing the lock that protected it, or
 entering a loop whose body modifies it (the loop condition re-proves
-what it can on every entry). Ordinary var params do not carry flow facts
-because they may alias. Exclusive borrows of owned storage support the
-facts needed for growable access. Aliasing itself is restricted: a global
+what it can on every entry). Ordinary `var` parameters conservatively use
+their declared ranges rather than carrying flow facts. Exclusive borrows
+of owned storage support the facts needed for growable access. Aliasing
+itself is restricted: a global
 cannot be passed as a `var` argument to a routine that also touches that global
 directly, and a `var` param cannot be forwarded toward a routine
 touching a type-compatible global.
-Owned storage additionally rejects overlapping mutable borrows, including
-aliases introduced by argument evaluation or accessing an element while
-another argument reallocates its container.
+All mutable parameters reject overlapping borrows, including aliases
+introduced by argument evaluation. For owned storage, this also prevents
+accessing an element while another argument reallocates its container.
 
 **Accumulator induction** — the one loop exception: in any loop with a
 proven trip bound, a local assigned *only* as `v = v + e` / `v = v - e`

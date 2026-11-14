@@ -169,6 +169,12 @@ proc body(a: Analysis, statements: seq[Stmt]): Protocol =
               for i in 0 ..< int(distance) + ord(s.inclusive):
                 result.append(iteration.actions)
     of WhileStmt, ForEachStmt:
+      if s.kind == WhileStmt:
+        var condition = Protocol(repeatAt: -1)
+        a.expression(s.cond, condition)
+        # A while condition is evaluated again after every iteration.
+        if condition.unknown or condition.actions.len > 0:
+          result.unknown = true
       let iteration = a.body(s.body)
       if iteration.unknown or iteration.stopped or iteration.actions.len > 0:
         result.unknown = true

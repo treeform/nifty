@@ -70,6 +70,8 @@ interpret the source or compile it to C at startup.
   checks, plus generic instantiation and validated argument conversions.
 - `src/nifty/semantics.nim`: shared binding identities, parameter modes,
   ownership inventory, and ordered cleanup on each scope and control edge.
+- `src/nifty/progress.nim`: foreign blocking checks and bounded exploration
+  of exact channel protocols, with explicit reporting of incomplete analyses.
 - `src/nifty/codegen.nim`: C emission from the checked AST and semantic plan.
 - `src/nifty/lowering.nim`: source evaluation order, explicit branches,
   optional values, numeric conversions, and emission of planned borrows and
@@ -205,6 +207,8 @@ POSIX calls and Darwin socket structures are not emulated.
 nim r tests/tests.nim
 nim r tests/test_semantics.nim
 nim r tests/test_progress.nim
+nim r tests/test_arithmeticproofs.nim
+nim r tests/test_runtimefailures.nim
 nim r tests/test_backend_engine.nim
 nim r tests/test_nativecontainers.nim
 nim r tests/test_nativeruntime.nim

@@ -145,6 +145,18 @@ thread consumer() =
 """)
 doAssert dependent.semantics.channelProgress.startsWith("not proven:")
 
+let repeatedCondition = checked("""
+var jobs: channel[1, bool]
+proc more(): bool =
+  return jobs.recv()
+thread producer() =
+  jobs.send(true)
+thread consumer() =
+  while more() max 2:
+    echo 1
+""")
+doAssert repeatedCondition.semantics.channelProgress.startsWith("not proven:")
+
 let oversized = checked("""
 var jobs: channel[1, int]
 thread producer() =

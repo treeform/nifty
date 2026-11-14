@@ -30,7 +30,7 @@ if buffer.reserve(128):
 ```
 
 The checker also accepts a guarded variable count such as
-`if n <= buffer.cap: read(fd, buffer, n)`, and a successful
+`if n >= 0 and n <= buffer.cap: read(fd, buffer, n)`, and a successful
 `buffer.reserve(n)` proves the same relationship. Changing either value
 invalidates that proof. A read-only literal has its known byte length,
 so `write(fd, "hello", 5)` is valid with a compatible fixed-string
