@@ -1,5 +1,5 @@
 ## Expands small checked constant ranges before native IR construction.
-import std/tables
+import std/[sets, tables]
 import types
 
 type NativeUnrollConfig* = object
@@ -8,7 +8,7 @@ type NativeUnrollConfig* = object
   maxGrowth*: int
 
 proc defaultNativeUnrollConfig*(): NativeUnrollConfig =
-  ## Bounds duplicated source work independently in each routine.
+  ## Bounds duplicated transitive helper work independently in each routine.
   NativeUnrollConfig(maxIterations: 32, maxBodyNodes: 100, maxGrowth: 1024)
 
 proc unrollNative*(source: Module,
@@ -20,6 +20,51 @@ proc unrollNative*(source: Module,
   var constants = initTable[string, int64]()
   for item in source.consts:
     constants[item.name] = item.value
+  var
+    routines = initTable[string, Routine]()
+    expandedCosts = initTable[string, int]()
+    estimating = initHashSet[string]()
+  for routine in source.routines:
+    routines[routine.name] = routine
+  let costCeiling = if config.maxGrowth < high(int):
+      max(0, config.maxGrowth) + 1 else: high(int)
+  proc addCost(total: var int, amount: int) =
+    ## Saturates estimates once duplication cannot fit the configured budget.
+    total = if amount >= costCeiling - total: costCeiling else: total + amount
+  proc expandedBodyCost(body: seq[Stmt]): int
+  proc expandedRoutineCost(name: string): int =
+    ## Caches transitive call expansion and conservatively bounds cycles.
+    if name in expandedCosts:
+      return expandedCosts[name]
+    if name in estimating:
+      return costCeiling
+    estimating.incl(name)
+    result = expandedBodyCost(routines[name].body)
+    estimating.excl(name)
+    expandedCosts[name] = result
+  proc expandedExpressionCost(value: Expr): int =
+    ## Includes known helper bodies that later IR inlining may expose.
+    if value.isNil:
+      return 0
+    result = 1
+    for child in value.kids:
+      result.addCost(expandedExpressionCost(child))
+    if value.kind == CallExpr and value.sval in routines:
+      result.addCost(expandedRoutineCost(value.sval))
+  proc expandedBodyCost(body: seq[Stmt]): int =
+    ## Estimates emitted work without multiplying loops inside called helpers.
+    for item in body:
+      result.addCost(1)
+      for value in [item.init, item.lhs, item.rhs, item.cond,
+          item.lo, item.hi, item.value]:
+        result.addCost(expandedExpressionCost(value))
+      for argument in item.args:
+        result.addCost(expandedExpressionCost(argument))
+      result.addCost(expandedBodyCost(item.body))
+      result.addCost(expandedBodyCost(item.elseBody))
+      for branch in item.elifs:
+        result.addCost(expandedExpressionCost(branch.cond))
+        result.addCost(expandedBodyCost(branch.body))
   proc constant(value: Expr, answer: var int64): bool =
     ## Accepts only side-effect-free integer literals and named constants.
     if value.isNil:
@@ -127,8 +172,14 @@ proc unrollNative*(source: Module,
           if distance <= uint64(config.maxIterations) and
               (not item.inclusive or distance < uint64(config.maxIterations)):
             count = int(distance) + ord(item.inclusive)
-      let added = if count >= 0: size * max(0, count - 1) else: 0
-      if count >= 0 and added <= config.maxGrowth - growth:
+      let
+        duplicates = max(0, count - 1)
+        expandedSize = if count > 1: expandedBodyCost(item.body) else: 0
+        fits = count >= 0 and config.maxGrowth >= growth and
+          (duplicates == 0 or expandedSize <=
+            (config.maxGrowth - growth) div duplicates)
+        added = if fits: expandedSize * duplicates else: 0
+      if fits:
         growth += added
         var expanded: seq[Stmt]
         for iteration in 0 ..< count:

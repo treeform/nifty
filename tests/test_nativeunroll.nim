@@ -14,7 +14,12 @@ proc evaluate(source: Module): int64 =
   var ctx: RuntimeContext
   type Entry = proc(ctx, arguments, returned, reserved: pointer)
     {.cdecl, raises: [].}
-  let entry = cast[Entry](cast[uint](buffer.entry()) + uint(image.offsets[1]))
+  var index = -1
+  for i, routine in source.routines:
+    if routine.name == "compute":
+      index = i + 1
+  doAssert index > 0
+  let entry = cast[Entry](cast[uint](buffer.entry()) + uint(image.offsets[index]))
   entry(ctx.addr, nil, result.addr, nil)
 
 proc loops(body: seq[Stmt]): int =
@@ -107,6 +112,31 @@ for i in 0 ..< 3:
     if answer <= 900:
       answer = answer + j
 return answer""", 3, 1)
+
+let transitiveText = """func inner(value: 0 .. 3): 0 .. 4 =
+  return value + 1
+func outer(value: 0 .. 3): 0 .. 4 =
+  return inner(value)
+proc compute(): int =
+  var answer: 0 .. 4 = 0
+  for i in 0 ..< 4:
+    answer = outer(i)
+  return answer
+thread main() =
+  discard compute()
+"""
+let transitive = parse(loadTokens(transitiveText, "transitive-unroll", ""))
+check(transitive)
+let
+  smallBudget = unrollNative(transitive,
+    NativeUnrollConfig(maxIterations: 32, maxBodyNodes: 100, maxGrowth: 16))
+  largeBudget = unrollNative(transitive,
+    NativeUnrollConfig(maxIterations: 32, maxBodyNodes: 100, maxGrowth: 64))
+doAssert loops(smallBudget.routines[2].body) == 1
+doAssert loops(largeBudget.routines[2].body) == 0
+doAssert evaluate(transitive) == 4
+doAssert evaluate(smallBudget) == 4
+doAssert evaluate(largeBudget) == 4
 
 for path in walkFiles("tests/scripts/*.nifty"):
   if path.extractFilename.startsWith("_"):
