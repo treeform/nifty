@@ -1,4 +1,4 @@
-import irs
+import irs, ircontexts
 
 type
   IrInlineConfig* = object
@@ -96,6 +96,13 @@ proc eligible(function: IrFunction, config: IrInlineConfig): bool =
       if function.instructions[index].op == FrameSizeOp:
         return false
   returned
+
+proc implicitContext(function: IrFunction): bool =
+  ## Detects operations whose runtime binding comes from the current routine.
+  for data in function.blocks:
+    for index in data.instructions.indices:
+      if function.instructions[index].op in {HostCallOp, GlobalAddressOp}:
+        return true
 
 proc inlineCall(function: var IrFunction, owner, index: int,
     callee: IrFunction) =
@@ -211,6 +218,7 @@ proc inlineIr*(module: var IrModule,
     var changed = true
     while changed and result.callsInlined < config.maxCalls:
       changed = false
+      let contexts = module.functions[owner].contextAliases(module.pointerBytes)
       for blockIndex, data in module.functions[owner].blocks:
         for instructionIndex in data.instructions.indices:
           let call = module.functions[owner].instructions[instructionIndex]
@@ -222,6 +230,16 @@ proc inlineIr*(module: var IrModule,
             inc result.candidatesRejected
             continue
           let callee = module.functions[target]
+          if callee.implicitContext():
+            let
+              entry = module.functions[owner].blocks[0].parameters
+              context = if call.arguments.count > 0:
+                  int32(module.functions[owner].operands[call.arguments.first])
+                else: -1'i32
+            if context < 0 or (not contexts[context] and
+                (entry.count == 0 or context != entry.first)):
+              inc result.candidatesRejected
+              continue
           if call.arguments.count != callee.blocks[0].parameters.count or
               call.results.count != callee.signature.returns.len:
             inc result.candidatesRejected

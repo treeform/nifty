@@ -70,7 +70,7 @@ proc branch(function: var IrFunction, condition: ValueId, yes, no: int) =
 const Abi = @[AddressType, AddressType, AddressType, AddressType]
 
 proc invoke(module: IrModule, index: int, input, output: pointer,
-    bindings: pointer = nil) =
+    bindings: pointer = nil, reserved: pointer = nil) =
   ## Verifies both targets and executes the host target's chosen entry.
   verifyIr(module)
   for target in NativeTarget:
@@ -86,7 +86,7 @@ proc invoke(module: IrModule, index: int, input, output: pointer,
           {.cdecl, raises: [].}
         let entry = cast[Entry](cast[uint](buffer.entry()) +
           uint(image.offsets[index]))
-        entry(ctx.addr, input, output, nil)
+        entry(ctx.addr, input, output, reserved)
         buffer.release()
 
 var vector = function("vector", Abi)
@@ -196,6 +196,30 @@ for optimized in [false, true]:
   doAssert argument == 13
   doAssert answer == 26
 
+var contextCaller = effectCaller
+contextCaller.name = "differentContext"
+contextCaller.operands[contextCaller.instructions[0].arguments.first] = ValueId(3)
+var contextModule = IrModule(pointerBytes: 8,
+  functions: @[effect, contextCaller], hosts: effectModule.hosts)
+doAssert contextModule.inlineIr().callsInlined == 0
+var
+  alternateContext = RuntimeContext(hosts: bindings.addr)
+  contextArgument = 5'i64
+  contextAnswer = 0'i64
+contextModule.invoke(1, contextArgument.addr, contextAnswer.addr,
+  reserved = alternateContext.addr)
+doAssert contextArgument == 13 and contextAnswer == 26
+var aliasCaller = function("sameContextAlias", Abi)
+let contextAlias = aliasCaller.instruction(ConvertOp, [ValueId(0)], AddressType)
+aliasCaller.instructions[^1].conversion = BitcastConversion
+discard aliasCaller.instruction(CallOp,
+  [contextAlias, ValueId(1), ValueId(2), ValueId(3)], target = 0, count = 0)
+aliasCaller.finish()
+var aliasModule = IrModule(pointerBytes: 8,
+  functions: @[effect, aliasCaller], hosts: effectModule.hosts)
+doAssert aliasModule.inlineIr().callsInlined == 1
+verifyIr(aliasModule)
+
 var scalar = function("scalar", @[AddressType, Int64Type], @[Int64Type])
 scalar.directOnly = true
 let increment = scalar.instruction(ConstantOp, [], bits = 1)
@@ -255,6 +279,57 @@ for optimized in [false, true]:
     answer: array[3, float32]
   bundleModule.invoke(2, argument.addr, answer.addr)
   doAssert answer == [4.0'f, 8.0'f, 12.0'f]
+
+var wideBundle = function("wideBundle", @[AddressType, Float64Type],
+  @[Float64Type, Float64Type, Float64Type])
+wideBundle.directOnly = true
+let
+  wideZero = wideBundle.instruction(ConstantOp, [], Float64Type)
+  wideCondition = wideBundle.instruction(CompareOp,
+    [ValueId(1), wideZero], BoolType)
+wideBundle.instructions[^1].comparison = LessComparison
+wideBundle.branch(wideCondition, 1, 2)
+discard wideBundle.newBlock()
+let
+  wideNegativeZero = wideBundle.instruction(ConstantOp, [], Float64Type,
+    bits = 0x8000000000000000'u64)
+  wideNan = wideBundle.instruction(ConstantOp, [], Float64Type,
+    bits = 0x7ff8000000001234'u64)
+wideBundle.finish([ValueId(1), wideNegativeZero, wideNan])
+discard wideBundle.newBlock()
+var wideLanes: seq[ValueId]
+for scale in [2.0, 3.0, 4.0]:
+  let factor = wideBundle.instruction(ConstantOp, [], Float64Type,
+    bits = cast[uint64](scale))
+  wideLanes.add(wideBundle.instruction(MultiplyOp,
+    [ValueId(1), factor], Float64Type))
+wideBundle.finish(wideLanes)
+var wideCaller = function("wideCaller", Abi)
+let
+  wideArgument = wideCaller.instruction(LoadOp, [ValueId(1)], Float64Type)
+  wideAnswer = wideCaller.instruction(CallOp,
+    [ValueId(0), wideArgument], Float64Type, target = 1, count = 3)
+for i in 0 ..< 3:
+  discard wideCaller.instruction(StoreOp,
+    [ValueId(2), ValueId(int32(wideAnswer) + int32(i))],
+    offset = int64(i * 8), count = 0)
+wideCaller.finish()
+var wideModule = IrModule(pointerBytes: 8,
+  functions: @[scalarEntry, wideBundle, wideCaller])
+for optimized in [false, true]:
+  if optimized:
+    doAssert wideModule.inlineIr().callsInlined == 1
+    doAssert wideModule.functions[2].blocks[^1].parameters.count == 3
+  for value in [4.0, -4.0]:
+    var
+      argument = value
+      answer: array[3, uint64]
+    wideModule.invoke(2, argument.addr, answer.addr)
+    let expected = if value < 0:
+        [cast[uint64](value), 0x8000000000000000'u64, 0x7ff8000000001234'u64]
+      else:
+        [cast[uint64](value * 2), cast[uint64](value * 3), cast[uint64](value * 4)]
+    doAssert answer == expected
 
 var budgetModule = IrModule(pointerBytes: 8, functions: @[vector, vectorCaller])
 var budget = defaultInlineConfig()
