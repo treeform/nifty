@@ -41,3 +41,11 @@ their ABI type. A C result declared `0 .. 0` is rejected because the C
 function may return another value. Check a full-range result before using it
 as an index or length. Foreign declarations still require an accurate ABI
 signature and a truthful maximum-access contract from the programmer.
+
+A top-level string parameter exposes its byte payload, keeping its length
+and capacity metadata private. Foreign-writable objects and arrays cannot
+contain strings, even fixed strings: their nested layouts include length
+metadata that a raw write could invalidate. Pass individual string payloads
+through bounded string parameters instead. Plain objects and arrays made
+from full-range ABI integers and floats remain writable. Foreign routines
+can return only ABI integers and floats, not container or object layouts.

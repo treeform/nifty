@@ -1,0 +1,1 @@
+error_extern_string_array.nifty:2: extern 'fill': writable parameter 'items' has a range or container invariant foreign code can violate

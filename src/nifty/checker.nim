@@ -342,7 +342,7 @@ proc validateOwnedType(t: Typ, line: int) =
     validateOwnedType(field.typ, line)
 
 proc foreignWritable(t: Typ): bool =
-  ## Checks that raw foreign writes preserve every declared range.
+  ## Checks raw storage for range and container invariants.
   if t == nil or t.opt:
     return false
   case t.kind
@@ -357,7 +357,7 @@ proc foreignWritable(t: Typ): bool =
       elif unsigned: (1'i64 shl bits) - 1
       else: (1'i64 shl (bits - 1)) - 1
     t.rlo == lo and t.rhi == hi
-  of FloatType, StringType:
+  of FloatType:
     true
   of ArrayType:
     foreignWritable(t.elem)
@@ -3831,9 +3831,13 @@ proc check*(m: Module) =
         if pm.typ.opt:
           err(r.line, "extern '" & r.name & "': optionals cannot cross " &
             "the C boundary")
-        if pm.isVar and not foreignWritable(pm.typ):
+        # A top-level string passes only its payload bytes. Strings inside
+        # aggregates expose length metadata that raw writes cannot preserve.
+        if pm.isVar and pm.typ.kind != StringType and
+            not foreignWritable(pm.typ):
           err(r.line, "extern '" & r.name & "': writable parameter '" &
-            pm.name & "' has a range foreign code can violate")
+            pm.name & "' has a range or container invariant foreign code " &
+            "can violate")
         if pm.isVar and pm.typ.kind in {StringType, ArrayType} and
             pm.boundedBy == "":
           err(r.line, "extern '" & r.name & "': writable buffer '" &

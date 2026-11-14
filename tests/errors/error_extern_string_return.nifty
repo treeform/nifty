@@ -1,0 +1,7 @@
+object Wrap =
+  text: string[8]
+extern "libc":
+  proc make(): Wrap
+thread main() =
+  let item = make()
+  echo item.text

@@ -1,0 +1,37 @@
+object Fields =
+  bytes: array[4, uint8]
+  count: int32
+object Text =
+  value: string[8]
+
+extern "libc":
+  proc clearFields "memset"(item: var Fields, value: int32, count: int64): int64
+  proc clearRows "memset"(items: var array[2, Fields] boundedBy 2, value: int32, count: int64): int64
+  proc fillFixed "memset"(text: var string[8] boundedBy count, value: int32, count: int64): int64
+  proc fillDynamic "memset"(text: var string boundedBy count, value: int32, count: int64): int64
+
+thread main() =
+  var item: Fields
+  item.bytes[0] = 9
+  item.count = 17
+  discard clearFields(item, 0, 8)
+  echo item.count, " ", item.bytes[0]
+  var rows: array[2, Fields]
+  rows[1].count = 9
+  discard clearRows(rows, 0, 16)
+  echo rows[1].count
+  var fixed: string[8]
+  discard fillFixed(fixed, 65, 3)
+  echo fixed.len
+  fixed.setLen(3)
+  echo fixed
+  var wrapped: Text
+  wrapped.value = "abc"
+  discard fillFixed(wrapped.value, 67, 3)
+  echo wrapped.value.len, " ", wrapped.value
+  var dynamic: string
+  if dynamic.reserve(8):
+    discard fillDynamic(dynamic, 66, 4)
+    echo dynamic.len
+    discard dynamic.setLen(4)
+    echo dynamic
