@@ -37,6 +37,11 @@ The default backend matches the compiler's native architecture. `run` is the
 default command; `build` writes an executable without running it. On an ARM64
 Mac, the CLI uses Rosetta when running an AMD64 executable.
 
+Native builds use `--opt:speed` by default. Select `--opt:none` to inspect or
+execute the lowered IR without the shared optimization pipeline. The same
+selection applies to `--emit-ir`, `--emit-native`, and native resource reports.
+The C backend continues to generate directly from the checked source AST.
+
 Inspect the C reference and native IR for the same program:
 
 ```sh
@@ -66,15 +71,57 @@ interpret the source or compile it to C at startup.
   serialization, and standalone packaging.
 
 The native path retains Nifty's checker and diagnostics. It uses Nifty's own
-fixed-capacity layouts rather than Nimkey's dynamic collections. Every routine
-receives an execution context, argument storage, result destination, and
-per-thread arena pointer. User arithmetic, branches, memory accesses, and
+fixed-capacity layouts rather than Nimkey's dynamic collections. Public and
+thread entries receive an execution context, argument storage, result
+destination, and per-thread arena pointer. Private routines can pass scalar
+arguments and return scalar values or small homogeneous floating records in
+registers. User arithmetic, branches, memory accesses, and
 routine calls are emitted as machine code; runtime helpers handle containers,
 I/O, synchronization, and external library interaction.
 
-The backend currently uses register allocation and target instruction
-simplification without importing Nimkey's broader IR optimization pipeline.
-This keeps the initial semantic contract small.
+## Native optimization
+
+The native pipeline ports Nimkey's generic IR passes: scalar replacement,
+constant folding, memory forwarding, dead value and store removal, common
+expression reuse, loop invariant motion, address simplification, private
+argument and return promotion, and branch cleanup. Checked constant ranges
+may be unrolled within fixed source and transitive call expansion budgets.
+Bounded CFG inlining and cleanup run for at most three rounds. Function indices
+remain stable for runtime thread descriptors.
+
+Typed storage metadata preserves field offsets, padding, optional payloads,
+and argument passing modes. Unknown external calls remain memory barriers.
+Return promotion requires complete stores on every reachable return and
+proves that delayed result writes cannot change observable behavior.
+Floating arithmetic retains its source order and precision, without fused
+multiply-add or reassociation. Floating records and SSA joins preserve their
+bits, including signed zero and NaN payloads.
+
+Standard `m.sqrt` and `m.sqrtf` declarations with their exact scalar signatures
+have a guarded hardware path. Integer bit classification accepts nonnegative
+numbers and negative zero; negative arguments and NaNs still call libm. Tests
+compare results, errno, floating exceptions, and rounding modes. Other external
+libraries and signatures retain ordinary calls.
+
+On macOS, exact float64 `m.floor` and `m.round` signatures also have native paths
+for numeric arguments, with NaNs sent to libm. ARM64 uses rounding instructions;
+AMD64 uses exact SSE2 bit operations, including ties away from zero for `round`.
+Other operating systems retain the rounding library calls until their libm
+behavior is validated.
+
+Both emitters use bounded wide memory transfers with overlap-safe copies.
+ARM64 also uses double-precision register moves, preserved float registers,
+exact floating immediates, paired loads, and comparisons against zero.
+AMD64 saves live floating registers around calls as needed. ARM64 saves volatile
+floats at guarded math fallback calls, keeping normal calls on its existing
+ABI-preserved register policy. The cold-call hint affects allocation only;
+fallbacks still run normally and preserve live values when taken. These changes
+keep values in registers along paths that do not execute a call and also
+apply with `--opt:none`.
+
+Saving floats at all ARM calls is available experimentally with the build flag
+`-d:nimkeyArmCallSaves`. The default retains ABI-preserved registers and spills;
+the experimental strategy regressed the raytracer on the measured ARM host.
 
 ## Resource reports
 
@@ -114,6 +161,20 @@ nim r tests/test_nativecontainers.nim
 nim r tests/test_nativeruntime.nim
 nim r tests/test_nativelowering.nim
 nim r tests/test_nativereports.nim
+nim r tests/test_iroptimizations.nim
+nim r tests/test_irinlines.nim
+nim r tests/test_irselects.nim
+nim r tests/test_irfloatcarriers.nim
+nim r tests/test_returnbundles.nim
+nim r tests/test_callsaves.nim
+nim r tests/test_armcalls.nim
+nim r tests/test_armconversions.nim
+nim r tests/test_floatconstants.nim
+nim r tests/test_round64.nim
+nim r tests/test_memoryops.nim
+nim r tests/test_nativeunroll.nim
+nim r tests/test_loweringoptimizations.nim
+nim r tests/test_nativemaths.nim
 nim r tests/test_native.nim "$PWD/nifty"
 ```
 
@@ -133,3 +194,58 @@ or excluded. Every sample is checked against its pixels, and checked-in
 Nimkey interpreter images provide independent references at 4, 16, and 64
 pixels square. See [benchmarks/README.md](benchmarks/README.md) for settings,
 artifacts, and timing details.
+
+For a frozen compiler comparison, `tools/compare_backends.py` builds both native
+compilers and C for each selected architecture before rotating measured runs:
+
+```sh
+python3 tools/compare_backends.py \
+  --baseline /path/to/frozen/nifty --candidate ./nifty \
+  --backend arm64 --backend amd64 --repeat 10 \
+  --output benchmarks/output/comparison
+```
+
+Keep the matching AMD64 runtime beside each compiler. The runner retains exact
+commands, compiler and executable hashes, all timings, and pixel checks. It uses
+the existing C flags, including `-O2` and `-ffp-contract=off`, and runs AMD64 C and
+native executables through Rosetta on Apple silicon. The default image sizes
+are 64 and 256. Independent reference pixels exist at 4, 16, and 64; 256 compares
+exact pixels across all variants.
+
+A sample starts a new process. `--repeat 1` measures a single render, while
+larger repetition counts report the average of a batch in that process. For
+generated AMD64 code under Rosetta, first-use translation can contribute to
+the timed render. Compare both single-frame and batch results; warmup processes
+do not establish that a later process's generated code is already translated.
+
+## Measured optimization results
+
+Measured on an Apple M4 Pro with Darwin 24.1.0, using compiler code revision
+`8a8a9d9` against the frozen `e517918` compiler. Seven measured processes follow
+two warmup processes; each renders ten frames. Values are median milliseconds
+per frame. AMD64 and its matching C reference both run through Rosetta.
+
+| Image | Target | Before | Optimized | Matching C |
+| --- | --- | ---: | ---: | ---: |
+| 64x64 | ARM64 | 34.142 | 0.460 | 0.466 |
+| 64x64 | AMD64 | 36.442 | 0.743 | 0.970 |
+| 256x256 | ARM64 | 561.547 | 7.170 | 7.160 |
+| 256x256 | AMD64 | 597.301 | 10.426 | 15.217 |
+
+ARM64 matches the C backend in these batch measurements. AMD64 takes 23-31%
+less render time. Native performance improves 49-78 times over the baseline.
+All RGB bytes match; independent references cover 4, 16, and 64 pixels square,
+while 256 compares every variant exactly.
+
+Single-frame latency remains a separate limitation. At 64x64, optimized ARM64
+takes 0.520 ms versus C's 0.471 ms, and AMD64 takes 1.598 ms versus C's 0.998 ms.
+At 256x256, ARM64 takes 7.274 ms versus 7.026 ms, and AMD64 takes 11.782 ms versus
+15.191 ms. The tiny fresh-process cases still trail C, particularly under
+Rosetta; batch averages must not be presented as single-frame latency.
+
+The local evidence is in `benchmarks/output/optimization-final/results.md`
+and its JSON, with single-frame samples in `optimization-final-single`.
+Reproduce with the comparison command above, adding `--samples 7 --warmups 2`.
+The C/ARM64/AMD64 corpus passes 495 checks in each optimization mode, inspecting
+102 native executables each time. All 19 focused native/optimizer test programs
+and the original 158 C golden tests also pass.

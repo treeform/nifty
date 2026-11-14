@@ -10,6 +10,7 @@
 /tests/tests
 /tests/nifty_t
 /nimcache/
+__pycache__/
 *.niftybin
 *.ir
 examples/*.c
