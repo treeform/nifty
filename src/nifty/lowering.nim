@@ -173,6 +173,26 @@ proc offset(g: var Lower, p: ValueId, n: int): ValueId =
   else: g.emit(IrInstruction(op: OffsetAddressOp, offset: int64(n)),
     [p, g.constant(0)], AddressType)
 
+proc fieldAddress(g: var Lower, p: ValueId, name: string,
+    fallback: int): ValueId =
+  ## Preserves concrete field identities through aggregate address paths.
+  let storage = g.plan.module.functions[g.fn].values[int32(p)].storage
+  if storage > 0:
+    let owner = g.plan.module.storageTypes[storage - 1]
+    if owner.kind == StructStorage:
+      for i in owner.fields.indices:
+        let field = g.plan.module.fields[i]
+        if field.name == name:
+          return g.emit(IrInstruction(op: FieldAddressOp,
+            target: int32(i)), [p], AddressType, field.storage)
+      for i in owner.fields.indices:
+        let field = g.plan.module.fields[i]
+        if field.name == "value":
+          let base = g.emit(IrInstruction(op: FieldAddressOp,
+            target: int32(i)), [p], AddressType, field.storage)
+          return g.fieldAddress(base, name, fallback)
+  g.offset(p, fallback)
+
 proc kind(g: Lower, v: ValueId): IrType =
   ## Reads one SSA scalar type.
   g.plan.module.functions[g.fn].values[int32(v)].valueType
@@ -406,9 +426,11 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
       int(argumentLayout.alignment), argumentType)
   for i, a in e.kids:
     if r.params[i].isVar:
-      g.store(g.offset(args, offsets[i]), g.path(a))
+      g.store(g.fieldAddress(args, r.params[i].name, offsets[i]),
+        g.path(a))
     else:
-      g.copy(g.offset(args, offsets[i]), g.expression(a), r.params[i].typ)
+      g.copy(g.fieldAddress(args, r.params[i].name, offsets[i]),
+        g.expression(a), r.params[i].typ)
   let output = if r.ret.isNil: g.null
     elif int32(dest) >= 0: dest
     else: g.allocType(r.ret)
@@ -478,10 +500,10 @@ proc path(g: var Lower, e: Expr): ValueId =
     let p = g.path(e.kids[0])
     let l = g.plan.layouts[g.layout(e.kids[0].typ)]
     if e.isOptOk:
-      return g.offset(p, l.okOffset)
+      return g.fieldAddress(p, "ok", l.okOffset)
     for f in l.fields:
       if f.name == e.sval:
-        return g.offset(p, f.offset)
+        return g.fieldAddress(p, f.name, f.offset)
     raise newException(NiftyError, "Native field unavailable: " & e.sval)
   of IndexExpr:
     let base = g.path(e.kids[0])
@@ -659,9 +681,63 @@ proc assignExpression(g: var Lower, dest: ValueId, e: Expr, t: Typ) =
         (aggregate(t) or scalar(ret) == scalar(t)):
       discard g.routineCall(e, dest)
       return
+  if aggregate(t) and e.kind in {IdentExpr, FieldExpr, IndexExpr} and
+      not e.wrapOpt and not e.unwrapOpt:
+    g.copy(dest, g.path(e), t)
+    return
   g.copy(dest, g.expression(e), t)
 
-proc statement(g: var Lower, s: Stmt) =
+proc initialized(g: var Lower, body: seq[Stmt], index: int): bool =
+  ## Proves consecutive writes initialize every byte before the first read.
+  let declaration = body[index]
+  if declaration.kind notin {VarStmt, LetStmt} or
+      declaration.init != nil or declaration.typ.kind != ObjectType or
+      declaration.typ.opt:
+    return false
+  proc mentions(e: Expr): bool =
+    ## Detects every direct reference to the not-yet-initialized local.
+    if e.isNil:
+      return false
+    if e.kind == IdentExpr and e.sval == declaration.name:
+      return true
+    for child in e.kids:
+      if mentions(child):
+        return true
+  proc destination(g: var Lower, e: Expr, offset: var int): bool =
+    ## Accepts only fixed fields rooted at the newly declared local.
+    if e.kind == IdentExpr:
+      return e.sval == declaration.name
+    if e.kind != FieldExpr or e.isOptOk or
+        e.kids[0].typ.kind != ObjectType or
+        not destination(g, e.kids[0], offset):
+      return false
+    let data = g.plan.layouts[g.layout(e.kids[0].typ)]
+    for field in data.fields:
+      if field.name == e.sval:
+        offset += field.offset
+        return true
+  var ranges: seq[tuple[first, last: int]]
+  let bytes = g.size(declaration.typ)
+  for i in index + 1 ..< body.len:
+    let assignment = body[i]
+    if assignment.kind != AssignStmt or mentions(assignment.rhs):
+      return false
+    var offset = 0
+    if not destination(g, assignment.lhs, offset):
+      return false
+    ranges.add((offset, offset + g.size(assignment.lhs.typ)))
+    var cursor = 0
+    for unused in 0 ..< ranges.len:
+      let before = cursor
+      for item in ranges:
+        if item.first <= cursor:
+          cursor = max(cursor, item.last)
+      if cursor == before:
+        break
+    if cursor >= bytes:
+      return true
+
+proc statement(g: var Lower, s: Stmt, initialize = true) =
   ## Lowers statements to explicit mutation and structured branches.
   g.line = s.line
   case s.kind
@@ -669,7 +745,8 @@ proc statement(g: var Lower, s: Stmt) =
     let p = g.allocType(s.typ)
     let retained = g.arena
     if s.init.isNil:
-      g.clear(p, g.size(s.typ))
+      if initialize:
+        g.clear(p, g.size(s.typ))
     else:
       g.assignExpression(p, s.init, s.typ)
     g.arena = retained
@@ -867,10 +944,11 @@ proc statement(g: var Lower, s: Stmt) =
 
 proc statements(g: var Lower, body: seq[Stmt]) =
   ## Lowers reachable statements and releases temporary arena slices.
-  for s in body:
+  for i, s in body:
     if not g.live: break
     let entry = g.arena
-    g.statement(s)
+    let initialize = not g.initialized(body, i)
+    g.statement(s, initialize)
     if s.kind notin {VarStmt, LetStmt}:
       g.arena = entry
 
@@ -950,9 +1028,14 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
       for p in g.routine.params:
         bytes = aligned(bytes, if p.isVar: 8 else:
           int(g.plan.layouts[g.layout(p.typ)].align))
-        let address = g.offset(ValueId(1), bytes)
-        g.bindings[p.name] = Binding(typ: p.typ,
-          address: if p.isVar: g.load(address, AddressType) else: address)
+        let address = g.fieldAddress(ValueId(1), p.name, bytes)
+        let bound = if p.isVar:
+            g.untyped(g.load(address, AddressType))
+          else: address
+        if p.isVar:
+          g.plan.module.functions[g.fn].values[int32(bound)].storage =
+            g.storage(p.typ)
+        g.bindings[p.name] = Binding(typ: p.typ, address: bound)
         bytes += (if p.isVar: 8 else: g.size(p.typ))
       if g.routine.externLib == "": g.statements(g.routine.body)
     if g.live:
