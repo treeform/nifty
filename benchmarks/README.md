@@ -51,6 +51,25 @@ records their provenance. An arbitrary size without a reference is labeled
 without a golden only establishes repeatability and the checksum invariants.
 Any error aborts the run without publishing timing results.
 
+The port retains float64 math, camera, scene, lighting, shadows, reflection
+depth, and rounded byte wrapping from `tests/benchmarks/raytracer.nimkey`.
+Nifty's recursion rule is respected by keeping six bounded reflection frames
+and combining their colors in reverse order. Fixed lookup functions replace
+the original constant scene arrays. Square root, floor, power, and round use
+the platform math library through Nifty's binary FFI.
+
+Normal benchmark runs do not require Nimkey. To regenerate the independent
+4, 16, and 64 pixel references, build the Nimkey revision recorded in
+`reference/manifest.json`, then run:
+
+```sh
+python3 benchmarks/generate_reference.py --nimkey /absolute/path/to/nimkey
+```
+
+This uses the original source snapshot in `reference/raytracer.nimkey` and
+Nimkey's interpreter in 32-pixel tiles. It records RGB hashes, checksums, and
+source provenance. The original MIT license is retained in `LICENSE`.
+
 The source has no runtime configuration parser. The runner changes only
 `ImageSize`, `Repetitions`, `EmitPixels`, and `ClockId` in generated copies
 inside the output directory. Tracked source stays untouched. Image size is
