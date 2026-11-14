@@ -48,16 +48,22 @@ proc scalarizeSlots*(module: var IrModule, floatTypes = false) =
         var
           offset = 0'i64
           known = false
+        let bytes = int64(old.slots[origin.slot].byteCount)
         if item.op == FieldAddressOp:
-          offset = module.fields[item.target].offset
+          offset = int64(module.fields[item.target].offset)
           known = true
         else:
           let b = old.operands[item.arguments.first + 1]
           if constants[int32(b)]:
             offset = cast[int64](bits[int32(b)])
-            known = offset >= 0 and
-              offset <= int64(old.slots[origin.slot].byteCount)
-        if known and origin.offset + offset <= old.slots[origin.slot].byteCount:
+            known = offset >= -bytes and offset <= bytes
+        if known and item.op in {FieldAddressOp, OffsetAddressOp}:
+          if item.offset < -bytes or item.offset > bytes:
+            known = false
+          else:
+            offset += item.offset
+        if known and offset >= -origin.offset and
+            offset <= bytes - origin.offset:
           origins[item.results.first] = (origin.slot, origin.offset + offset)
         else:
           escape(origin)
