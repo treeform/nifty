@@ -1,6 +1,6 @@
 import irs
 
-proc preserveFloatParameters*(function: var IrFunction): bool =
+proc preserveFloat32Parameters(function: var IrFunction): bool =
   ## Keeps exact float32 payloads typed across joins and loop backedges.
   let old = function
   var
@@ -174,3 +174,166 @@ proc preserveFloatParameters*(function: var IrFunction): bool =
       function.edges[index].arguments = Span(first: start,
         count: edge.arguments.count)
   function.instructions = move(instructions)
+
+proc preserveFloat64Parameters(function: var IrFunction): bool =
+  ## Keeps exact float64 payloads in the floating bank through CFG joins.
+  let old = function
+  var
+    candidates = newSeq[bool](old.values.len)
+    definitions = newSeq[int](old.values.len)
+  for definition in definitions.mitems:
+    definition = -1
+  for owner, data in old.blocks:
+    if owner > 0:
+      for value in data.parameters.indices:
+        candidates[value] = old.values[value].valueType in
+          {Int64Type, UInt64Type}
+    for index in data.instructions.indices:
+      let item = old.instructions[index]
+      if item.results.count == 1:
+        definitions[item.results.first] = index
+  proc source(value: ValueId): ValueId =
+    ## Finds an exact binary64 producer without evaluating floating arithmetic.
+    let index = int32(value)
+    if candidates[index]:
+      return value
+    let definition = definitions[index]
+    if definition < 0:
+      return NoValue
+    let item = old.instructions[definition]
+    if item.op == ConvertOp and item.conversion == BitcastConversion and
+        old.values[item.results.first].valueType in {Int64Type, UInt64Type}:
+      let argument = old.operands[item.arguments.first]
+      if old.values[int32(argument)].valueType == Float64Type:
+        return argument
+    NoValue
+  proc literal(value: ValueId): bool =
+    ## Accepts all 64 literal bits, including NaN payloads and signed zeros.
+    let definition = definitions[int32(value)]
+    definition >= 0 and old.instructions[definition].op == ConstantOp
+  var changed = true
+  while changed:
+    changed = false
+    template reject(value: ValueId) =
+      ## Rejects integer observations and repeats dependent incoming proofs.
+      if candidates[int32(value)]:
+        candidates[int32(value)] = false
+        changed = true
+    for data in old.blocks:
+      for index in data.instructions.indices:
+        let item = old.instructions[index]
+        for position in item.arguments.indices:
+          let value = old.operands[position]
+          if candidates[int32(value)] and not (
+              item.op == ConvertOp and item.conversion == BitcastConversion and
+              item.arguments.count == 1 and item.results.count == 1 and
+              old.values[item.results.first].valueType == Float64Type):
+            reject(value)
+      for position in data.terminator.arguments.indices:
+        reject(old.operands[position])
+      for index in data.terminator.edges.indices:
+        let edge = old.edges[index]
+        for position in 0 ..< int(edge.arguments.count):
+          let
+            value = old.operands[int(edge.arguments.first) + position]
+            parameter = ValueId(old.blocks[int32(edge.target)].
+              parameters.first + int32(position))
+          if candidates[int32(parameter)] and
+              int32(source(value)) < 0 and not literal(value):
+            reject(parameter)
+          if candidates[int32(value)] and not candidates[int32(parameter)]:
+            reject(value)
+  var floating = newSeq[bool](old.values.len)
+  for data in old.blocks:
+    for index in data.instructions.indices:
+      let item = old.instructions[index]
+      if item.op == ConvertOp and item.conversion == BitcastConversion and
+          item.results.count == 1 and
+          old.values[item.results.first].valueType == Float64Type:
+        let argument = int32(old.operands[item.arguments.first])
+        floating[argument] = candidates[argument]
+    for index in data.terminator.edges.indices:
+      let edge = old.edges[index]
+      for position in 0 ..< int(edge.arguments.count):
+        let
+          value = source(old.operands[int(edge.arguments.first) + position])
+          parameter = old.blocks[int32(edge.target)].parameters.first +
+            int32(position)
+        if candidates[parameter] and int32(value) >= 0 and
+            old.values[int32(value)].valueType == Float64Type:
+          floating[parameter] = true
+  changed = true
+  while changed:
+    changed = false
+    for data in old.blocks:
+      for index in data.terminator.edges.indices:
+        let edge = old.edges[index]
+        for position in 0 ..< int(edge.arguments.count):
+          let
+            value = int32(old.operands[int(edge.arguments.first) + position])
+            parameter = old.blocks[int32(edge.target)].parameters.first +
+              int32(position)
+          if candidates[value] and candidates[parameter] and
+              floating[value] != floating[parameter]:
+            floating[value] = true
+            floating[parameter] = true
+            changed = true
+  var replacements = newSeq[ValueId](old.values.len)
+  for value in replacements.mitems:
+    value = NoValue
+  for value in 0 ..< candidates.len:
+    candidates[value] = candidates[value] and floating[value]
+    if candidates[value]:
+      function.values[value].valueType = Float64Type
+      result = true
+  if not result:
+    return
+  for data in old.blocks:
+    for index in data.terminator.edges.indices:
+      let edge = old.edges[index]
+      for position in 0 ..< int(edge.arguments.count):
+        let parameter = old.blocks[int32(edge.target)].parameters.first +
+          int32(position)
+        if candidates[parameter]:
+          let value = old.operands[int(edge.arguments.first) + position]
+          if int32(source(value)) < 0 and int32(replacements[int32(value)]) < 0:
+            replacements[int32(value)] = ValueId(function.values.len)
+            function.values.add(IrValue(valueType: Float64Type))
+  var instructions: seq[IrInstruction]
+  for owner, data in old.blocks:
+    let first = int32(instructions.len)
+    for index in data.instructions.indices:
+      let item = old.instructions[index]
+      instructions.add(item)
+      if item.op == ConstantOp and
+          int32(replacements[item.results.first]) >= 0:
+        var copy = item
+        copy.results.first = int32(replacements[item.results.first])
+        instructions.add(copy)
+    function.blocks[owner].instructions = Span(first: first,
+      count: int32(instructions.len) - first)
+    for index in data.terminator.edges.indices:
+      let
+        edge = old.edges[index]
+        start = int32(function.operands.len)
+      for position in 0 ..< int(edge.arguments.count):
+        let
+          parameter = old.blocks[int32(edge.target)].parameters.first +
+            int32(position)
+          value = old.operands[int(edge.arguments.first) + position]
+        if candidates[parameter]:
+          let floating = source(value)
+          function.operands.add(if int32(floating) >= 0: floating
+            else: replacements[int32(value)])
+        else:
+          function.operands.add(value)
+      function.edges[index].arguments = Span(first: start,
+        count: edge.arguments.count)
+  function.instructions = move(instructions)
+
+proc preserveFloatParameters*(function: var IrFunction): bool =
+  ## Keeps exact binary32 and binary64 payloads typed across control flow.
+  let
+    single = function.preserveFloat32Parameters()
+    wide = function.preserveFloat64Parameters()
+  single or wide
