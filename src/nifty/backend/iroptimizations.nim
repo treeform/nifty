@@ -26,7 +26,7 @@ const DefaultIrOptimizations* = {
   RemoveIrIdentities, SimplifyIrParameters, ThreadIrJumps,
   MergeIrBlocks, ForwardIrStores, FoldIrConstants, HoistIrInvariants,
   PromoteIrSlots, SimplifyIrConversions, ReuseIrDominating, PromoteIrArguments,
-  ForwardIrFields, FoldIrAddresses, RemoveIrArguments,
+  PromoteIrReturns, ForwardIrFields, FoldIrAddresses, RemoveIrArguments,
   FoldIrPredicates, PreserveIrFloatSlots, SimplifyIrConditions, ForwardIrRegions,
   RemoveIrStores, RematerializeIrAddresses, RematerializeIrConstants,
   SeparateIrTemporaries, MergeIrParameters, ReduceIrRemainders, CacheIrArguments,
@@ -690,7 +690,10 @@ proc removeDead(function: var IrFunction, removableLoads: seq[bool] = @[]) =
   doAssert removableLoads.len == 0 or removableLoads.len == old.instructions.len
   proc removable(index: int): bool =
     ## Includes only memory reads whose validity was established separately.
-    old.instructions[index].op.pure() or
+    let item = old.instructions[index]
+    (item.op.pure() and item.op notin {DivideOp, RemainderOp} and
+      not (item.op == ConvertOp and
+        item.conversion == FloatIntegerConversion)) or
       (removableLoads.len > 0 and removableLoads[index])
   var
     live = newSeq[bool](old.values.len)

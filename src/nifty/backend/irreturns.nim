@@ -6,8 +6,6 @@ type ReturnPlan = object
   kinds: seq[IrType]
   addresses: seq[bool]
   stores: seq[int]
-  failedEdges: seq[bool]
-  failedReturns: seq[bool]
 
 proc roots(function: IrFunction): seq[int32] =
   ## Identifies addresses related only by full-width representation casts.
@@ -127,24 +125,12 @@ proc returnPlan(module: IrModule, function: IrFunction,
           return ReturnPlan()
   result.enabled = true
 
-proc successBlocks(function: IrFunction): seq[int] =
-  ## Rejects runtime-specific failure guards until complete-store proof exists.
-  result = newSeq[int](function.instructions.len)
-  for item in result.mitems:
-    item = -1
-
-proc completeRecord(module: IrModule, function: IrFunction,
-    plan: var ReturnPlan, successes: seq[int]): bool =
-  ## Proves complete successful writes and an unobservable final store tail.
-  let origins = roots(function)
-  plan.failedEdges = newSeq[bool](function.edges.len)
-  plan.failedReturns = newSeq[bool](function.blocks.len)
-  var seen = newSeq[bool](function.edges.len)
+proc completeResult(function: IrFunction, plan: ReturnPlan): bool =
+  ## Proves every return writes all lanes and no effect observes a delayed store.
   for data in function.blocks:
-    for edge in data.terminator.edges.indices:
-      if seen[edge]:
-        return false
-      seen[edge] = true
+    if data.terminator.kind notin
+        {JumpTerminator, BranchTerminator, ReturnTerminator}:
+      return false
   proc harmless(item: IrInstruction): bool =
     ## Allows only nontrapping scalar and address work after an output store.
     if item.volatile:
@@ -153,33 +139,24 @@ proc completeRecord(module: IrModule, function: IrFunction,
       return item.conversion != FloatIntegerConversion
     item.op in {ConstantOp, AddOp, SubtractOp, MultiplyOp, NegateOp,
       AndOp, OrOp, XorOp, NotOp, ShiftLeftOp, ShiftRightOp, ArithmeticRightOp,
-      CompareOp, SelectOp, SqrtOp, FloorOp, RoundOp, SlotAddressOp, GlobalAddressOp,
-      OffsetAddressOp, FieldAddressOp, FrameSizeOp}
+      CompareOp, SelectOp, SqrtOp, FloorOp, RoundOp, SlotAddressOp,
+      GlobalAddressOp, OffsetAddressOp, FieldAddressOp, FrameSizeOp}
   var
     tails = newSeq[bool](function.blocks.len)
-    emptyExits = newSeq[bool](function.blocks.len)
     changed = true
   while changed:
     changed = false
     for owner, data in function.blocks:
-      var
-        tail = data.terminator.kind == ReturnTerminator
-        empty = tail and data.instructions.count == 0
+      var tail = data.terminator.kind == ReturnTerminator
       if data.terminator.kind in {JumpTerminator, BranchTerminator}:
         tail = true
-        empty = data.instructions.count == 0
         for edge in data.terminator.edges.indices:
-          let target = int32(function.edges[edge].target)
-          tail = tail and tails[target]
-          empty = empty and emptyExits[target]
+          tail = tail and tails[int32(function.edges[edge].target)]
       for i in data.instructions.indices:
         tail = tail and (plan.stores[i] >= 0 or
           harmless(function.instructions[i]))
       if tail and not tails[owner]:
         tails[owner] = true
-        changed = true
-      if empty and not emptyExits[owner]:
-        emptyExits[owner] = true
         changed = true
   for data in function.blocks:
     var tail = data.terminator.kind == ReturnTerminator
@@ -205,43 +182,18 @@ proc completeRecord(module: IrModule, function: IrFunction,
     let owner = pending[cursor]
     inc cursor
     let data = function.blocks[owner]
-    var
-      mask = masks[owner]
-      success = -1
-      failed = false
+    var mask = masks[owner]
     for i in data.instructions.indices:
-      let item = function.instructions[i]
       if plan.stores[i] >= 0:
         mask = mask or (1 shl plan.stores[i])
-      if item.arguments.count == 0 or
-          origins[int32(function.operands[item.arguments.first])] !=
-            function.blocks[0].parameters.first:
-        continue
-      if item.op == CallOp and successes[i] >= 0:
-        success = successes[i]
-      elif item.op == HostCallOp and
-          i == int(data.instructions.first + data.instructions.count) - 1:
-        # These fixed runtime bindings always set this context's failure flag.
-        let host = module.hosts[item.target]
-        case host.binding
-        of 0:
-          failed = host.name == "$runtime.fail"
-        of 21:
-          failed = host.name == "$runtime.bounds"
-        else:
-          discard
     if data.terminator.kind == ReturnTerminator:
-      if not failed and mask != complete:
+      if mask != complete:
         return false
-      plan.failedReturns[owner] = failed
       continue
     for edge in data.terminator.edges.indices:
-      let target = int32(function.edges[edge].target)
-      if emptyExits[target] and
-          (failed or (success >= 0 and target != success)):
-        plan.failedEdges[edge] = true
-        continue
-      let combined = if reached[target]: masks[target] and mask else: mask
+      let
+        target = int32(function.edges[edge].target)
+        combined = if reached[target]: masks[target] and mask else: mask
       if not reached[target] or combined != masks[target]:
         reached[target] = true
         masks[target] = combined
@@ -250,11 +202,7 @@ proc completeRecord(module: IrModule, function: IrFunction,
 
 proc privateResult(module: IrModule, function: IrFunction,
     call: IrInstruction, plan: ReturnPlan): bool =
-  ## Keeps output storage disjoint from the runtime failure flag and caller.
-  let aliases = roots(function)
-  if aliases[int32(function.operands[call.arguments.first])] !=
-      function.blocks[0].parameters.first:
-    return false
+  ## Requires bounded caller-owned stack storage for the delayed output writes.
   var definitions = newSeq[int](function.values.len)
   for definition in definitions.mitems:
     definition = -1
@@ -272,7 +220,10 @@ proc privateResult(module: IrModule, function: IrFunction,
     let item = function.instructions[index]
     if item.op == SlotAddressOp:
       return offset >= 0 and offset <=
-        int64(function.slots[item.target].byteCount) - int64(plan.kinds.len * 4)
+        int64(function.slots[item.target].byteCount) -
+          int64(if plan.kinds.len == 1:
+            byteCount(plan.kinds[0], module.pointerBytes)
+          else: int32(plan.kinds.len * 4))
     if item.arguments.count == 0:
       return false
     let input = int32(function.operands[item.arguments.first])
@@ -301,23 +252,18 @@ proc privateResult(module: IrModule, function: IrFunction,
   false
 
 proc promoteReturns*(module: var IrModule, records = false): bool =
-  ## Returns private scalars and float32 records in SSA with failure guards.
-  var
-    plans: seq[ReturnPlan]
-    successes: seq[seq[int]]
+  ## Returns fully stored private results in SSA after explicit safety proofs.
+  var plans: seq[ReturnPlan]
   for function in module.functions:
-    plans.add(returnPlan(module, function, records))
-    successes.add(successBlocks(function))
-    if plans[^1].enabled and plans[^1].kinds.len > 1 and
-        not completeRecord(module, function, plans[^1], successes[^1]):
-      plans[^1].enabled = false
-  for index, function in module.functions:
-    for i, item in function.instructions:
-      if item.op == CallOp:
-        let plan = plans[item.target]
-        if successes[index][i] < 0 or (plan.enabled and plan.kinds.len > 1 and
-            not privateResult(module, function, item, plan)):
-          plans[item.target].enabled = false
+    var plan = returnPlan(module, function, records)
+    if plan.enabled and not completeResult(function, plan):
+      plan.enabled = false
+    plans.add(plan)
+  for function in module.functions:
+    for item in function.instructions:
+      if item.op == CallOp and plans[item.target].enabled and
+          not privateResult(module, function, item, plans[item.target]):
+        plans[item.target].enabled = false
     for data in function.blocks:
       if data.terminator.kind == InvokeTerminator:
         plans[data.terminator.callee].enabled = false
@@ -328,7 +274,7 @@ proc promoteReturns*(module: var IrModule, records = false): bool =
       plan = plans[index]
     var
       instructions: seq[IrInstruction]
-      transfers = newSeq[seq[IrInstruction]](function.blocks.len)
+      transfers = newSeq[seq[IrInstruction]](old.instructions.len)
       resultAddresses: seq[ValueId]
     proc emit(op: IrOpcode, inputs: openArray[ValueId], kind: IrType,
         location = NoLocation): ValueId =
@@ -402,7 +348,7 @@ proc promoteReturns*(module: var IrModule, records = false): bool =
           function.values.add(IrValue(valueType: AddressType))
           let arguments = Span(first: int32(function.operands.len), count: 1)
           function.operands.add(destination)
-          transfers[successes[index][i]].add(IrInstruction(op: ConvertOp,
+          transfers[i].add(IrInstruction(op: ConvertOp,
             arguments: arguments, conversion: BitcastConversion,
             results: Span(first: int32(address), count: 1),
             location: item.location))
@@ -410,12 +356,11 @@ proc promoteReturns*(module: var IrModule, records = false): bool =
           let arguments = Span(first: int32(function.operands.len), count: 2)
           function.operands.add([address, ValueId(int32(returned) +
             int32(lane))])
-          transfers[successes[index][i]].add(IrInstruction(op: StoreOp,
+          transfers[i].add(IrInstruction(op: StoreOp,
             arguments: arguments, offset: int64(lane * 4), alignment: 1,
             location: item.location))
     for owner, data in old.blocks:
       let first = if owner == 0: 0'i32 else: int32(instructions.len)
-      instructions.add(transfers[owner])
       for i in data.instructions.indices:
         var item = function.instructions[i]
         if plan.enabled and item.results.count == 1 and
@@ -438,11 +383,8 @@ proc promoteReturns*(module: var IrModule, records = false): bool =
             item.location)
         else:
           instructions.add(item)
+        instructions.add(transfers[i])
       if plan.enabled and data.terminator.kind == ReturnTerminator:
-        if plan.kinds.len > 1 and plan.failedReturns[owner]:
-          for lane, kind in plan.kinds:
-            let zero = emit(ConstantOp, [], kind)
-            discard emit(StoreOp, [resultAddresses[lane], zero], kind)
         var returned: seq[ValueId]
         for lane, kind in plan.kinds:
           let carrier = if kind == BoolType: UInt8Type else: kind
@@ -455,23 +397,6 @@ proc promoteReturns*(module: var IrModule, records = false): bool =
         function.operands.add(returned)
       function.blocks[owner].instructions = Span(first: first,
         count: int32(instructions.len) - first)
-    if plan.enabled and plan.kinds.len > 1:
-      for edge, failed in plan.failedEdges:
-        if not failed:
-          continue
-        let
-          original = function.edges[edge]
-          first = int32(instructions.len)
-        for lane, kind in plan.kinds:
-          let zero = emit(ConstantOp, [], kind)
-          discard emit(StoreOp, [resultAddresses[lane], zero], kind)
-        function.edges[edge] = IrEdge(target: BlockId(function.blocks.len))
-        function.blocks.add(IrBlock(
-          instructions: Span(first: first,
-            count: int32(instructions.len) - first),
-          terminator: IrTerminator(kind: JumpTerminator,
-            edges: Span(first: int32(function.edges.len), count: 1))))
-        function.edges.add(original)
     function.instructions = move(instructions)
     let operands = function.operands
     function.operands.setLen(0)
