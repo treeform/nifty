@@ -7,3 +7,16 @@ The upstream MIT license is preserved in LICENSE.nimkey.
 
 Frontend, packed runtime, and layout dependencies were replaced by the Nifty
 error boundary, a power-of-two alignment helper, and RuntimeContext.
+
+The public engine does not run an IR optimization pipeline. The emitters retain
+upstream register allocation and target instruction selection. Every Nifty
+routine accepts four pointers and returns through caller-owned storage.
+`NativeImage.offsets` addresses routine entries; offset zero is a separate
+convenience wrapper that clears the argument, return, and reserved pointers.
+
+Host bindings are a contiguous table of C function pointers selected by
+`IrHost.binding`, loaded through `RuntimeContext.hosts`. Host signatures support
+scalar integer, address, float32, and float64 values with at most one scalar
+return. ARM64 host calls accept at most eight integer/address and eight floating
+arguments; stack host arguments, aggregate C values, and C variadics are not
+supported there. AMD64 uses the build host platform's C calling convention.

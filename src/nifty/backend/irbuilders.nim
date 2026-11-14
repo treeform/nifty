@@ -254,7 +254,8 @@ proc beginFunction*(builder: var IrBuilder, index: int, label: Label) =
   builder.module.functions[index].values = newSeq[IrValue](4)
   for i, item in builder.module.functions[index].values.mpairs:
     item.valueType = AddressType
-    item.storage = builder.module.functions[index].signature.parameterStorage[i]
+    let storage = builder.module.functions[index].signature.parameterStorage
+    item.storage = if storage.len > 0: storage[i] else: 0
   builder.enter(0)
   builder.targets[int(label)] = Target(function: index, blockId: 0)
   builder.context = ValueId(0)

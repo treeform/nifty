@@ -1,4 +1,7 @@
 ## Emits verified Nifty IR to relocatable native machine code.
+## Routines accept (context, arguments, returned, reserved) pointers.
+## Hosts use scalar C signatures; ARM64 hosts fit eight registers per bank.
+## Aggregate and variadic C signatures are outside this backend contract.
 import common, irs, irmachines, iramds, memories
 export irs
 
@@ -14,6 +17,16 @@ type
 proc emitNative*(module: IrModule, target: NativeTarget): NativeImage
     {.raises: [BackendError].} =
   ## Emits actual IR routine entries separately from the leading wrapper.
+  if module.pointerBytes != 8:
+    error("Native code requires 64-bit pointers")
+  for function in module.functions:
+    if function.signature.parameters !=
+        @[AddressType, AddressType, AddressType, AddressType] or
+        function.signature.returns.len != 0:
+      error("Native routines require four address arguments and no return")
+  for host in module.hosts:
+    if host.binding < 0:
+      error("Native host binding must be nonnegative")
   result.target = target
   case target
   of Arm64Target:
