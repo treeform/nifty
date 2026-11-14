@@ -1,0 +1,11 @@
+func broad(): array[1, int] =
+  var values: array[1, int]
+  values[0] = 42
+  return values
+
+func narrow(): array[1, 0 .. 10] =
+  return broad()
+
+thread main() =
+  let value = narrow()
+  echo value[0]

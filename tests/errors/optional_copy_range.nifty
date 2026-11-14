@@ -1,0 +1,8 @@
+func reading(present: bool): int? =
+  if present:
+    return 42
+  return none
+
+thread main() =
+  let value: 0 .. 10? = reading(true)
+  echo value.or(0)

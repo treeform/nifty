@@ -1,0 +1,1 @@
+return_copy_range.nifty:7: cannot copy: ranges of array[1, int] do not fit array[1, 0 .. 10]

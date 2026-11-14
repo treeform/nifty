@@ -1185,6 +1185,13 @@ proc typeRangeFits(a, b: Typ): bool =
     typeRangeFits(a.val, b.val)
   else: true
 
+proc checkCopyRange(e: Expr, target: Typ) =
+  ## Copied payloads must preserve ranges; plain ints use flow facts instead.
+  if (target.opt or target.kind != IntType) and
+      not typeRangeFits(e.typ, target):
+    err(e.line, "cannot copy: ranges of " & $e.typ &
+      " do not fit " & $target)
+
 proc zeroOk(t: Typ): bool =
   ## Can this type be zero-initialized without violating a range?
   if t.opt:
@@ -1279,6 +1286,7 @@ proc checkDynamicMethod(c: var Ctx, e: Expr, bt: Typ): Typ =
         err(e.line, "cannot add " & $at & " to " & $bt)
       if bt.elem.kind == IntType and not exprFact(e.kids[1]).fits(bt.elem):
         err(e.line, "cannot prove value fits element range " & $bt.elem)
+      checkCopyRange(e.kids[1], bt.elem)
     result = Typ(kind: BoolType)
   of "pop":
     arity(0)
@@ -1743,6 +1751,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           err(e.kids[1].line, "cannot prove value (" &
             rangeStr(exprFact(e.kids[1])) & ") fits element range " &
             $bt.elem & "; guard or clamp first")
+        checkCopyRange(e.kids[1], bt.elem)
         if e.sval == "add":
           if lf.hi > bt.len - 1:
             err(e.line, "cannot prove '" & e.kids[0].sval & "' has room " &
@@ -1805,6 +1814,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           err(e.kids[1].line, "cannot prove value (" &
             rangeStr(exprFact(e.kids[1])) & ") fits element range " &
             $bt.elem & "; guard or clamp first")
+        checkCopyRange(e.kids[1], bt.elem)
         e.typ = nil
       of "recv":
         if nArgs != 0:
@@ -2030,6 +2040,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         if bt.val.kind == IntType and not exprFact(e.kids[2]).fits(bt.val):
           err(e.kids[2].line, "cannot prove value (" &
             rangeStr(exprFact(e.kids[2])) & ") fits " & $bt.val)
+        checkCopyRange(e.kids[2], bt.val)
         let cap = if dense: bt.setSize else: bt.len
         if key != "":
           c.facts[key] = Fact(lo: lf.lo, hi: min(lf.hi + 1, cap))
@@ -2068,6 +2079,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           err(e.kids[2].line, "fallback must be " & $bt.val & ", got " & $ft)
         if bt.val.kind == IntType and not exprFact(e.kids[2]).fits(bt.val):
           err(e.kids[2].line, "cannot prove fallback fits " & $bt.val)
+        checkCopyRange(e.kids[2], bt.val)
         e.typ = bt.val
         e.setFact typeFact(bt.val)
       of "contains":
@@ -2420,6 +2432,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       if t.kind == IntType and not initFact.fits(t):
         err(s.line, "cannot prove initializer (" & rangeStr(initFact) &
           ") fits '" & s.name & "' (" & $t & "); guard or clamp first")
+      checkCopyRange(s.init, t)
     else:
       if s.kind == LetStmt:
         err(s.line, "let requires an initializer")
@@ -2502,6 +2515,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         if bt.val.kind == IntType and not exprFact(s.rhs).fits(bt.val):
           err(s.line, "cannot prove value (" & rangeStr(exprFact(s.rhs)) &
             ") fits " & $bt.val)
+        checkCopyRange(s.rhs, bt.val)
         let mname = s.lhs.kids[0].sval
         c.markModified(mname)
         let pk = c.mapFactKey(s.lhs.kids[0], s.lhs.kids[1])
@@ -2966,6 +2980,7 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         if not rf.fits(c.cur.ret):
           err(s.line, "cannot prove return value (" & rangeStr(rf) &
             ") fits " & $c.cur.ret & "; guard or clamp first")
+      checkCopyRange(s.value, c.cur.ret)
   of BreakStmt:
     if c.loopWiths.len == 0:
       err(s.line, "break outside a loop")
