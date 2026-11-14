@@ -1,0 +1,15 @@
+var g: int
+
+proc start(x: var int) =
+  g = 0
+
+proc end(x: var int) =
+  g = 0
+
+thread main() =
+  g = 1
+  var x: int
+  for i in 0 ..< 2:
+    echo 10 / g
+    with x:
+      echo i
