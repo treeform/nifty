@@ -1,5 +1,5 @@
 ## Checks interval proofs against concrete signed arithmetic near int64 limits.
-import std/random
+import std/[random, strutils]
 import ../src/nifty
 
 const
@@ -51,3 +51,15 @@ try:
 except NiftyError:
   rejected = true
 doAssert rejected, "The maximum remainder must not prove safe to increment"
+
+let hugeLoop = "thread main() =\n" &
+  "  for i in (-9223372036854775807 - 1) ..< 9223372036854775807:\n" &
+  "    echo 1\n"
+let hugeReport = reportFor(hugeLoop, "huge.nifty")
+doAssert "not representable (abstract ops exceed int64)" in hugeReport
+doAssert "9223372036854775807 ops total" notin hugeReport
+
+let smallLoop = "thread main() =\n" &
+  "  for i in 0 ..< 3:\n" &
+  "    echo i\n"
+doAssert "ops total" in reportFor(smallLoop, "small.nifty")
