@@ -435,8 +435,8 @@ proc verifyIr*(module: IrModule) {.raises: [BackendError].} =
             "memory operand is not an address")
           let pointer = function.values[int32(function.operands[arguments.first])]
           if instruction.op in {MoveBytesOp, ClearBytesOp}:
-            require(instruction.byteCount >= 0 and instruction.byteCount <=
-              256, "aggregate byte span exceeds materialization limit")
+            require(instruction.byteCount >= 0,
+              "aggregate byte span must be nonnegative")
             require(instruction.target >= 0 and
               instruction.target <= module.storageTypes.len,
               "invalid aggregate storage identity")

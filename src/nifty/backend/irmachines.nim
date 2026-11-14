@@ -625,6 +625,44 @@ proc emitArm64Ir*(module: ir.IrModule,
           if item.offset != 0:
             code.loadImmediate(Word64, X13, item.offset)
             code.addRegister(Word64, integerResult, integerResult, X13)
+        of ir.MoveBytesOp, ir.ClearBytesOp:
+          if item.byteCount == 0:
+            continue
+          code.integer(operand(0), X12)
+          code.loadImmediate(Word64, X14, int64(item.byteCount))
+          let
+            forward = code.label()
+            backward = code.label()
+            finished = code.label()
+          if item.op == ir.MoveBytesOp:
+            code.integer(operand(1), X13)
+            code.compareRegister(Word64, X12, X13)
+            code.branchIf(UnsignedGreaterCondition, backward)
+          code.place(forward)
+          if item.op == ir.MoveBytesOp:
+            code.loadByte(X15, X13)
+            code.storeByte(X15, X12)
+            code.addImmediate(Word64, X13, X13, 1)
+          else:
+            code.storeByte(ZeroRegister, X12)
+          code.addImmediate(Word64, X12, X12, 1)
+          code.subtractImmediate(Word64, X14, X14, 1)
+          code.branchIfNotZero(Word64, X14, forward)
+          code.branch(finished)
+          code.place(backward)
+          if item.op == ir.MoveBytesOp:
+            code.addRegister(Word64, X12, X12, X14)
+            code.addRegister(Word64, X13, X13, X14)
+            let repeat = code.label()
+            code.place(repeat)
+            code.subtractImmediate(Word64, X12, X12, 1)
+            code.subtractImmediate(Word64, X13, X13, 1)
+            code.loadByte(X15, X13)
+            code.storeByte(X15, X12)
+            code.subtractImmediate(Word64, X14, X14, 1)
+            code.branchIfNotZero(Word64, X14, repeat)
+          code.place(finished)
+          continue
         of ir.LoadOp, ir.StoreOp:
           var base = code.integerOperand(operand(0), X13)
           let kind = if item.op == ir.LoadOp: resultKind else: operandKind(1)
@@ -998,8 +1036,6 @@ proc emitArm64Ir*(module: ir.IrModule,
             else: error("Unsupported integer IR arithmetic")
             if not word:
               code.normalize(resultKind, integerResult)
-        else:
-          error("Unsupported complete ARM64 IR instruction: " & $item.op)
         if item.results.count > 0:
           if resultKind.floating(): code.putFloat(resultId, floatResult)
           else: code.putInteger(resultId, integerResult)

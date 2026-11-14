@@ -177,6 +177,21 @@ discard stacked.instruction(StoreOp, [ValueId(2), stackedValue], resultCount = 0
 stacked.finish()
 module.functions.add(stacked)
 
+for operation in [MoveBytesOp, ClearBytesOp]:
+  var memory = newFunction($operation)
+  if operation == MoveBytesOp:
+    discard memory.instruction(operation, [ValueId(2), ValueId(1)],
+      resultCount = 0)
+  else:
+    discard memory.instruction(operation, [ValueId(1)], resultCount = 0)
+  memory.instructions[^1].byteCount = 1024
+  memory.finish()
+  module.functions.add(memory)
+var empty = newFunction("emptyMove")
+discard empty.instruction(MoveBytesOp, [ValueId(2), ValueId(1)], resultCount = 0)
+empty.finish()
+module.functions.add(empty)
+
 var builder = IrBuilder(module: IrModule(pointerBytes: 8))
 let builderLabel = builder.label()
 builder.declareFunctions(["builder"], [builderLabel])
@@ -243,6 +258,22 @@ for target in NativeTarget:
       doAssert answer == 0
       entry(6)(ctx.addr, nil, doubleAnswer.addr, nil)
       doAssert doubleAnswer == 210.75
+      var data, expected: array[2048, byte]
+      for i in 0 ..< data.len:
+        data[i] = byte(i mod 251)
+      expected = data
+      moveMem(expected[13].addr, expected[0].addr, 1024)
+      entry(7)(ctx.addr, data[0].addr, data[13].addr, nil)
+      doAssert data == expected
+      moveMem(expected[0].addr, expected[13].addr, 1024)
+      entry(7)(ctx.addr, data[13].addr, data[0].addr, nil)
+      doAssert data == expected
+      entry(7)(ctx.addr, data[0].addr, data[0].addr, nil)
+      doAssert data == expected
+      zeroMem(expected[100].addr, 1024)
+      entry(8)(ctx.addr, data[100].addr, nil, nil)
+      doAssert data == expected
+      entry(9)(ctx.addr, nil, nil, nil)
       buffer.release()
       doAssert buffer.entry() == nil
 

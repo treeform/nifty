@@ -718,6 +718,44 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
           if item.offset != 0:
             code.loadImmediate(Rcx, item.offset)
             code.add(Rax, Rcx)
+        of ir.MoveBytesOp, ir.ClearBytesOp:
+          if item.byteCount == 0:
+            continue
+          code.integer(operand(0), R8)
+          code.loadImmediate(Rcx, int64(item.byteCount))
+          let
+            forward = code.label()
+            backward = code.label()
+            finished = code.label()
+          if item.op == ir.MoveBytesOp:
+            code.integer(operand(1), R9)
+            code.compare(R8, R9)
+            code.jumpIf(Above, backward)
+          else:
+            code.loadImmediate(Rax, 0)
+          code.place(forward)
+          if item.op == ir.MoveBytesOp:
+            code.loadSized(Rax, R9, 0, 1)
+            code.addImmediate(R9, 1)
+          code.storeSized(Rax, R8, 0, 1)
+          code.addImmediate(R8, 1)
+          code.addImmediate(Rcx, -1)
+          code.jumpIf(NotEqual, forward)
+          code.jump(finished)
+          code.place(backward)
+          if item.op == ir.MoveBytesOp:
+            code.add(R8, Rcx)
+            code.add(R9, Rcx)
+            let repeat = code.label()
+            code.place(repeat)
+            code.addImmediate(R8, -1)
+            code.addImmediate(R9, -1)
+            code.loadSized(Rax, R9, 0, 1)
+            code.storeSized(Rax, R8, 0, 1)
+            code.addImmediate(Rcx, -1)
+            code.jumpIf(NotEqual, repeat)
+          code.place(finished)
+          continue
         of ir.LoadOp, ir.StoreOp:
           var
             base = code.integerOperand(operand(0), Rcx)
@@ -1000,8 +1038,6 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
             else:
               error("Unsupported integer AMD64 IR arithmetic")
             code.normalize(resultKind)
-        else:
-          error("Unsupported complete AMD64 IR instruction: " & $item.op)
         if item.results.count > 0:
           if resultKind.floating(): code.putFloat(resultId)
           else: code.putInteger(resultId)
