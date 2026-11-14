@@ -8,9 +8,13 @@ The upstream MIT license is preserved in LICENSE.nimkey.
 Frontend, packed runtime, and layout dependencies were replaced by the Nifty
 error boundary, a power-of-two alignment helper, and RuntimeContext.
 
-The public engine does not run an IR optimization pipeline. The emitters retain
-upstream register allocation and target instruction selection. Every Nifty
-routine accepts four pointers and returns through caller-owned storage.
+The optimizer and its generic analysis and rewriting modules are also adapted
+from that revision. Default passes preserve floating point evaluation order and
+do not vectorize or prune procedure bodies. Large aggregate operations remain
+bounded emitter operations instead of expanding into scalar instruction pools.
+The emitters retain upstream register allocation and instruction selection.
+Externally callable Nifty routines accept four pointers and return through
+caller-owned storage.
 `NativeImage.offsets` addresses routine entries; offset zero is a separate
 convenience wrapper that clears the argument, return, and reserved pointers.
 
