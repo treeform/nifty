@@ -96,4 +96,10 @@ copy and is released automatically when the local leaves scope.
 The ABI receives only the bytes pointer. The foreign function must not
 modify the bytes or retain that address after returning. C-string returns
 are rejected until a foreign ownership and lifetime contract is available.
+The same restriction covers escaping aliases: a binding must not return or
+write out an opaque pointer into a scoped C-string owner. Functions such as
+`strchr` need a binding that returns an offset or a copy instead. The current
+opaque type does not track a pointer's borrowed lifetime. As with the
+maximum-access contract, this is a requirement on the foreign declaration;
+the compiler cannot inspect a foreign implementation to prove it.
 See the [C-string rules](../spec.md#nul-terminated-input-cstring).

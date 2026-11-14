@@ -653,7 +653,7 @@ proc parseModule(p: var Parser): Module =
           name in ["int", "bool", "Lock", "array", "seq", "string", "set",
             "queue", "channel", "map", "int8", "uint8", "char", "int16",
             "uint16", "int32", "uint32", "int64", "uint64", "float32",
-            "float64", "opaque"]:
+            "float64", "opaque", "cstring"]:
         err(t.line, "duplicate or reserved type name: '" & name & "'")
       p.expectOp("=")
       p.expectKeyword("opaque")

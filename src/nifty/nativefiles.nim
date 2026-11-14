@@ -136,6 +136,19 @@ proc validateNative*(program: NativeProgram) =
   for host in plan.hosts:
     if host.paramTypes.len != host.paramOffsets.len:
       raise newException(NiftyError, "invalid native host parameters")
+    if host.kind == ContainerHost:
+      if host.receiverType < 0 or host.receiverType >= plan.layouts.len or
+          host.resultType < -1 or host.resultType >= plan.layouts.len:
+        raise newException(NiftyError, "invalid native container host layout")
+      if host.operation == "toCString":
+        if host.resultType < 0 or host.paramTypes.len != 0:
+          raise newException(NiftyError, "invalid native cstring conversion")
+        let source = plan.layouts[host.receiverType]
+        let target = plan.layouts[host.resultType]
+        if source.kind != StringType or source.optional or
+            target.kind != StringType or not target.optional or
+            not target.dynamic or not target.owned:
+          raise newException(NiftyError, "invalid native cstring conversion")
     for i, typ in host.paramTypes:
       if typ < 0 or typ >= plan.layouts.len or host.paramOffsets[i] < 0:
         raise newException(NiftyError, "invalid native host argument")

@@ -265,6 +265,10 @@ An extern `cstring` parameter passes a borrowed pointer to NUL-terminated
 bytes, never the Nifty owner descriptor. The foreign routine must read only
 through the first NUL and must neither modify nor retain the address.
 Foreign `cstring` returns and writable `var cstring` parameters are rejected.
+Bindings must not expose aliases into a scoped C-string owner's bytes through
+opaque results, output parameters, or retained global pointers. Use an
+offset/copy adapter for APIs returning views until borrowed lifetimes can be
+expressed. This non-escape promise is part of the trusted foreign contract.
 NUL-free literals can be passed directly to an extern or ordinary `cstring`
 parameter with no heap allocation, including the empty literal.
 
