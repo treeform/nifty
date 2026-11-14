@@ -901,7 +901,8 @@ proc emitArm64Ir*(module: ir.IrModule,
           case item.conversion
           of ir.IntegerFloatConversion:
             let source = code.integerOperand(operand(0), X12)
-            code.integerToFloat(scratchFloat, source, single,
+            floatResult = floatDestination(resultId)
+            code.integerToFloat(floatResult, source, single,
               sourceKind in {ir.UInt8Type, ir.UInt16Type, ir.UInt32Type,
                 ir.UInt64Type})
           of ir.FloatIntegerConversion:
@@ -911,14 +912,18 @@ proc emitArm64Ir*(module: ir.IrModule,
                 let source = code.floatOperand(operand(0), scratchFloat)
                 code.floatToInteger(integerResult, source, single = true)
             else:
-              code.floating(operand(0), scratchFloat)
               if sourceKind == ir.Float32Type:
+                code.floating(operand(0), scratchFloat)
                 code.floatConvert(scratchFloat, scratchFloat, false)
-              code.floatToInteger(integerResult, scratchFloat)
+                code.floatToInteger(integerResult, scratchFloat)
+              else:
+                let source = code.floatOperand(operand(0), scratchFloat)
+                code.floatToInteger(integerResult, source)
             code.normalize(resultKind, integerResult)
           of ir.FloatWidthConversion:
-            code.floating(operand(0), scratchFloat)
-            code.floatConvert(scratchFloat, scratchFloat, single)
+            let source = code.floatOperand(operand(0), scratchFloat)
+            floatResult = floatDestination(resultId)
+            code.floatConvert(floatResult, source, single)
           else:
             if floatBits and item.conversion == ir.BitcastConversion and
               ((sourceKind == ir.Float32Type and
