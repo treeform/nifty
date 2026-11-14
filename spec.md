@@ -211,13 +211,17 @@ vendor type zoo, no unbuildable includes.
 
 ```nim
 extern "libc":
-  proc pipe(fds: var array[2, int32]): int32
-  proc writeFd "write" (fd: int32, buf: string[64], n: int64): int64
-  proc readFd "read" (fd: int32, buf: var string[64], cap: int64): int64
+  proc pipe(fds: var array[2, int32] boundedBy 2): int32
+  proc writeFd "write" (fd: int32, buf: string[64] boundedBy n, n: int64): int64
+  proc readFd "read" (fd: int32, buf: var string[64] boundedBy cap, cap: int64): int64
 ```
 
 - The optional string after the name is the C symbol (`writeFd` calls
   `write`). `"libc"` links for free; any other name adds `-lname`.
+- `boundedBy` names a count parameter, constant, or literal. At each
+  call the checker proves the count fits the writable buffer capacity
+  or the readable string length. A mutable string or array extern
+  requires this contract. See [foreign buffer contracts](docs/ffi.md).
 - **Arguments are proven, returns are not.** Passing into an `int32`
   parameter is the ordinary range-fit proof (a lossy narrowing does
   not compile). A return is trusted only as far as its C type
@@ -226,6 +230,11 @@ extern "libc":
   `if got >= 0 and got <= 64: buf.setLen(got)`. `setLen` proves the
   new length fits the capacity; any byte C wrote is a valid string
   byte, so nothing unsound can enter.
+- A foreign return or writable integer field cannot claim a range
+  narrower than its ABI storage permits. In particular, `uint64`
+  results cannot be received as nifty `uint64`, because the C value
+  may exceed `int64.high`; receive the bits as `int64` if that signed
+  interpretation is appropriate for the API.
 - Pointers exist only at the boundary: `var` passes the address
   (scalars, objects), strings and arrays pass their data pointers
   (`var` = writable, otherwise `const`). Opaque C pointers are held as
@@ -316,7 +325,8 @@ parameters — which is what a reusable routine should do anyway.
   engine (no C promotion rules, no width-dependent overflow: the
   generated C widens operands to 64 bits, so `int32 * int32` is exact).
   `uint64` is stored as 8 unsigned bytes for binary compatibility, but
-  nifty values stay within `0 .. int64.high`. There is no wraparound
+  nifty values stay within `0 .. int64.high`; raw foreign `uint64`
+  returns are rejected because C may return a larger value. There is no wraparound
   anywhere: exceeding a range is the ordinary overflow error.
 - `char` — one byte, always: a UTF-8 code unit (same range and storage
   as `uint8`). A Unicode code point may span several chars; strings are

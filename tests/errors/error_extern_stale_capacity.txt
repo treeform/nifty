@@ -1,0 +1,1 @@
+error_extern_stale_capacity.nifty:8: cannot prove foreign buffer 'buffer' has 0 .. 100 accessible bytes or elements (available at least 0); resize or guard first
