@@ -1,6 +1,6 @@
 ## Checks constant-range expansion against the original native behavior.
 import std/[os, strutils]
-import nifty/[parser, loader, checker, lowering, nativeunroll, types]
+import nifty/[common, parser, loader, checker, lowering, nativeunroll, types]
 import nifty/backend/[engine, context, memories]
 
 proc evaluate(source: Module): int64 =
@@ -105,6 +105,16 @@ for i in 1 ..< 4:
 return answer""", 6, 1,
   NativeUnrollConfig(maxIterations: 32, maxBodyNodes: 100, maxGrowth: 0))
 verify("""var answer: -1000 .. 1000 = 0
+for i in 1 ..< 1:
+  answer = 7
+return answer""", 0, 1,
+  NativeUnrollConfig(maxIterations: 32, maxBodyNodes: 100, maxGrowth: -1))
+verify("""var answer: -1000 .. 1000 = 0
+for i in 1 ..< 2:
+  answer = i
+return answer""", 1, 0,
+  NativeUnrollConfig(maxIterations: 32, maxBodyNodes: 100, maxGrowth: 0))
+verify("""var answer: -1000 .. 1000 = 0
 for i in 0 ..< 3:
   for j in 0 ..< 4:
     if j == 2:
@@ -113,13 +123,14 @@ for i in 0 ..< 3:
       answer = answer + j
 return answer""", 3, 1)
 
-let transitiveText = """func inner(value: 0 .. 3): 0 .. 4 =
+let transitiveText = """const Count = 4
+func inner(value: 0 .. 3): 0 .. 4 =
   return value + 1
 func outer(value: 0 .. 3): 0 .. 4 =
   return inner(value)
 proc compute(): int =
   var answer: 0 .. 4 = 0
-  for i in 0 ..< 4:
+  for i in 0 ..< Count:
     answer = outer(i)
   return answer
 thread main() =
@@ -137,6 +148,36 @@ doAssert loops(largeBudget.routines[2].body) == 0
 doAssert evaluate(transitive) == 4
 doAssert evaluate(smallBudget) == 4
 doAssert evaluate(largeBudget) == 4
+
+proc rejectShadow(text, expected: string) =
+  ## Verifies the checked-tree invariant used by induction substitution.
+  var rejected = false
+  try:
+    let source = parse(loadTokens(text, "unroll-shadow", ""))
+    check(source)
+  except NiftyError as error:
+    rejected = expected in error.msg
+  doAssert rejected
+
+rejectShadow("""thread main() =
+  for i in 0 ..< 3:
+    block:
+      let i = 9
+      echo i
+""", "'i' is already declared (shadowing is not allowed)")
+rejectShadow("""const Limit = 3
+thread main() =
+  block:
+    let Limit = 1
+    for i in 0 ..< Limit:
+      echo i
+""", "'Limit' is already declared (shadowing is not allowed)")
+rejectShadow("""const Limit = 3
+proc compute(Limit: int) =
+  discard Limit
+thread main() =
+  compute(1)
+""", "duplicate or shadowing parameter name: 'Limit'")
 
 for path in walkFiles("tests/scripts/*.nifty"):
   if path.extractFilename.startsWith("_"):

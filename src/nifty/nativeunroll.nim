@@ -74,7 +74,7 @@ proc unrollNative*(source: Module,
       answer = value.ival
       true
     of IdentExpr:
-      if value.sval notin constants:
+      if value.symKind != ConstSym or value.sval notin constants:
         return false
       answer = constants[value.sval]
       true
