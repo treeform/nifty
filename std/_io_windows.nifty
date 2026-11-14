@@ -1,0 +1,10 @@
+# CRT byte writes use bounded chunks; _write's count and result are 32-bit.
+extern "libc":
+  proc ioRawWrite "_write"(descriptor: int32, data: string[4096] boundedBy count, count: int32): int32
+  proc ioSetMode "_setmode"(descriptor: int32, mode: int32): int32
+
+proc ioWriteChunk(data: string[4096]): int64 =
+  # Keep bytes exact when stdout is redirected (including LF and NUL).
+  if ioSetMode(1, 32768) < 0:
+    return -1
+  return ioRawWrite(1, data, data.len)

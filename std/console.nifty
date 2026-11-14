@@ -1,0 +1,22 @@
+import _io_platform
+
+const IoChunkSize = 4096
+# Leave one scratch chunk of headroom for checked offset arithmetic.
+const IoMaxBytes = 9223372036854771711
+
+proc write(text: string): bool =
+  if text.len > IoMaxBytes:
+    return false
+  var sent: 0 .. IoMaxBytes = 0
+  while sent < text.len max IoMaxBytes:
+    var chunk: string[IoChunkSize]
+    chunk.copyRange(text, sent, text.len)
+    let written = ioWriteChunk(chunk)
+    if written <= 0 or written > IoChunkSize or written > chunk.len:
+      return false
+    let next = sent + written
+    if next > IoMaxBytes:
+      return false
+    sent = next
+  return true
+

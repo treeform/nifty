@@ -1,0 +1,5 @@
+extern "libc":
+  proc ioRawWrite "write"(descriptor: int32, data: string[4096] boundedBy count, count: int64): int64
+
+proc ioWriteChunk(data: string[4096]): int64 =
+  return ioRawWrite(1, data, data.len)
