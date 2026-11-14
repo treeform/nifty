@@ -1,0 +1,40 @@
+# Widening copies retain optional presence and nested payload ranges.
+func reading(present: bool): 0 .. 5? =
+  if present:
+    return 4
+  return none
+
+func widen(present: bool): 0 .. 10? =
+  return reading(present)
+
+func arrayValue(): array[1, 0 .. 5] =
+  var values: array[1, 0 .. 5]
+  values[0] = 4
+  return values
+
+func arrayCopy(): array[1, 0 .. 10] =
+  return arrayValue()
+
+thread main() =
+  let value: 0 .. 10? = reading(true)
+  echo value.or(0)
+  let absent: 0 .. 10? = reading(false)
+  echo absent.or(9)
+  echo widen(true).or(0)
+  var slots: seq[2, 0 .. 10?]
+  slots.add(reading(true))
+  slots.add(reading(false))
+  echo slots[0].or(0)
+  echo slots[1].or(9)
+  var dynamic: seq[0 .. 10?]
+  echo dynamic.push(reading(true))
+  if dynamic.len > 0:
+    echo dynamic.pop().or(0)
+  var values: map[0 .. 1, 0 .. 10?]
+  values.put(0, reading(true))
+  values[1] = reading(false)
+  echo values[0].or(0)
+  echo values[1].or(9)
+  echo values.get(0, reading(false)).or(0)
+  let copied = arrayCopy()
+  echo copied[0]

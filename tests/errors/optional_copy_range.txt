@@ -1,0 +1,1 @@
+optional_copy_range.nifty:7: cannot copy: ranges of int? do not fit 0 .. 10?
