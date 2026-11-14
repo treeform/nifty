@@ -164,6 +164,7 @@ proc specializeNativeMaths*(plan: var NativePlan): int =
           edges: Span(first: function.edge(join, [root]), count: 1),
           location: location)
         var call = instruction
+        call.cold = true
         let returned = function.value(kind)
         call.results = Span(first: int32(returned), count: 1)
         function.emit(fallback, call)
