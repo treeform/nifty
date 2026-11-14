@@ -11,7 +11,8 @@ const
   DefaultArmFloatBits* = not defined(nimkeyNoArmFloatBits)
   DefaultArmFloatZeros* = not defined(nimkeyNoArmFloatZeros)
   DefaultArmFloatLoads* = not defined(nimkeyNoArmFloatLoads)
-  DefaultArmCallSaves* = not defined(nimkeyNoArmCallSaves) and
+  DefaultArmCallSaves* = defined(nimkeyArmCallSaves) and
+    not defined(nimkeyNoArmCallSaves) and
     not defined(nimkeyNoIrAllocation)
   DefaultArmGlobalBindings* = defined(nimkeyArmGlobalBindings) and
     not defined(nimkeyNoArmGlobalBindings)
@@ -273,7 +274,8 @@ proc emitArm64Ir*(module: ir.IrModule,
       leaf = leafFrames and not defined(nimkeyNoArmLeafFrames) and
         leafFrame(function)
       contextRegister = if leaf: X0 else: X19
-    var useCallSaves = callSaves and DefaultArmCallSaves
+    var useCallSaves = callSaves and not defined(nimkeyNoArmCallSaves) and
+      not defined(nimkeyNoIrAllocation)
     for data in function.blocks:
       if data.terminator.kind in
           {ir.InvokeTerminator, ir.InvokeHostTerminator}:
