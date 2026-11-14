@@ -42,5 +42,7 @@ jobs:
         run: |
           python benchmarks/test_runner.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python benchmarks/test_json_runner.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python tests/test_optimization_benchmark.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

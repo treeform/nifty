@@ -72,3 +72,7 @@ The implementation also passed the
 all 95 required-valid files were accepted and all 188 required-invalid
 files were rejected. All 318 corpus files, including the 35 cases with
 implementation-dependent behavior, ran without sanitizer diagnostics.
+
+The [JSON benchmark](benchmarks/JSON.md) measures parsing, tree consumption,
+and cleanup across C, ARM64, and AMD64. Run `python3 benchmarks/run_json.py`
+from the repository root after building the compiler and runtime templates.
