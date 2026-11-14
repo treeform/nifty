@@ -1,7 +1,7 @@
 ## Compare every backend against unchanged language golden files.
 ## Build the CLI first, then run: nim r tests/test_native.nim /path/to/nifty.
 import
-  std/[algorithm, os, osproc, streams, strtabs, strutils, times]
+  std/[algorithm, json, os, osproc, streams, strtabs, strutils, times]
 
 type
   Result = tuple[output: string, code: int]
@@ -60,6 +60,22 @@ proc executableTarget(path, target: string): bool =
       let cpu = if target == "arm64": '\xb7' else: '\x3e'
       return bytes[18] == cpu and bytes[19] == '\x00'
   false
+
+proc imageTarget(path, target: string): bool =
+  ## Inspect the target metadata of a versioned native image artifact.
+  let bytes = readFile(path)
+  if bytes.len < 40 or bytes[0 ..< 8] != "NIFTYN01":
+    return false
+  var metadataSize = 0'u64
+  for i in 0 ..< 8:
+    metadataSize = metadataSize or (uint64(byte(bytes[8 + i])) shl (8 * i))
+  if metadataSize == 0 or metadataSize > uint64(bytes.len - 40):
+    return false
+  let
+    metadata = parseJson(bytes[40 ..< 40 + int(metadataSize)])
+    expected = if target == "arm64": "Arm64Target" else: "Amd64Target"
+  metadata["target"].getStr() == expected and
+    metadata["offsets"].len > 0 and bytes.len > 40 + int(metadataSize)
 
 proc executionArgs(binary, target: string): tuple[exe: string, args: seq[string]] =
   ## Use Rosetta explicitly when testing AMD64 on Apple silicon.
@@ -167,7 +183,7 @@ proc main() =
     let native = run(compiler, @[sample, "--backend:" & target,
       "--emit-native"], isolated = true)
     if native.code == 0 and fileExists(artifact) and
-        executableTarget(artifact, target):
+        imageTarget(artifact, target):
       inc passed
     else:
       echo "FAIL --emit-native/", target, ": ", native.output
