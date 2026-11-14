@@ -429,9 +429,9 @@ proc genOrdered(g: var Gen, e: Expr): string =
     let call =
       if r.externLib != "": externSym(r) & "(" & parts.join(", ") & ")"
       else: "f_" & e.sval & "(" & parts.join(", ") & ")"
-    if r.kind == FuncRoutine:
-      call # pure: args are already ordered, the call itself has no effects
-    elif r.ret.isNil:
+    # Pure calls can read borrowed storage that a later expression changes.
+    # Capture their results before evaluating that later expression.
+    if r.ret.isNil:
       g.put call & ";"
       ""
     else:
