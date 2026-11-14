@@ -21,22 +21,10 @@ proc tokenize*(src: string, baseLine = 0): seq[Token] =
   var lineNo = baseLine
   for rawLine in src.splitLines:
     inc lineNo
-    # Cut off comments (a '#' outside a string literal).
-    var line = rawLine
-    var inStr = false
-    var i = 0
-    while i < line.len:
-      let c = line[i]
-      if inStr:
-        if c == '\\': inc i
-        elif c == '"': inStr = false
-      else:
-        if c == '"': inStr = true
-        elif c == '#':
-          line = line[0 ..< i]
-          break
-      inc i
-    if line.strip.len == 0:
+    let
+      line = rawLine
+      content = line.strip
+    if content.len == 0 or content[0] == '#':
       continue
     # Indentation.
     var ind = 0
@@ -59,6 +47,9 @@ proc tokenize*(src: string, baseLine = 0): seq[Token] =
       let c = line[p]
       if c == ' ':
         inc p
+      elif c == '#':
+        # Literal scanners consume hashes inside strings and chars.
+        break
       elif c.isDigit:
         let s = p
         while p < line.len and (line[p].isDigit or line[p] == '_'):

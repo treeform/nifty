@@ -1,0 +1,9 @@
+# Quotes and escapes in a comment are ignored: ' " \
+thread main() =
+  echo '#'
+  echo '"' # An unmatched quote in a comment: '
+  echo '\'' # An unmatched quote in a comment: "
+  echo '\\' # Quotes and escapes in a comment: ' " \
+  echo "#\"#", " ", "\\#" # ' " \
+  # Comment indentation and unmatched quotes do not open a block: ' "
+  echo 7 # ' "
