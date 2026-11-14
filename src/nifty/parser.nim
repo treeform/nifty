@@ -699,8 +699,16 @@ proc parseModule(p: var Parser): Module =
               discard p.next
               isVar = true
             let ty = p.parseType()
+            var boundedBy = ""
+            if p.atIdent("boundedBy"):
+              discard p.next
+              if p.peek.kind == IntToken:
+                boundedBy = $parseIntLit(p.next)
+              else:
+                boundedBy = p.expectIdent()
             for n in names:
-              r.params.add Param(name: n, typ: ty, isVar: isVar)
+              r.params.add Param(name: n, typ: ty, isVar: isVar,
+                boundedBy: boundedBy)
             if p.atOp(","):
               discard p.next
             else:

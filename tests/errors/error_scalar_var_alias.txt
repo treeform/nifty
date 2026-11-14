@@ -1,0 +1,1 @@
+error_scalar_var_alias.nifty:7: overlapping borrows of 'value': a mutable borrow must be exclusive

@@ -341,6 +341,34 @@ proc validateOwnedType(t: Typ, line: int) =
   for field in t.fields:
     validateOwnedType(field.typ, line)
 
+proc foreignWritable(t: Typ): bool =
+  ## Checks that raw foreign writes preserve every declared range.
+  if t == nil or t.opt:
+    return false
+  case t.kind
+  of IntType:
+    let unsigned = t.dname.startsWith("uint") or t.dname == "char"
+    if t.width == 8 and unsigned:
+      return false # C uint64 can exceed nifty's signed interval domain.
+    let bits = if t.width == 0: 64 else: t.width * 8
+    let lo = if unsigned: 0'i64 else:
+      (if bits == 64: low(int64) else: -(1'i64 shl (bits - 1)))
+    let hi = if bits == 64: high(int64)
+      elif unsigned: (1'i64 shl bits) - 1
+      else: (1'i64 shl (bits - 1)) - 1
+    t.rlo == lo and t.rhi == hi
+  of FloatType, StringType:
+    true
+  of ArrayType:
+    foreignWritable(t.elem)
+  of ObjectType:
+    for field in t.fields:
+      if not foreignWritable(field.typ):
+        return false
+    true
+  else:
+    false
+
 proc declFactByName(c: Ctx, name: string): Fact =
   if name.len > 4 and name.endsWith(".len"):
     let parts = name[0 ..< name.len - 4].split('.')
@@ -466,6 +494,15 @@ proc lenPathName(c: Ctx, e: Expr): string =
       return path & ".len"
   ""
 
+proc capPathName(c: Ctx, e: Expr): string =
+  ## Names a dynamic container's capacity for a guarded foreign call.
+  if e.kind == FieldExpr and e.sval == "cap" and
+      e.kids[0].typ != nil and e.kids[0].typ.dynamic:
+    let path = c.stablePathName(e.kids[0])
+    if path != "":
+      return path & ".cap"
+  ""
+
 proc stablePathName(c: Ctx, e: Expr): string =
   ## A provable name: an eligible ident, or a pure field chain on one
   ## ("p.fix"). Indexed paths have no stable name.
@@ -508,12 +545,15 @@ proc factOrLenName(c: Ctx, e: Expr): string =
   result = c.factName(e)
   if result == "":
     result = c.lenPathName(e)
+  if result == "":
+    result = c.capPathName(e)
 
 proc delFacts(c: var Ctx, name: string) =
   ## Forget everything about a variable: its own fact, its length fact,
   ## and any containment predicates it appears in (either side).
   c.facts.del name
   c.facts.del name & ".len"
+  c.facts.del name & ".cap"
   var stale: seq[string]
   for k in c.facts.keys:
     if k.startsWith(name & "@") or k.startsWith(name & ".") or
@@ -578,6 +618,15 @@ proc addCondFacts(c: var Ctx, e: Expr, negated = false) =
   if e.kind == NotExpr:
     c.addCondFacts(e.kids[0], not negated)
     return
+  if e.kind == MethodExpr and e.sval in ["reserve", "resize"] and
+      not negated and e.kids.len == 2 and e.kids[0].typ.dynamic:
+    let path = c.stablePathName(e.kids[0])
+    if path != "":
+      let size = exprFact(e.kids[1])
+      let old = c.curFact(path & ".cap")
+      let lo = if e.sval == "reserve": max(old.lo, size.lo)
+        else: size.lo
+      c.facts[path & ".cap"] = Fact(lo: lo, hi: IntHigh)
   if e.kind == FieldExpr and e.isOptOk and not negated:
     let pn = c.stablePathName(e.kids[0])
     if pn != "":
@@ -1486,7 +1535,11 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     if base.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
       if e.sval == "cap" and base.dynamic:
         e.typ = intType(0, IntHigh)
-        e.setFact typeFact(e.typ)
+        let key = c.capPathName(e)
+        if key == "":
+          e.setFact typeFact(e.typ)
+        else:
+          e.setFact c.facts.getOrDefault(key, typeFact(e.typ))
         return e.typ
       if e.sval != "len":
         err(e.line, $base & " has no property '" & e.sval &
@@ -2078,6 +2131,46 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     if e.kids.len != r.params.len:
       err(e.line, "'" & name & "' expects " & $r.params.len &
         " argument(s), got " & $e.kids.len)
+    if r.externLib != "":
+      for i, pm in r.params:
+        if pm.boundedBy == "":
+          continue
+        var countIndex = -1
+        for j, candidate in r.params:
+          if candidate.name == pm.boundedBy:
+            countIndex = j
+        let count = if countIndex >= 0: exprFact(e.kids[countIndex])
+          elif pm.boundedBy in c.consts:
+            Fact(lo: c.consts[pm.boundedBy], hi: c.consts[pm.boundedBy])
+          else:
+            let n = parseBiggestInt(pm.boundedBy)
+            Fact(lo: n, hi: n)
+        let buffer = e.kids[i]
+        let followsLength =
+          if countIndex >= 0 and not pm.isVar and
+              e.kids[countIndex].kind == FieldExpr and
+              e.kids[countIndex].sval == "len":
+            let base = e.kids[countIndex].kids[0]
+            let left = c.stablePathName(base)
+            left != "" and left == c.stablePathName(buffer)
+          else:
+            false
+        let available =
+          if pm.typ.kind == ArrayType:
+            pm.typ.len
+          elif pm.isVar and not pm.typ.dynamic:
+            pm.typ.len
+          else:
+            let path = c.stablePathName(buffer)
+            if path == "": 0'i64
+            elif pm.isVar:
+              c.facts.getOrDefault(path & ".cap",
+                Fact(lo: 0, hi: IntHigh)).lo
+            else: c.curFact(path & ".len").lo
+        if count.lo < 0 or (not followsLength and count.hi > available):
+          err(e.line, "cannot prove foreign buffer '" & pm.name &
+            "' has " & rangeStr(count) & " accessible bytes or elements " &
+            "(available at least " & $available & "); resize or guard first")
     for i, arg in e.kids:
       let pt = r.params[i]
       var at: Typ = ats[i]
@@ -2160,19 +2253,18 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         continue
       for j in i + 1 ..< e.kids.len:
         c.rejectOwnerEffects(arg, e.kids[j],
-          borrowedView = hasOwned(parameter.typ))
+          borrowedView = hasOwned(parameter.typ) or
+            parameter.typ.kind == ArrayType)
         let other = e.kids[j].rootIdent
         let otherParam = r.params[j]
         let otherBorrowed = otherParam.isVar or hasOwned(otherParam.typ) or
           otherParam.typ.kind == ArrayType
         if other.kind == IdentExpr and otherBorrowed and
             root.sval == other.sval and
-            (hasOwned(root.typ) or hasOwned(parameter.typ) or
-              hasOwned(otherParam.typ)) and
             (parameter.isVar or otherParam.isVar):
           err(e.line, "overlapping borrows of '" & root.sval &
             "': a mutable borrow must be exclusive")
-      if hasOwned(root.typ) or hasOwned(parameter.typ) or parameter.isVar:
+      if borrowed:
         let accesses = if parameter.isVar:
             c.routineAccess.getOrDefault(name)
           else: c.routineWrites.getOrDefault(name)
@@ -2183,7 +2275,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             err(e.line, "borrowed global '" & global &
               "' is also accessed through another path by '" & name & "'")
           if root.symKind == ParamSym and
-              (hasOwned(c.globals[global]) or hasOwned(root.typ)) and
+              (hasOwned(c.globals[global]) or hasOwned(root.typ) or
+                root.typ.kind == ArrayType) and
               containsType(c.globals[global], root.typ):
             err(e.line, "borrowed parameter '" & root.sval &
               "' might alias owning global '" & global &
@@ -3681,9 +3774,32 @@ proc check*(m: Module) =
         if pm.typ.opt:
           err(r.line, "extern '" & r.name & "': optionals cannot cross " &
             "the C boundary")
+        if pm.isVar and not foreignWritable(pm.typ):
+          err(r.line, "extern '" & r.name & "': writable parameter '" &
+            pm.name & "' has a range foreign code can violate")
+        if pm.isVar and pm.typ.kind in {StringType, ArrayType} and
+            pm.boundedBy == "":
+          err(r.line, "extern '" & r.name & "': writable buffer '" &
+            pm.name & "' needs boundedBy count")
+        if pm.boundedBy != "":
+          if pm.typ.kind notin {StringType, ArrayType}:
+            err(r.line, "extern '" & r.name & "': boundedBy requires " &
+              "a string or array buffer")
+          var found = pm.boundedBy in c.consts or
+            (pm.boundedBy.len > 0 and pm.boundedBy[0] in {'0' .. '9'})
+          for other in r.params:
+            if other.name == pm.boundedBy:
+              found = other.typ.kind == IntType
+          if not found:
+            err(r.line, "extern '" & r.name & "': boundedBy '" &
+              pm.boundedBy & "' needs an integer count parameter or const")
       if r.ret != nil and r.ret.kind notin {IntType, FloatType}:
         err(r.line, "extern '" & r.name & "' can only return ints or " &
           "floats (fill a var buffer for data)")
+      if r.ret != nil and r.ret.kind == IntType and
+          not foreignWritable(r.ret):
+        err(r.line, "extern '" & r.name &
+          "': result range is not guaranteed by the foreign ABI")
       c.checked.incl r.name
       continue
     c.checkRoutine(r)

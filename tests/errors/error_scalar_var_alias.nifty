@@ -1,0 +1,7 @@
+proc update(first: var int, second: var int) =
+  first = 1
+  second = 2
+
+thread main() =
+  var value = 0
+  update(value, value)

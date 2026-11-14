@@ -1,0 +1,1 @@
+error_array_global_alias.nifty:8: borrowed global 'values' is also accessed through another path by 'inspect'

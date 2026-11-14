@@ -1,0 +1,1 @@
+error_array_read_mutable_alias.nifty:7: overlapping borrows of 'items': a mutable borrow must be exclusive

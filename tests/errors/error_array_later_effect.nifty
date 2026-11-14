@@ -1,0 +1,11 @@
+var values: array[1, int]
+
+proc touch(): int =
+  values[0] = 42
+  return 0
+
+proc inspect(input: array[1, int], unused: int) =
+  echo input[0]
+
+thread main() =
+  inspect(values, touch())

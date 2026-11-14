@@ -1,0 +1,6 @@
+extern "libc":
+  proc magnitude "labs"(value: int64): 0 .. 0
+
+thread main() =
+  var items: array[1, int]
+  echo items[magnitude(1)]

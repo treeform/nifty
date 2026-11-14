@@ -39,13 +39,13 @@ object Request =
 extern "libc":
   proc openSocket "socket" (domain: int32, kind: int32, protocol: int32): int32
   proc setSocketOption "setsockopt" (socket: int32, level: int32, option: int32, value: var int32, size: int32): int32
-  proc bindSocket "bind" (socket: int32, address: array[16, uint8], addressSize: int32): int32
+  proc bindSocket "bind" (socket: int32, address: array[16, uint8] boundedBy addressSize, addressSize: int32): int32
   proc listen(socket: int32, backlog: int32): int32
   proc acceptConnection "accept" (socket: int32, address: int64, addressSize: int64): int32
-  proc poll(entries: var array[PollSlots, PollEntry], count: int32, timeoutMs: int32): int32
-  proc read(descriptor: int32, buffer: var string[RequestMax], capacity: int64): int64
-  proc readChunk "read" (descriptor: int32, buffer: var string[ReadChunk], capacity: int64): int64
-  proc sendChunk "send" (descriptor: int32, buffer: string[ReadChunk], size: int64, flags: int32): int64
+  proc poll(entries: var array[PollSlots, PollEntry] boundedBy count, count: int32, timeoutMs: int32): int32
+  proc read(descriptor: int32, buffer: var string[RequestMax] boundedBy capacity, capacity: int64): int64
+  proc readChunk "read" (descriptor: int32, buffer: var string[ReadChunk] boundedBy capacity, capacity: int64): int64
+  proc sendChunk "send" (descriptor: int32, buffer: string[ReadChunk] boundedBy size, size: int64, flags: int32): int64
   proc openFile "open" (path: string[16], flags: int32): int32
   proc close(descriptor: int32): int32
 

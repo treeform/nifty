@@ -1,0 +1,7 @@
+proc inspect(a: array[1, int], b: var array[1, int]) =
+  b[0] = 42
+  echo a[0]
+
+thread main() =
+  var items: array[1, int]
+  inspect(items, items)

@@ -11,15 +11,15 @@ object PollFd =
 
 extern "libc":
   proc socket(domain: int32, kind: int32, protocol: int32): int32
-  proc bindSock "bind" (fd: int32, sa: array[16, uint8], salen: int32): int32
-  proc getsockname(fd: int32, sa: var array[16, uint8], salen: var int32): int32
+  proc bindSock "bind" (fd: int32, sa: array[16, uint8] boundedBy salen, salen: int32): int32
+  proc getsockname(fd: int32, sa: var array[16, uint8] boundedBy salen, salen: var int32): int32
   proc listen(fd: int32, backlog: int32): int32
-  proc connect(fd: int32, sa: array[16, uint8], salen: int32): int32
+  proc connect(fd: int32, sa: array[16, uint8] boundedBy salen, salen: int32): int32
   proc accept(fd: int32, sa: int64, salen: int64): int32
-  proc poll(fds: var array[1, PollFd], nfds: int32, timeoutMs: int32): int32
-  proc socketpair(domain: int32, kind: int32, protocol: int32, fds: var array[2, int32]): int32
-  proc readFd "read" (fd: int32, buf: var string[128], cap: int64): int64
-  proc writeFd "write" (fd: int32, buf: string[128], n: int64): int64
+  proc poll(fds: var array[1, PollFd] boundedBy nfds, nfds: int32, timeoutMs: int32): int32
+  proc socketpair(domain: int32, kind: int32, protocol: int32, fds: var array[2, int32] boundedBy 2): int32
+  proc readFd "read" (fd: int32, buf: var string[128] boundedBy cap, cap: int64): int64
+  proc writeFd "write" (fd: int32, buf: string[128] boundedBy n, n: int64): int64
   proc closeFd "close" (fd: int32): int32
   proc signal(sig: int32, handler: int64): int64
   proc usleep(usec: uint32): int32
@@ -63,7 +63,7 @@ thread server() =
           if n >= 0 and n <= 128:
             buf.setLen(n)
             echo "server got ", n, " ", buf
-            discard writeFd(conn, buf, n)
+            discard writeFd(conn, buf, buf.len)
           discard closeFd(conn)
     discard closeFd(fd)
 
