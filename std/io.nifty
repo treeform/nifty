@@ -83,5 +83,3 @@ proc writeFile(file: CFile, text: string): bool =
       return false
     sent = next
   return ioFlush(file) == 0
-
-
