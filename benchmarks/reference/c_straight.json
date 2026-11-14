@@ -1,5 +1,5 @@
 {
-  "baseline": "C straight",
+  "baseline": "Hand C",
   "upstream": "https://github.com/treeform/nimkey",
   "upstream_revision": "adcacefce18748630dccde5943bd3314dfcb422b",
   "source_last_change_revision": "ae1b868c34fb155588cd7a5b81133aaa9b9613e5",
@@ -11,7 +11,8 @@
     "Changed float scalars and suffixed constants to double; sqrtf/floorf/powf/roundf to their double equivalents.",
     "Preserved original scene arrays, intersection/shading operation order, recursive reflections through depth five, and round-then-wrap RGB quantization.",
     "Replaced tile/text rendering harness with standalone POSIX main and compile-time IMAGE_SIZE, REPETITIONS, CLOCK_ID, EMIT_PIXELS configuration.",
-    "Moved camera setup/allocation and final protocol/RGB output outside timing; timed each full RGB render plus checksum, publishing each frame checksum through a volatile scalar sink."
+    "Moved camera setup/allocation and final protocol/RGB output outside timing; timed each full RGB render plus checksum, publishing each frame checksum through a volatile scalar sink.",
+    "Made render dimensions a runtime parameter shared with the ARM64 assembly core; retained compile-time IMAGE_SIZE in the driver."
   ],
   "validation": {
     "compiler_flags": [

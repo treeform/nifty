@@ -48,6 +48,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python benchmarks/test_json_hand_asm.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python benchmarks/test_ray_hand_asm.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python benchmarks/test_snappy_runner.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python tests/test_snappy.py

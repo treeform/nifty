@@ -3,10 +3,10 @@
 `Hand ASM (ARM64)` runs the JSON benchmark through a persisted, manually
 tuned assembly implementation on Apple Silicon Macs. It uses the same C
 driver, input, owned tree representation, allocator, and cleanup as
-`c-straight`. It does not invoke Nifty or regenerate assembly during a run.
+`hand-c` (`c-straight` is also accepted). It does not invoke Nifty or regenerate assembly during a run.
 
 ```sh
-python3 benchmarks/run_json.py --backend c-straight,hand-asm --repeat 100
+python3 benchmarks/run_json.py --backend hand-asm,hand-c --repeat 100
 python3 benchmarks/run_json.py --samples 7 --repeat 100 --wall
 python3 benchmarks/test_json_hand_asm.py
 python3 benchmarks/test_json_hand_asm.py --suite /path/to/JSONTestSuite/test_parsing
@@ -14,7 +14,8 @@ python3 benchmarks/test_json_hand_asm.py --suite /path/to/JSONTestSuite/test_par
 
 The first command compares standalone C with Hand ASM. The second includes
 all available backends, including Nifty C, ARM64, and AMD64 via Rosetta.
-Only JSON has a Hand ASM implementation. The raytracer is unchanged.
+The raytracer also has a [Hand ASM implementation](RAY_HAND_ASM.md).
+Both runners list Hand ASM first, followed by Hand C and the Nifty backends.
 
 ## Origin and changes
 
@@ -79,15 +80,15 @@ second command above measured these median milliseconds per cycle:
 
 | Implementation | JSON cycle (ms) |
 | --- | ---: |
-| Standalone C | 0.24471 |
-| Hand ASM (ARM64) | 0.18786 |
-| Nifty C backend | 1.22479 |
-| Nifty ARM64 backend | 3.72027 |
-| Nifty AMD64 backend via Rosetta | 6.28845 |
+| Hand ASM (ARM64) | 0.18972 |
+| Hand C | 0.25215 |
+| Nifty C backend | 1.23705 |
+| Nifty ARM64 backend | 3.80056 |
+| Nifty AMD64 backend via Rosetta | 6.33067 |
 
 This uses 128 records (26,753 input bytes), seven measured processes per
 backend, and 100 cycles per process, with rotated backend order. Hand ASM
-took 23.2 percent less time than standalone C, a 1.30x speedup. Results are
+took 24.8 percent less time than standalone C, a 1.33x speedup. Results are
 specific to this fixture and machine. The much larger Nifty differences
 also include its parser's ownership and subtree-copying costs.
 

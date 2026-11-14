@@ -17,7 +17,7 @@ import time
 import zlib
 
 Backends = ("c", "arm64", "amd64")
-RayBackends = ("c-straight",) + Backends
+RayBackends = ("hand-asm", "c-straight") + Backends
 StraightCFlags = ["-O2", "-pthread", "-fno-strict-aliasing", "-ffp-contract=off"]
 Root = Path(__file__).resolve().parent.parent
 
@@ -135,12 +135,14 @@ def availableBackends(host, compiler):
 
 def backendLabel(backend, host, architecture):
   """Describe native execution and translated AMD64 results explicitly."""
+  if backend == "hand-asm":
+    return "Hand ASM (ARM64)"
   if backend == "amd64" and host["physical_architecture"] == "arm64":
     return "AMD64 (Rosetta translated)"
   if backend in ("c", "c-straight"):
     suffix = ", Rosetta translated" if (
       architecture == "amd64" and host["physical_architecture"] == "arm64") else ""
-    name = "C straight" if backend == "c-straight" else "C"
+    name = "Hand C" if backend == "c-straight" else "Nifty C backend"
     return f"{name} (-O2, {architecture}{suffix})"
   return f"{backend.upper()} (native)"
 
@@ -240,31 +242,49 @@ def buildBackend(backend, size, repeat, options, env):
   directory = options.output / "build" / f"{size}x{size}-r{repeat}" / backend
   directory.mkdir(parents=True, exist_ok=True)
   executable = directory / "raytracer"
-  if backend == "c-straight":
+  executable.unlink(missing_ok=True)
+  snapshots = {}
+  if backend in ("c-straight", "hand-asm"):
     sourcePath = directory / "raytracer_straight.c"
     sourcePath.write_bytes(options.straight_c_source.read_bytes())
+    snapshots[sourcePath.name] = hashlib.sha256(sourcePath.read_bytes()).hexdigest()
     command = [options.cc] + StraightCFlags + [
       f"-DIMAGE_SIZE={size}", f"-DREPETITIONS={repeat}",
       f"-DCLOCK_ID={time.CLOCK_MONOTONIC}", "-DEMIT_PIXELS=1",
       "-o", str(executable), str(sourcePath), "-lm"]
+    if backend == "hand-asm":
+      assemblyPath = directory / "raytracer_hand.S"
+      assemblyPath.write_bytes(options.hand_asm_source.read_bytes())
+      snapshots[assemblyPath.name] = hashlib.sha256(assemblyPath.read_bytes()).hexdigest()
+      command += ["-DRAY_HAND_ASM", "-arch", "arm64", str(assemblyPath)]
+      manifestPath = options.hand_asm_source.with_name("raytracer_manifest.json")
+      if manifestPath.is_file():
+        manifestCopy = directory / manifestPath.name
+        manifestCopy.write_bytes(manifestPath.read_bytes())
+        snapshots[manifestCopy.name] = hashlib.sha256(manifestCopy.read_bytes()).hexdigest()
   else:
     sourcePath = directory / "raytracer.nifty"
-    sourcePath.write_text(configuredSource(
-      options.source.read_text(), size, repeat))
+    originalPath = directory / "raytracer.original.nifty"
+    originalPath.write_bytes(options.source.read_bytes())
+    snapshots[originalPath.name] = hashlib.sha256(originalPath.read_bytes()).hexdigest()
+    sourcePath.write_bytes(configuredSource(
+      originalPath.read_bytes().decode("utf-8").replace("\r\n", "\n"),
+      size, repeat).encode("utf-8"))
     command = [str(options.compiler), "build", str(sourcePath),
                f"--backend:{backend}", "-o", str(executable)]
   result, compileNs = runCommand(command, options.timeout, env)
   (directory / "build.stdout").write_bytes(result.stdout)
   (directory / "build.stderr").write_bytes(result.stderr)
   inspection = None
-  if options.emit_ir and backend not in ("c", "c-straight"):
+  if options.emit_ir and backend not in ("c", "c-straight", "hand-asm"):
     irPath = directory / "raytracer.ir"
     inspectCommand = [str(options.compiler), str(sourcePath),
                       f"--backend:{backend}", "--emit-ir", "-o", str(irPath)]
     _, inspectNs = runCommand(inspectCommand, options.timeout, env)
     inspection = {"path": str(irPath), "wall_ns": inspectNs}
   return {"backend": backend, "executable": str(executable),
-          "source": str(sourcePath), "compile_wall_ns": compileNs,
+          "source": str(sourcePath), "source_snapshots_sha256": snapshots,
+          "compile_wall_ns": compileNs,
           "source_sha256": hashlib.sha256(sourcePath.read_bytes()).hexdigest(),
           "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
           "compile_command": command, "inspection": inspection,
@@ -304,13 +324,12 @@ def benchmark(size, repeat, options, backends, host, env):
   for backend, result in results.items():
     architectures = binaryArchitectures(Path(result["executable"]))
     if len(architectures) != 1 or (
-        backend in ("arm64", "amd64") and architectures != [backend]):
+        backend in ("arm64", "amd64", "hand-asm") and
+        architectures != ["arm64" if backend == "hand-asm" else backend]):
       raise BenchmarkError(f"Wrong executable architecture for {backend}: {architectures}")
     architecture = architectures[0]
     result["execution_architecture"] = architecture
     result["label"] = backendLabel(backend, host, architecture)
-    if backend == "c":
-      result["label"] = result["label"].replace("C (", "Nifty C backend (", 1)
     command = [result["executable"]]
     if architecture == "amd64" and host["physical_architecture"] == "arm64":
       command = ["/usr/bin/arch", "-x86_64"] + command
@@ -358,7 +377,7 @@ def parseArguments(arguments=None):
   parser = argparse.ArgumentParser(description=__doc__,
       epilog="Standalone C baseline details: benchmarks/C_STRAIGHT.md")
   parser.add_argument("--backend", action="append", default=[],
-                      help="Repeat or use comma-separated c-straight,c,arm64,amd64")
+                      help="Repeat or use comma-separated hand-asm,hand-c,c,arm64,amd64 (c-straight aliases hand-c)")
   parser.add_argument("--size", type=int, default=64)
   parser.add_argument("--samples", type=int, default=5)
   parser.add_argument("--warmups", type=int, default=1)
@@ -368,8 +387,10 @@ def parseArguments(arguments=None):
   parser.add_argument("--compiler", type=Path, default=Root / "nifty")
   parser.add_argument("--source", type=Path,
                       default=Root / "benchmarks" / "raytracer.nifty")
-  parser.add_argument("--straight-c-source", type=Path,
+  parser.add_argument("--hand-c-source", "--straight-c-source", dest="straight_c_source", type=Path,
                       default=Root / "benchmarks" / "raytracer_straight.c")
+  parser.add_argument("--hand-asm-source", type=Path,
+                      default=Root / "benchmarks" / "arm64" / "raytracer_hand.S")
   parser.add_argument("--cc", default=os.environ.get("CC", "cc"),
                       help="C compiler for standalone and Nifty-generated C")
   parser.add_argument("--timeout", type=float, default=300,
@@ -390,12 +411,13 @@ def parseArguments(arguments=None):
   selected = []
   for entry in options.backend:
     for backend in entry.split(","):
+      backend = "c-straight" if backend == "hand-c" else backend
       if backend not in RayBackends:
         parser.error(f"unknown backend: {backend}")
       if backend not in selected:
         selected.append(backend)
-  options.backend = selected
-  for name in ("compiler", "source", "straight_c_source", "output"):
+  options.backend = [backend for backend in RayBackends if backend in selected]
+  for name in ("compiler", "source", "straight_c_source", "hand_asm_source", "output"):
     setattr(options, name, getattr(options, name).expanduser().resolve())
   return options
 
@@ -431,23 +453,30 @@ def main(arguments=None):
   """Publish timing artifacts only after every correctness check succeeds."""
   options = parseArguments(arguments)
   host = hostInfo()
-  if host["system"] not in ("Darwin", "Linux") or not hasattr(time, "CLOCK_MONOTONIC"):
+  if host["system"] not in ("Darwin", "Linux") or getattr(time, "CLOCK_MONOTONIC", None) is None:
     raise BenchmarkError("Ray timing requires POSIX clock_gettime on macOS or Linux")
-  needsNifty = options.backend != ["c-straight"]
+  options.cc = shutil.which(options.cc)
+  handAsmSupported = (host["system"] == "Darwin" and
+                      host["physical_architecture"] == "arm64" and options.cc)
+  if "hand-asm" in options.backend and not handAsmSupported:
+    raise BenchmarkError("Hand ASM requires macOS on physical ARM64 and a C compiler")
+  needsNifty = not options.backend or any(
+    backend in Backends for backend in options.backend)
   if needsNifty:
     if not options.compiler.is_file() or not os.access(options.compiler, os.X_OK):
       raise BenchmarkError(f"Compiler is not executable: {options.compiler}")
     if not options.source.is_file():
       raise BenchmarkError(f"Renderer source does not exist: {options.source}")
-  options.cc = shutil.which(options.cc)
   available = availableBackends(host, options.compiler) if needsNifty else []
   if options.cc:
     available.insert(0, "c-straight")
+    if handAsmSupported:
+      available.insert(0, "hand-asm")
     if needsNifty and "c" not in available:
       available.append("c")
   else:
     available = [backend for backend in available if backend != "c"]
-  backends = options.backend or available
+  backends = options.backend or [backend for backend in RayBackends if backend in available]
   if not backends:
     raise BenchmarkError("No executable backend is available on this host")
   for backend in backends:
@@ -455,12 +484,20 @@ def main(arguments=None):
       raise BenchmarkError(f"Backend {backend} is unsupported on this host or its "
                            "runtime template is unavailable; available: " +
                            ", ".join(available))
-  if "c-straight" in backends and not options.straight_c_source.is_file():
+  standalone = any(backend in ("hand-asm", "c-straight") for backend in backends)
+  if standalone and not options.straight_c_source.is_file():
     raise BenchmarkError(f"Standalone C source does not exist: {options.straight_c_source}")
   inputs = ([options.compiler, options.source] if needsNifty else [])
-  if "c-straight" in backends:
+  if standalone:
     inputs.append(options.straight_c_source)
-  if options.cc and any(backend in ("c", "c-straight") for backend in backends):
+  if "hand-asm" in backends:
+    if not options.hand_asm_source.is_file():
+      raise BenchmarkError(f"Hand ASM source does not exist: {options.hand_asm_source}")
+    inputs.append(options.hand_asm_source)
+    assemblyManifest = options.hand_asm_source.with_name("raytracer_manifest.json")
+    if assemblyManifest.is_file():
+      inputs.append(assemblyManifest)
+  if options.cc and any(backend in ("c", "c-straight", "hand-asm") for backend in backends):
     inputs.append(Path(options.cc))
   fingerprints = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
   options.output.mkdir(parents=True, exist_ok=True)
@@ -498,14 +535,16 @@ def main(arguments=None):
                   "compiler_help": optionalCommand([str(options.compiler), "--help"]) if needsNifty else None,
                   "cc": optionalCommand([options.cc, "--version"]) if options.cc else None,
                   "cc_path": options.cc,
-                  "straight_c_flags": StraightCFlags if "c-straight" in backends else None,
+                  "straight_c_flags": StraightCFlags if standalone else None,
+                  "hand_asm_flags": StraightCFlags + ["-DRAY_HAND_ASM", "-arch", "arm64"] if "hand-asm" in backends else None,
                   "nim": optionalCommand(["nim", "--version"])},
     "settings": {"size": options.size, "samples": options.samples,
                  "warmups": options.warmups, "repeat": options.repeat,
                  "backends": backends, "timeout_seconds": options.timeout,
                  "source": str(options.source) if needsNifty else None,
                  "source_sha256": fingerprints.get(options.source),
-                 "straight_c_source": str(options.straight_c_source) if "c-straight" in backends else None,
+                 "straight_c_source": str(options.straight_c_source) if standalone else None,
+                 "hand_asm_source": str(options.hand_asm_source) if "hand-asm" in backends else None,
                  "sample_order": "rotate backend order each warmup/sample round",
                  "native_ir": options.emit_ir},
     "reference_manifest": json.loads(manifest.read_text()) if manifest.is_file() else None,

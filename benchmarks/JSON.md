@@ -3,14 +3,15 @@
 `json_parser.nifty` measures the parser in `lib/json.nifty` alongside the
 raytracer benchmark. `json_parser_straight.c` is an independent handwritten
 C parser with its own owned tree. It compiles directly with the C compiler
-and does not use Nifty. Build the Nifty compiler and runtime templates from
+and does not use Nifty. Tables list Hand ASM, Hand C, Nifty C backend,
+ARM64, then AMD64 when available. Build the Nifty compiler and runtime templates from
 the repository root with `nim r tools/build.nim`, then compare them:
 
 ```sh
 python3 benchmarks/run_json.py
-python3 benchmarks/run_json.py --backend c-straight,c,arm64 --records 512 --repeat 20 --wall
-python3 benchmarks/run_json.py --backend c-straight
-python3 benchmarks/run_json.py --backend c-straight,hand-asm --repeat 100
+python3 benchmarks/run_json.py --backend hand-c,c,arm64 --records 512 --repeat 20 --wall
+python3 benchmarks/run_json.py --backend hand-c
+python3 benchmarks/run_json.py --backend hand-asm,hand-c --repeat 100
 python3 benchmarks/run_json.py --opt none --output /tmp/nifty-json-unoptimized
 python3 benchmarks/test_json_runner.py
 python3 benchmarks/test_json_straight.py
@@ -26,12 +27,12 @@ Rosetta and is explicitly labeled as translated execution. The Python
 protocol tests also run on Windows, where the timed workload is currently
 unsupported.
 
-`c-straight` is the handwritten C parser; `c` is the Nifty parser compiled
+`hand-c` (also `c-straight`) is the handwritten C parser; `c` is the Nifty parser compiled
 through Nifty's C backend. Both C entries use the same C compiler and
 `-O2 -pthread -fno-strict-aliasing -ffp-contract=off` flags. `--cc` selects
 that compiler; its default respects `CC` and otherwise uses `cc`. The
 standalone-only command needs no Nifty compiler, source modules, or runtime.
-`--straight-c-source` selects an alternate standalone source.
+`--hand-c-source` (also `--straight-c-source`) selects an alternate standalone source.
 
 `hand-asm` uses the same standalone C driver and tree layout, linked to a
 persisted ARM64 assembly implementation. It starts with Clang's C output

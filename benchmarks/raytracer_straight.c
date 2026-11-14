@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <inttypes.h>
+#include <stddef.h>
 
 typedef struct { double x, y, z; } Vec3;
 typedef struct { Vec3 forward, right, up, pos; } Camera;
@@ -28,6 +29,23 @@ typedef struct {
   double reflect, roughness;
 } Properties;
 
+#ifndef IMAGE_SIZE
+#define IMAGE_SIZE 64
+#endif
+#ifndef REPETITIONS
+#define REPETITIONS 1
+#endif
+#ifndef CLOCK_ID
+#define CLOCK_ID CLOCK_MONOTONIC
+#endif
+#ifndef EMIT_PIXELS
+#define EMIT_PIXELS 1
+#endif
+#if IMAGE_SIZE < 1 || REPETITIONS < 1
+#error "IMAGE_SIZE and REPETITIONS must be positive."
+#endif
+
+#ifndef RAY_HAND_ASM
 static const Vec3 White = {1.0, 1.0, 1.0};
 static const Vec3 Grey = {0.5, 0.5, 0.5};
 static const Vec3 Black = {0.0, 0.0, 0.0};
@@ -198,36 +216,31 @@ Vec3 getPoint(int64_t x, int64_t y, Camera camera, int64_t imageSize) {
 }
 /* Quantizes and wraps exactly as the benchmark source does. */
 int64_t channel(double value) { return (int64_t)round(value * 255.0) % 256; }
-#ifndef IMAGE_SIZE
-#define IMAGE_SIZE 64
-#endif
-#ifndef REPETITIONS
-#define REPETITIONS 1
-#endif
-#ifndef CLOCK_ID
-#define CLOCK_ID CLOCK_MONOTONIC
-#endif
-#ifndef EMIT_PIXELS
-#define EMIT_PIXELS 1
-#endif
-#if IMAGE_SIZE < 1 || REPETITIONS < 1
-#error "IMAGE_SIZE and REPETITIONS must be positive."
-#endif
-
 /* Writes one full RGB frame without formatting in the measured work. */
-void render(uint8_t *pixels, Camera camera) {
-  for (int64_t y = 0; y < IMAGE_SIZE; ++y) {
-    for (int64_t x = 0; x < IMAGE_SIZE; ++x) {
-      const Ray ray = {camera.pos, getPoint(x, y, camera, IMAGE_SIZE)};
+void render(uint8_t *pixels, Camera camera, int64_t imageSize) {
+  for (int64_t y = 0; y < imageSize; ++y) {
+    for (int64_t x = 0; x < imageSize; ++x) {
+      const Ray ray = {camera.pos, getPoint(x, y, camera, imageSize)};
       const Vec3 color = traceRay(ray, 0);
-      const size_t offset = ((size_t)y * IMAGE_SIZE + x) * 3;
+      const size_t offset = ((size_t)y * imageSize + x) * 3;
       pixels[offset] = (uint8_t)channel(color.x);
       pixels[offset + 1] = (uint8_t)channel(color.y);
       pixels[offset + 2] = (uint8_t)channel(color.z);
     }
   }
 }
+#else
+/* The frozen assembly shares the C scene API and structure layout. */
+Vec3 vector(double x, double y, double z);
+Camera newCamera(Vec3 pos, Vec3 lookAt);
+void render(uint8_t *pixels, Camera camera, int64_t imageSize);
+_Static_assert(sizeof(Vec3) == 24 && sizeof(Camera) == 96,
+               "Assembly requires the ARM64 vector and camera layout");
+_Static_assert(offsetof(Camera, pos) == 72,
+               "Assembly requires the ARM64 camera position offset");
+#endif
 
+#ifndef RAY_STRAIGHT_NO_MAIN
 /* Makes each completed frame observable without volatile pixel accesses. */
 static volatile uint64_t checksumSink;
 
@@ -242,7 +255,7 @@ int main(void) {
   uint64_t batchChecksum = 0;
   const int startStatus = clock_gettime(CLOCK_ID, &started);
   for (int64_t repetition = 0; repetition < REPETITIONS; ++repetition) {
-    render(pixels, camera);
+    render(pixels, camera, IMAGE_SIZE);
     uint64_t frameChecksum = 0;
     for (size_t i = 0; i < channelCount; ++i)
       frameChecksum += pixels[i];
@@ -267,3 +280,4 @@ int main(void) {
   free(pixels);
   return startStatus != 0 || finishStatus != 0;
 }
+#endif

@@ -121,6 +121,7 @@ def testConfiguration():
   assert options.backend == ["hand-asm", "c-straight", "c", "amd64"]
   assert options.hand_asm_source == run.Root / "benchmarks/arm64/json_parser_hand.S"
   assert options.straight_c_source == run.Root / "benchmarks/json_parser_straight.c"
+  assert run.parseArguments(["--backend", "amd64,hand-c,hand-asm,c,arm64"]).backend == list(run.Backends)
   with patch.dict(run.os.environ, {"CC": "test-json-cc"}):
     assert run.parseArguments([]).cc == "test-json-cc"
     assert run.parseArguments(["--cc", "explicit-cc"]).cc == "explicit-cc"
@@ -190,7 +191,7 @@ def testStraightC():
         assert result["assembly_sha256"] == hashlib.sha256(options.hand_asm_bytes).hexdigest()
         assert Path(result["assembly_provenance"]).read_bytes() == options.hand_asm_manifest_bytes
       else:
-        assert "C straight" in result["label"]
+        assert "Hand C" in result["label"]
         assert result["assembly"] is None
       assert ("Rosetta translated" in result["label"]) == (architecture == "amd64")
       prefix = ["/usr/bin/arch", "-x86_64"] if architecture == "amd64" else []
@@ -292,12 +293,12 @@ def testAvailability():
   linux = {"system": "Linux", "physical_architecture": "arm64"}
   with patch.object(run.Ray, "availableBackends", return_value=["arm64", "c"]):
     assert run.availableBackends(apple, Path("nifty"), "cc") == [
-      "c-straight", "hand-asm", "arm64", "c"]
+      "hand-asm", "c-straight", "c", "arm64"]
     assert run.availableBackends(apple, Path("nifty"), None) == ["arm64"]
     for host in (intel, linux):
       assert "hand-asm" not in run.availableBackends(host, Path("nifty"), "cc")
     assert run.availableBackends(apple, Path("missing"), "cc", False) == [
-      "c-straight", "hand-asm"]
+      "hand-asm", "c-straight"]
   assert "hand-asm" not in run.Ray.Backends
   with patch.object(run.Ray, "hostInfo", return_value=linux), \
        patch.object(run.time, "CLOCK_MONOTONIC", 1, create=True):
@@ -333,7 +334,7 @@ def testSampling():
   with tempfile.TemporaryDirectory() as temporary:
     options = SimpleNamespace(records=1, repeat=2, samples=5, warmups=1,
                               timeout=1, output=Path(temporary))
-    backends = ["c-straight", "hand-asm", "c", "arm64", "amd64"]
+    backends = ["hand-asm", "c-straight", "c", "arm64", "amd64"]
     with patch.object(run, "buildBackend", side_effect=build), \
          patch.object(run.Ray, "runCommand", side_effect=execute):
       result = run.benchmark(options, backends, {}, {})

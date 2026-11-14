@@ -72,6 +72,9 @@ def testConfiguration():
   options = run.parseArguments(["--backend", "c-straight,c", "--backend", "c-straight"])
   assert options.backend == ["c-straight", "c"]
   assert "c-straight" not in run.Backends
+  options = run.parseArguments(["--backend", "amd64,hand-c,hand-asm,c-straight,c,arm64"])
+  assert options.backend == list(run.RayBackends)
+  assert run.Backends == ("c", "arm64", "amd64")
   for arguments in (["--size", "0"], ["--size", "513"], ["--samples", "4"],
                     ["--warmups", "0"], ["--repeat", "1001"],
                     ["--backend", "unknown"], ["--timeout", "nan"]):
@@ -141,7 +144,7 @@ def testArchitectures():
   host = {"physical_architecture": "arm64"}
   assert "Rosetta translated" in run.backendLabel("c", host, "amd64")
   assert "Rosetta" not in run.backendLabel("c", host, "arm64")
-  assert "C straight" in run.backendLabel("c-straight", host, "arm64")
+  assert "Hand C" in run.backendLabel("c-straight", host, "arm64")
   assert "Rosetta translated" in run.backendLabel("c-straight", host, "amd64")
 
 
@@ -175,6 +178,84 @@ def testStraightC():
     assert result["compile_wall_ns"] == 123 and result["inspection"] is None
 
 
+def testNiftySnapshot():
+  """Snapshot exact original bytes and configure deterministic UTF-8 output."""
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    source = directory / "input.nifty"
+    original = (b"const ImageSize = 64\r\nconst Repetitions = 1\r\n"
+                b"const EmitPixels = 0\r\nconst ClockId = 6\r\n")
+    source.write_bytes(original)
+    options = SimpleNamespace(output=directory / "output", source=source,
+                              compiler=directory / "nifty", timeout=1, emit_ir=False)
+
+    def build(command, timeout, env):
+      """Create only the executable that this command requests."""
+      Path(command[command.index("-o") + 1]).write_bytes(b"executable")
+      return SimpleNamespace(stdout=b"", stderr=b""), 1
+
+    with patch.object(run, "runCommand", side_effect=build), patch.object(
+        run.time, "CLOCK_MONOTONIC", 1, create=True):
+      result = run.buildBackend("c", 4, 2, options, {})
+    configured = Path(result["source"])
+    assert b"\r" not in configured.read_bytes()
+    assert b"const ImageSize = 4\n" in configured.read_bytes()
+    assert (configured.parent / "raytracer.original.nifty").read_bytes() == original
+    assert result["source_snapshots_sha256"]["raytracer.original.nifty"] == hashlib.sha256(original).hexdigest()
+
+
+def testHandAsm():
+  """Preserve ASM inputs and use only the standalone driver and compiler."""
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    source = directory / "driver.c"
+    source.write_bytes(b"/* driver */\r\n")
+    assembly = directory / "input.S"
+    assembly.write_bytes(b".text\r\n")
+    manifest = directory / "raytracer_manifest.json"
+    manifest.write_bytes(b'{"source": "handwritten"}\n')
+    options = SimpleNamespace(output=directory / "output", straight_c_source=source,
+                              hand_asm_source=assembly, cc="test-cc", timeout=1,
+                              emit_ir=True)
+    commands = []
+
+    def build(command, timeout, env):
+      """Reject stale outputs before synthesizing a successful compilation."""
+      executable = Path(command[command.index("-o") + 1])
+      assert not executable.exists()
+      executable.write_bytes(b"executable")
+      commands.append(command)
+      return SimpleNamespace(stdout=b"", stderr=b""), 123
+
+    executable = options.output / "build" / "4x4-r2" / "hand-asm" / "raytracer"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"stale")
+    with patch.object(run, "runCommand", side_effect=build), patch.object(
+        run.time, "CLOCK_MONOTONIC", 1, create=True):
+      result = run.buildBackend("hand-asm", 4, 2, options, {})
+    assert len(commands) == 1
+    assert "-DRAY_HAND_ASM" in commands[0]
+    index = commands[0].index("-arch")
+    assert commands[0][index + 1] == "arm64"
+    assert Path(result["source"]).read_bytes() == source.read_bytes()
+    snapshots = result["source_snapshots_sha256"]
+    for name, original in (("raytracer_straight.c", source),
+                           ("raytracer_hand.S", assembly),
+                           ("raytracer_manifest.json", manifest)):
+      assert (executable.parent / name).read_bytes() == original.read_bytes()
+      assert snapshots[name] == hashlib.sha256(original.read_bytes()).hexdigest()
+    assert result["inspection"] is None
+  host = {"physical_architecture": "amd64", "system": "Linux"}
+  with patch.object(run, "hostInfo", return_value=host), patch.object(
+      run.shutil, "which", return_value="cc"), patch.object(
+      run.time, "CLOCK_MONOTONIC", 1, create=True):
+    expectError(lambda: run.main(["--backend", "hand-asm", "--compiler", "/missing"]))
+  assert run.backendLabel("hand-asm", host, "arm64") == "Hand ASM (ARM64)"
+  assert run.backendLabel("c", host, "amd64").startswith("Nifty C backend")
+
+
+testNiftySnapshot()
+testHandAsm()
 testProtocol()
 testConfiguration()
 testPng()

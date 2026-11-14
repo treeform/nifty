@@ -17,7 +17,7 @@ Spec = importlib.util.spec_from_file_location("ray_benchmark", Root / "benchmark
 Ray = importlib.util.module_from_spec(Spec)
 Spec.loader.exec_module(Ray)
 BenchmarkError = Ray.BenchmarkError
-StandaloneBackends = ("c-straight", "hand-asm")
+StandaloneBackends = ("hand-asm", "c-straight")
 Backends = StandaloneBackends + Ray.Backends
 RecordText = (r'{"name":"Nifty\nJSON","unicode":"\u00e9\uD83D\uDE03",'
               r'"nul":"a\u0000b","integer":9007199254740993,'
@@ -30,7 +30,7 @@ TimingScope = ("Each timed cycle parses the complete input, consumes the decoded
                "Throughput includes consumption and cleanup, not just tokenization. "
                "Each sample starts a fresh process; first-use execution and "
                "translation within the loop remain timed.")
-ComparisonScope = ("C straight is an independent handwritten parser that builds "
+ComparisonScope = ("Hand C is an independent handwritten parser that builds "
                    "an owned tree and transfers children into their parents. "
                    "Nifty's parser currently copies completed subtrees. Timing "
                    "differences reflect parser implementation and ownership "
@@ -210,10 +210,7 @@ def buildBackend(backend, options, env):
                       f"--opt:{options.opt}", "--emit-ir", "-o", str(ir)]
     _, inspectionNs = Ray.runCommand(inspectCommand, options.timeout, env)
     inspection = {"path": str(ir), "command": inspectCommand, "wall_ns": inspectionNs}
-  label = "Hand ASM (ARM64)" if backend == "hand-asm" else Ray.backendLabel(
-    backend, options.host, architecture)
-  if backend == "c":
-    label = label.replace("C (", "Nifty C backend (", 1)
+  label = Ray.backendLabel(backend, options.host, architecture)
   return {"backend": backend, "label": label,
           "execution_architecture": architecture, "executable": str(executable),
           "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
@@ -267,7 +264,7 @@ def parseArguments(arguments=None):
   """Reject unbounded or unsupported configuration before building."""
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--backend", action="append", default=[],
-                      help="Repeat or use comma-separated c-straight,hand-asm,c,arm64,amd64")
+                      help="Repeat or use comma-separated hand-asm,hand-c,c,arm64,amd64; c-straight remains an alias")
   parser.add_argument("--records", type=int, default=128)
   parser.add_argument("--repeat", type=int, default=10)
   parser.add_argument("--samples", type=int, default=5)
@@ -275,7 +272,7 @@ def parseArguments(arguments=None):
   parser.add_argument("--opt", choices=("none", "speed"), default="speed")
   parser.add_argument("--compiler", type=Path, default=Root / "nifty")
   parser.add_argument("--source", type=Path, default=Root / "benchmarks/json_parser.nifty")
-  parser.add_argument("--straight-c-source", type=Path,
+  parser.add_argument("--hand-c-source", "--straight-c-source", dest="straight_c_source", type=Path,
                       default=Root / "benchmarks/json_parser_straight.c")
   parser.add_argument("--hand-asm-source", type=Path,
                       default=Root / "benchmarks/arm64/json_parser_hand.S")
@@ -295,11 +292,13 @@ def parseArguments(arguments=None):
   selected = []
   for entry in options.backend:
     for backend in entry.split(","):
+      if backend == "hand-c":
+        backend = "c-straight"
       if backend not in Backends:
         parser.error(f"unknown backend: {backend}")
       if backend not in selected:
         selected.append(backend)
-  options.backend = selected
+  options.backend = [backend for backend in Backends if backend in selected]
   for name in ("compiler", "source", "straight_c_source", "hand_asm_source", "output"):
     setattr(options, name, getattr(options, name).expanduser().resolve())
   return options
@@ -346,7 +345,7 @@ def availableBackends(host, compiler, cc, needsNifty=True):
       available.append("c")
   else:
     available = [backend for backend in available if backend != "c"]
-  return available
+  return [backend for backend in Backends if backend in available]
 
 
 def main(arguments=None):

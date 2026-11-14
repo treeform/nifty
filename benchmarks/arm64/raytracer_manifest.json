@@ -1,0 +1,56 @@
+{
+  "name": "Hand ASM",
+  "target": "arm64-apple-darwin",
+  "platform": "macOS ARM64",
+  "source": "benchmarks/raytracer_straight.c",
+  "source_sha256": "08ee59e86816531a5fcbac2b7a202576490d31a0677f57cddae14ac893c6047e",
+  "source_origin_revision": "591fc5bf59729abc2d865b2dac5700839893185a",
+  "source_adaptations": [
+    "Made render dimensions a runtime argument so one persisted assembly core supports all benchmark sizes.",
+    "Added RAY_STRAIGHT_NO_MAIN and RAY_HAND_ASM selection around the shared C driver and core; Hand C retains the same scene and numerical operations."
+  ],
+  "compiler": "Apple clang version 16.0.0 (clang-1600.0.26.4)\nTarget: arm64-apple-darwin24.1.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+  "command": [
+    "cc",
+    "-O2",
+    "-pthread",
+    "-fno-strict-aliasing",
+    "-ffp-contract=off",
+    "-DRAY_STRAIGHT_NO_MAIN",
+    "-S",
+    "benchmarks/raytracer_straight.c",
+    "-o",
+    "benchmarks/arm64/raytracer_clang.s"
+  ],
+  "baseline_assembly_sha256": "63200e3ef63cb6151c49aa00527546458ba03f32801c98e4a7252cb7c6df30f4",
+  "hand_assembly_sha256": "e92c6b21aeba2b2c40e0642d2acb8d9a064d904b84ca8951a00101dc0413048a",
+  "changes": [
+    {
+      "function": "intersections",
+      "change": "Pair the two sphere intersections in float64 SIMD lanes; mask inactive square-root lanes; retain exact arithmetic, plane handling, strict closest-hit order and ties."
+    },
+    {
+      "function": "render",
+      "change": "Compute the vertical camera contribution once per row and reuse it for all columns."
+    },
+    {
+      "function": "traceRay, shade, getNaturalColor",
+      "change": "Avoid redundant Ray copies, reduce traceRay frame from 80 to 32 bytes and tail-call shade, remove unused callee-saved register spills."
+    },
+    {
+      "function": "object metadata",
+      "change": "Use macOS 11 deployment marker with baseline ARM64 instructions and libc/libm calls."
+    }
+  ],
+  "abi": {
+    "Vec3_size": 24,
+    "Camera_size": 96,
+    "Camera_pos": 72,
+    "Ray_size": 48,
+    "Intersection_size": 16,
+    "render": "void render(uint8_t *pixels, Camera camera, int64_t imageSize)"
+  },
+  "precision": "float64; no fused multiply-add, no approximate reciprocal or square root, unchanged libm pow",
+  "scope": "Fixed three-object benchmark scene; arbitrary supported image sizes and camera inputs. Renders complete frames, including recursive reflection and shadows.",
+  "timing": "Same C timing/checksum driver as Hand C; renderer core linked as persisted assembly; no Nifty invocation."
+}
