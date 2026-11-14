@@ -1,0 +1,1 @@
+error_while_condition_var_reset.nifty:11: cannot prove this while loop terminates: no finite-ranged variable makes strict progress every iteration; add 'max N' to bound it (the loop then also stops after N iterations)

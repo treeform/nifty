@@ -1,0 +1,9 @@
+proc setHigh(value: var int): bool =
+  value = 9223372036854775807
+  return true
+
+thread main() =
+  var total = 0
+  while setHigh(total) max 1:
+    total = total + 1
+  echo total

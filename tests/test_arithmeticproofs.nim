@@ -63,3 +63,18 @@ let smallLoop = "thread main() =\n" &
   "  for i in 0 ..< 3:\n" &
   "    echo i\n"
 doAssert "ops total" in reportFor(smallLoop, "small.nifty")
+
+let independentGlobalWrite = """
+var state: 0 .. 1
+proc setState() =
+  state = 1
+proc note(): bool =
+  setState()
+  return true
+thread main() =
+  var i: 0 .. 2 = 0
+  while i < 2 and note():
+    i = i + 1
+  echo state
+"""
+discard checkedModule(independentGlobalWrite, "arithmeticproofs.nifty")
