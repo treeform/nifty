@@ -1,0 +1,13 @@
+overlap=bcde
+same=bcde
+empty=0
+empty bounds=0
+clamped=abcd
+reversed=0
+past end=0
+before start=0
+suffix=cdef
+true
+dynamic=abcdef
+true
+dynamic empty=0

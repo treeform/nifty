@@ -1,0 +1,36 @@
+const Min = -9223372036854775807 - 1
+const Max = 9223372036854775807
+
+thread main() =
+  var text: string[8]
+  text.add("abcdef")
+  text.copyRange(text, 1, 5)
+  echo "overlap=", text
+  text.copyRange(text, 0, Max)
+  echo "same=", text
+
+  var empty: string
+  discard empty.reserve(0)
+  var fixed: string[4]
+  fixed.copyRange(empty, 0, 0)
+  echo "empty=", fixed.len
+  fixed.copyRange(empty, Min, Max)
+  echo "empty bounds=", fixed.len
+
+  let source: string[8] = "abcdef"
+  fixed.copyRange(source, Min, Max)
+  echo "clamped=", fixed
+  fixed.copyRange(source, Max, Min)
+  echo "reversed=", fixed.len
+  fixed.copyRange(source, Max, Max)
+  echo "past end=", fixed.len
+  fixed.copyRange(source, Min, Min)
+  echo "before start=", fixed.len
+  fixed.copyRange(source, 2, Max)
+  echo "suffix=", fixed
+
+  var dynamic: string
+  echo dynamic.copyRange(source, Min, Max)
+  echo "dynamic=", dynamic
+  echo dynamic.copyRange(empty, Min, Max)
+  echo "dynamic empty=", dynamic.len

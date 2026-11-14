@@ -14,6 +14,7 @@
 /tests/test_progress
 /tests/test_arithmeticproofs
 /tests/test_runtimefailures
+/tests/test_copyrange
 /tests/tests
 /tests/nifty_t
 /nimcache/
