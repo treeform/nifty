@@ -1,6 +1,6 @@
 ## Lowers checked Nifty syntax to explicit native SSA and storage.
 import std/[tables, sets]
-import types, common, nativeplans, backend/irs
+import types, common, semantics, nativeplans, backend/irs
 
 type
   Binding = object
@@ -13,7 +13,7 @@ type
     globals: Table[string, int]
     constants: Table[string, int64]
     layouts: Table[string, int]
-    bindings: Table[string, Binding]
+    bindings: Table[BindingId, Binding]
     fn, current, line: int
     routine: Routine
     arena, highArena: int
@@ -21,8 +21,6 @@ type
     calls: seq[seq[int]]
     patches: seq[int]
     breaks: seq[int]
-    breakScopes: seq[int]
-    owners: seq[seq[Binding]]
 
 proc aligned(n, a: int): int =
   ## Rounds storage to its concrete alignment.
@@ -111,7 +109,8 @@ proc layout(g: var Lower, t: Typ): int =
       l.bytes = int64(aligned(l.valOffset + int(t.len *
         g.plan.layouts[l.val].bytes), 8))
     of TypeVarType:
-      raise newException(NiftyError, "Uninstantiated native type " & $t)
+      raise newException(NiftyError,
+        "Internal compiler error: uninstantiated native type " & $t)
   g.plan.layouts[result] = l
 
 proc size(g: var Lower, t: Typ): int =
@@ -386,6 +385,17 @@ proc floatInt(g: var Lower, value: ValueId): ValueId =
   g.current = done
   g.load(output)
 
+proc addressParam(g: Lower, p: Param): bool =
+  ## Selects native packet storage without redefining borrow semantics.
+  case g.source.mode(p.binding)
+  of MutBorrowMode:
+    true
+  of ReadBorrowMode:
+    # Immutable nonowning arrays retain their existing native value ABI.
+    p.typ.kind != ArrayType or hasOwned(p.typ)
+  else:
+    false
+
 proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
   ## Captures value and mutable arguments before calling a routine.
   let index = g.routines[e.sval]
@@ -393,7 +403,7 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
   var offsets: seq[int]
   var bytes = 0
   for p in r.params:
-    let borrowed = p.isVar or hasOwned(p.typ)
+    let borrowed = g.addressParam(p)
     bytes = aligned(bytes, if borrowed: 8 else:
       int(g.plan.layouts[g.layout(p.typ)].align))
     offsets.add(bytes)
@@ -401,9 +411,9 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
   let args = g.allocate(bytes)
   for i, a in e.kids:
     let p = r.params[i]
-    if p.isVar or hasOwned(p.typ):
+    if g.addressParam(p):
       let source = g.path(a)
-      let address = if p.typ.dynamic and not a.typ.dynamic:
+      let address = if a.borrowedView:
           g.borrowedView(source, a.typ)
         else: source
       g.store(g.offset(args, offsets[i]), address)
@@ -421,9 +431,9 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
     var parameters: seq[IrType]
     for i, p in r.params:
       host.paramTypes.add(g.layout(p.typ))
-      host.paramVars.add(p.isVar)
+      host.paramVars.add(g.source.mode(p.binding) == MutBorrowMode)
       var v: ValueId
-      if p.isVar or hasOwned(p.typ):
+      if g.addressParam(p):
         v = g.load(g.offset(args, offsets[i]), AddressType)
         if p.typ.kind == StringType:
           v = g.data(v, p.typ)
@@ -463,7 +473,7 @@ proc path(g: var Lower, e: Expr): ValueId =
       result = g.emit(IrInstruction(op: GlobalAddressOp,
         target: int32(g.globals[e.sval])), [], AddressType)
     else:
-      result = g.bindings[e.sval].address
+      result = g.bindings[e.binding].address
   of FieldExpr:
     if not e.isOptOk and e.kids[0].typ.kind != ObjectType:
       return g.expression(e)
@@ -474,7 +484,8 @@ proc path(g: var Lower, e: Expr): ValueId =
     for f in l.fields:
       if f.name == e.sval:
         return g.offset(p, f.offset)
-    raise newException(NiftyError, "Native field unavailable: " & e.sval)
+    raise newException(NiftyError,
+      "Internal compiler error: native field unavailable: " & e.sval)
   of IndexExpr:
     let base = g.path(e.kids[0])
     let index = g.expression(e.kids[1])
@@ -601,7 +612,8 @@ proc expression(g: var Lower, e: Expr): ValueId =
         of "/": DivideOp
         of "%": RemainderOp
         else:
-          raise newException(NiftyError, "Unsupported native operator " & e.sval)
+          raise newException(NiftyError,
+            "Internal compiler error: unsupported native operator " & e.sval)
       result = g.binary(op, a, b)
   of CallExpr:
     if e.sval in ["float32", "float64"]:
@@ -648,16 +660,15 @@ proc expression(g: var Lower, e: Expr): ValueId =
       return g.read(output, e.typ)
     result = g.methodCall(e)
 
-proc statements(g: var Lower, body: seq[Stmt])
+proc statements(g: var Lower, body: seq[Stmt], scope: int)
 
-proc cleanup(g: var Lower, first: int) =
-  ## Releases owners from the innermost exited scope outward.
-  for i in countdown(g.owners.high, first):
-    for j in countdown(g.owners[i].high, 0):
-      let owner = g.owners[i][j]
-      let host = NativeHost(kind: ContainerHost, operation: "drop",
-        receiverType: g.layout(owner.typ), resultType: -1)
-      g.hostCall(host, owner.address, g.null, g.null)
+proc cleanup(g: var Lower, drops: seq[BindingId]) =
+  ## Emits the destruction order already established by semantic analysis.
+  for id in drops:
+    let owner = g.bindings[id]
+    let host = NativeHost(kind: ContainerHost, operation: "drop",
+      receiverType: g.layout(owner.typ), resultType: -1)
+    g.hostCall(host, owner.address, g.null, g.null)
 
 proc assignExpression(g: var Lower, dest: ValueId, e: Expr, t: Typ) =
   ## Forwards caller storage directly through native destination returns.
@@ -681,9 +692,7 @@ proc statement(g: var Lower, s: Stmt) =
     else:
       g.assignExpression(p, s.init, s.typ)
     g.arena = retained
-    g.bindings[s.name] = Binding(address: p, typ: s.typ)
-    if hasOwned(s.typ):
-      g.owners[^1].add(g.bindings[s.name])
+    g.bindings[s.binding] = Binding(address: p, typ: s.typ)
   of AssignStmt:
     if s.lhs.kind == IndexExpr and
         s.lhs.kids[0].typ.kind in {DenseMapType, SparseMapType}:
@@ -706,10 +715,10 @@ proc statement(g: var Lower, s: Stmt) =
       let cond = g.expression(br.cond)
       g.branch(cond, yes, no)
       g.current = yes
-      g.statements(br.body)
+      g.statements(br.body, br.scope)
       g.jump(done)
       g.current = no
-    g.statements(s.elseBody)
+    g.statements(s.elseBody, s.elseScope)
     g.jump(done)
     g.current = done
   of WhileStmt, LoopStmt:
@@ -732,10 +741,8 @@ proc statement(g: var Lower, s: Stmt) =
       g.jump(run)
     g.current = run
     g.breaks.add(done)
-    g.breakScopes.add(g.owners.len)
-    g.statements(s.body)
+    g.statements(s.body, s.bodyScope)
     discard g.breaks.pop()
-    discard g.breakScopes.pop()
     if g.live and s.maxTrips > 0:
       g.store(ctr, g.binary(AddOp, g.load(ctr), g.constant(1)))
     g.jump(test)
@@ -744,7 +751,7 @@ proc statement(g: var Lower, s: Stmt) =
     let p = g.allocate(8)
     g.store(p, g.expression(s.lo))
     let bound = g.expression(s.hi)
-    g.bindings[s.name] = Binding(address: p, typ: intType())
+    g.bindings[s.binding] = Binding(address: p, typ: intType())
     let test = g.blockId
     let run = g.blockId
     let done = g.blockId
@@ -754,10 +761,8 @@ proc statement(g: var Lower, s: Stmt) =
       else: LessComparison, g.load(p), bound), run, done)
     g.current = run
     g.breaks.add(done)
-    g.breakScopes.add(g.owners.len)
-    g.statements(s.body)
+    g.statements(s.body, s.bodyScope)
     discard g.breaks.pop()
-    discard g.breakScopes.pop()
     if g.live:
       if s.inclusive:
         let increment = g.blockId
@@ -769,11 +774,11 @@ proc statement(g: var Lower, s: Stmt) =
   of ReturnStmt:
     if s.value != nil:
       g.assignExpression(ValueId(2), s.value, g.routine.ret)
-    g.cleanup(0)
+    g.cleanup(s.drops)
     g.plan.module.functions[g.fn].blocks[g.current].terminator =
       IrTerminator(kind: ReturnTerminator)
   of BreakStmt:
-    g.cleanup(g.breakScopes[^1])
+    g.cleanup(s.drops)
     g.jump(g.breaks[^1])
   of EchoStmt:
     var host = NativeHost(kind: EchoHost, operation: "echo",
@@ -784,9 +789,7 @@ proc statement(g: var Lower, s: Stmt) =
     discard g.expression(s.value)
   of BlockStmt:
     let entry = g.arena
-    let saved = g.bindings
-    g.statements(s.body)
-    g.bindings = saved
+    g.statements(s.body, s.bodyScope)
     g.arena = entry
   of WithStmt:
     let receiver = if s.typ.kind != LockType and s.lhs != nil:
@@ -797,7 +800,7 @@ proc statement(g: var Lower, s: Stmt) =
       let host = NativeHost(kind: LockHost, operation: "lock",
         receiverType: g.layout(s.typ), resultType: -1)
       g.hostCall(host, receiver, g.null, g.null)
-      g.statements(s.body)
+      g.statements(s.body, s.bodyScope)
       if g.live:
         var unlock = host
         unlock.operation = "unlock"
@@ -805,7 +808,7 @@ proc statement(g: var Lower, s: Stmt) =
     else:
       let start = Expr(kind: CallExpr, sval: "start", kids: @[s.lhs])
       discard g.routineCall(start)
-      g.statements(s.body)
+      g.statements(s.body, s.bodyScope)
       if g.live:
         let finish = Expr(kind: CallExpr, sval: "end", kids: @[s.lhs])
         discard g.routineCall(finish)
@@ -817,13 +820,13 @@ proc statement(g: var Lower, s: Stmt) =
     g.store(p, g.constant(0))
     let bound = if bt.kind in {SetType, DenseMapType}:
         g.constant(l.upper - l.lower + 1) else: g.load(receiver)
-    let borrowed = hasOwned(s.typ)
+    let borrowed = g.source.mode(s.binding).isBorrow
     let item = if borrowed: NoValue else: g.allocType(s.typ)
-    g.bindings[s.name] = Binding(address: item, typ: s.typ)
+    g.bindings[s.binding] = Binding(address: item, typ: s.typ)
     var value = NoValue
     if s.name2 != "":
       value = g.allocType(s.typ2)
-      g.bindings[s.name2] = Binding(address: value, typ: s.typ2)
+      g.bindings[s.binding2] = Binding(address: value, typ: s.typ2)
     let test = g.blockId
     let run = g.blockId
     let next = g.blockId
@@ -867,7 +870,7 @@ proc statement(g: var Lower, s: Stmt) =
       if bt.kind == StringType:
         g.copy(item, g.convert(g.load(address, UInt8Type), Int64Type), s.typ)
       elif borrowed:
-        g.bindings[s.name] = Binding(address: address, typ: s.typ)
+        g.bindings[s.binding] = Binding(address: address, typ: s.typ)
       else:
         g.copy(item, g.read(address, s.typ), s.typ)
       if int32(value) >= 0:
@@ -877,20 +880,16 @@ proc statement(g: var Lower, s: Stmt) =
           offset: int64(l.valOffset)), [receiver, vd], AddressType)
         g.copy(value, g.read(vp, s.typ2), s.typ2)
     g.breaks.add(done)
-    g.breakScopes.add(g.owners.len)
-    g.statements(s.body)
+    g.statements(s.body, s.bodyScope)
     discard g.breaks.pop()
-    discard g.breakScopes.pop()
     g.jump(next)
     g.current = next
     g.store(p, g.binary(AddOp, g.load(p), g.constant(1)))
     g.jump(test)
     g.current = done
 
-proc statements(g: var Lower, body: seq[Stmt]) =
+proc statements(g: var Lower, body: seq[Stmt], scope: int) =
   ## Lowers reachable statements and releases temporary arena slices.
-  let scope = g.owners.len
-  g.owners.add(@[])
   for s in body:
     if not g.live: break
     let entry = g.arena
@@ -898,11 +897,11 @@ proc statements(g: var Lower, body: seq[Stmt]) =
     if s.kind notin {VarStmt, LetStmt}:
       g.arena = entry
   if g.live:
-    g.cleanup(scope)
-  g.owners.setLen(scope)
+    g.cleanup(g.source.semantics.scopes[scope].drops)
 
 proc lowerNative*(source: Module, filename = ""): NativePlan =
   ## Builds native IR, fixed layouts, and executable runtime metadata.
+  source.requireChecked()
   var g = Lower(source: source)
   g.plan.module.pointerBytes = 8
   g.plan.module.files = if srcFiles.len > 0: srcFiles else: @[filename]
@@ -928,10 +927,13 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
       alignment: int32(l.align)))
     if v.typ.kind == LockType: g.plan.lockOffsets.add(off)
     if v.typ.kind == ChannelType: g.plan.channelOffsets.add(off)
-    if hasOwned(v.typ):
-      g.plan.ownedGlobals.add(OwnedGlobal(offset: off,
-        layout: g.layout(v.typ)))
     g.plan.globalBytes += int(l.bytes)
+  # Runtime metadata keeps its declaration-order ABI and reverses at exit.
+  for i in countdown(source.semantics.globalDrops.high, 0):
+    let owner = source.semantics.bindings[source.semantics.globalDrops[i]]
+    let global = g.plan.module.globals[g.globals[owner.name]]
+    g.plan.ownedGlobals.add(OwnedGlobal(offset: int(global.offset),
+      layout: g.layout(owner.typ)))
   g.plan.initialData = newSeq[byte](g.plan.globalBytes)
   g.plan.module.data = g.plan.initialData
   for fn in 0 ..< g.plan.module.functions.len:
@@ -949,14 +951,15 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
       g.routine = source.routines[fn - 1]
       var bytes = 0
       for p in g.routine.params:
-        let borrowed = p.isVar or hasOwned(p.typ)
+        let borrowed = g.addressParam(p)
         bytes = aligned(bytes, if borrowed: 8 else:
           int(g.plan.layouts[g.layout(p.typ)].align))
         let address = g.offset(ValueId(1), bytes)
-        g.bindings[p.name] = Binding(typ: p.typ,
+        g.bindings[p.binding] = Binding(typ: p.typ,
           address: if borrowed: g.load(address, AddressType) else: address)
         bytes += (if borrowed: 8 else: g.size(p.typ))
-      if g.routine.externLib == "": g.statements(g.routine.body)
+      if g.routine.externLib == "":
+        g.statements(g.routine.body, g.routine.bodyScope)
     if g.live:
       g.plan.module.functions[fn].blocks[g.current].terminator =
         IrTerminator(kind: ReturnTerminator)
@@ -969,7 +972,8 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
   proc total(fn: int): int =
     ## Computes the maximum arena path through the acyclic call graph.
     if fn in visiting:
-      raise newException(NiftyError, "Recursive native arena call graph")
+      raise newException(NiftyError,
+        "Internal compiler error: recursive native arena call graph")
     if totals[fn] > 0: return totals[fn]
     visiting.incl(fn)
     var child = 0

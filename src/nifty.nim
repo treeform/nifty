@@ -2,7 +2,7 @@
 ## A small systems language with Nim-flavored syntax that
 ## compiles to C, ARM64, or AMD64. See spec.md for the language definition.
 ##
-## Pipeline: lexer -> parser -> checker -> C, or lowering -> IR -> native.
+## Pipeline: parser -> checker + semantics -> C, or lowering -> IR -> native.
 
 import nifty/[common, parser, checker, codegen, report, loader, types]
 
@@ -11,7 +11,7 @@ export common
 var lastExternLibs*: seq[string] ## non-libc libs of the last compile
 
 proc checkedModule*(src, moduleName: string, dir = ""): Module =
-  ## Loads imports and checks the source once before selecting a backend.
+  ## Checks imports and prepares shared semantics before backend selection.
   result = parse(loadTokens(src, moduleName, dir))
   check(result)
 

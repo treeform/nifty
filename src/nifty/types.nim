@@ -31,6 +31,27 @@ type
   SymKind* = enum
     ConstSym, GlobalSym, LocalSym, ParamSym
 
+  BindingMode* = enum
+    UnplannedMode, ValueMode, OwnerMode, ReadBorrowMode, MutBorrowMode
+  BindingId* = int
+  SemanticBinding* = object
+    name*, routine*: string
+    line*: int
+    typ*: Typ
+    mode*: BindingMode
+    kind*: SymKind
+  SemanticScope* = object
+    drops*: seq[BindingId]
+  LockProof* = object
+    name*: string
+    guards*, users*: seq[string]
+  SemanticPlan* = ref object
+    bindings*: seq[SemanticBinding]
+    scopes*: seq[SemanticScope]
+    globalDrops*: seq[BindingId]
+    usesHeap*: bool
+    locks*: seq[LockProof]
+
   ExprKind* = enum
     IntExpr, FloatExpr, BoolExpr, StrExpr, IdentExpr, BinExpr, NotExpr, NegExpr, IndexExpr, CallExpr,
     FieldExpr, MethodExpr, # MethodExpr: builtin op on a container, kids[0] = base
@@ -45,6 +66,8 @@ type
                     # FieldExpr field name
     kids*: seq[Expr]
     typ*: Typ       # set by the checker
+    binding*: BindingId # Resolved declaration; zero for non-binding nodes.
+    borrowedView*: bool # Checked fixed storage to growable readonly view.
     symKind*: SymKind
     isVarParam*: bool
     mut*: bool
@@ -62,11 +85,13 @@ type
   Elif* = object
     cond*: Expr
     body*: seq[Stmt]
+    scope*: int
   Stmt* = ref object
     kind*: StmtKind
     line*: int
     name*: string      # var/let/for/with
     name2*: string     # for k, v in m: - the value variable
+    binding*, binding2*: BindingId
     typ*: Typ          # var/let declared or inferred type
     typ2*: Typ         # foreach over a map: the value variable's type
     init*: Expr        # var/let initializer
@@ -81,6 +106,8 @@ type
     body*: seq[Stmt]
     elifs*: seq[Elif]  # if: all condition branches, first is the `if`
     elseBody*: seq[Stmt]
+    bodyScope*, elseScope*: int
+    drops*: seq[BindingId] # Ordered owners released by return or break.
 
   RoutineKind* = enum
     FuncRoutine = "func", ProcRoutine = "proc", ThreadRoutine = "thread"
@@ -88,6 +115,7 @@ type
     name*: string
     typ*: Typ
     isVar*: bool
+    binding*: BindingId
   Routine* = ref object
     kind*: RoutineKind
     name*: string
@@ -97,6 +125,7 @@ type
     params*: seq[Param]
     ret*: Typ # nil = no return value
     body*: seq[Stmt]
+    bodyScope*: int
     externLib*: string         # extern routines: the library ("libc", ...)
     cname*: string             # extern routines: the C symbol, if renamed
     generic*: bool             # has $ variables; body kept as tokens
@@ -112,6 +141,7 @@ type
     name*: string
     typ*: Typ
     line*: int
+    binding*: BindingId
   TypeDef* = object
     name*: string
     typ*: Typ
@@ -122,6 +152,7 @@ type
     globals*: seq[GlobalDef]
     types*: seq[TypeDef]
     routines*: seq[Routine]
+    semantics*: SemanticPlan # Present only after all source checks pass.
 
 const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
   "put", "remove", "setLen", "addByte", "addNum", "copyRange",

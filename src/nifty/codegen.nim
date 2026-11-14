@@ -3,7 +3,7 @@
 ## forward prototypes: definitions appear in call order.
 
 import std/[strutils, tables, sets, sequtils]
-import types
+import types, semantics
 
 type
   Gen = object
@@ -18,12 +18,11 @@ type
     bigOffs: Table[string, Table[string, int64]] # routine -> local -> offset
     curOffsets: Table[string, int64]
     curArena: Table[string, int64] # current routine's big locals
-    borrowedLocals: HashSet[string]
     curRet: Typ                    # return type of the routine being emitted
     curFrame: int64                # current routine's arena frame bytes
     curThread: bool
-    owners: seq[seq[tuple[path: string, typ: Typ]]]
-    loopScopes: seq[int]
+    source: Module
+    ownerPaths: Table[BindingId, string]
 
 proc put(g: var Gen, s: string) =
   g.o.add spaces(g.ind * 2)
@@ -146,14 +145,14 @@ proc genExpr(g: var Gen, e: Expr): string =
       of ConstSym: "C_" & e.sval
       of GlobalSym: "g_" & e.sval
       of LocalSym:
-        if e.sval in g.borrowedLocals:
+        if g.source.mode(e.binding) == ReadBorrowMode:
           "(*v_" & e.sval & ")"
         elif e.sval in g.curArena:
           "(*v_" & e.sval & ")" # big local: lives on the thread's arena
         else:
           "v_" & e.sval
       of ParamSym:
-        if (e.isVarParam or hasOwned(e.typ)) and e.typ.passByPtr:
+        if g.source.mode(e.binding).isBorrow and e.typ.passByPtr:
           "(*p_" & e.sval & ")"
         else:
           "p_" & e.sval
@@ -197,7 +196,7 @@ proc genExpr(g: var Gen, e: Expr): string =
     for i, a in e.kids:
       if r.externLib != "" and r.params[i].typ.kind == StringType:
         parts.add g.genExpr(a) & ".m_data"
-      elif (r.params[i].isVar or hasOwned(r.params[i].typ)) and
+      elif g.source.mode(r.params[i].binding).isBorrow and
           r.params[i].typ.passByPtr:
         parts.add g.borrowArg(a, r.params[i].typ, false)
       else:
@@ -248,10 +247,9 @@ proc genExpr(g: var Gen, e: Expr): string =
       fn & "(" & basePtr & ")"
 
 proc borrowArg(g: var Gen, e: Expr, target: Typ, ordered: bool): string =
-  ## Adapt fixed storage to a nonowning dynamic descriptor when needed.
+  ## Emit the nonowning descriptor conversion approved by the checker.
   let path = if ordered: g.genPathOrdered(e) else: g.genExpr(e)
-  if target.dynamic and e.typ != nil and not e.typ.dynamic and
-      e.typ.kind in {StringType, SeqType}:
+  if e.borrowedView:
     return "&(" & cBase(target) & "){ .m_len = " & path &
       ".m_len, .m_cap = " & $e.typ.len & "LL, .m_data = " &
       path & ".m_data }"
@@ -421,7 +419,7 @@ proc genOrdered(g: var Gen, e: Expr): string =
     for i, a in e.kids:
       if r.externLib != "" and r.params[i].typ.kind == StringType:
         parts.add g.genPathOrdered(a) & ".m_data"
-      elif (r.params[i].isVar or hasOwned(r.params[i].typ)) and
+      elif g.source.mode(r.params[i].binding).isBorrow and
           r.params[i].typ.passByPtr:
         parts.add g.borrowArg(a, r.params[i].typ, true)
       elif a.typ != nil and a.typ.kind == ArrayType:
@@ -495,7 +493,7 @@ proc genCallInto(g: var Gen, e: Expr, dest: string) =
   let r = g.routines[e.sval]
   var parts: seq[string]
   for i, a in e.kids:
-    if (r.params[i].isVar or hasOwned(r.params[i].typ)) and
+    if g.source.mode(r.params[i].binding).isBorrow and
         r.params[i].typ.passByPtr:
       parts.add g.borrowArg(a, r.params[i].typ, true)
     elif a.typ != nil and a.typ.kind == ArrayType:
@@ -561,29 +559,26 @@ proc genCond(g: var Gen, e: Expr): string =
 
 proc genStmt(g: var Gen, s: Stmt)
 
-proc cleanup(g: var Gen, first: int) =
-  ## Release only owners whose scopes are exited by this control edge.
-  if g.owners.len > first:
-    for i in countdown(g.owners.high, first):
-      for j in countdown(g.owners[i].high, 0):
-        let owner = g.owners[i][j]
-        g.put "ni_drop_" & mangle(owner.typ) & "(&" & owner.path & ");"
+proc cleanup(g: var Gen, drops: seq[BindingId]) =
+  ## Emit destruction in the order established by the semantic pass.
+  for binding in drops:
+    let owner = g.source.semantics.bindings[binding]
+    g.put "ni_drop_" & mangle(owner.typ) & "(&" &
+      g.ownerPaths[binding] & ");"
 
-proc genBody(g: var Gen, body: seq[Stmt]) =
-  ## Track lexical ownership independently of generated C temporaries.
-  let scope = g.owners.len
-  g.owners.add @[]
+proc genBody(g: var Gen, body: seq[Stmt], scope: int) =
+  ## Emit a checked scope and its planned fallthrough destruction.
   for s in body:
     g.genStmt(s)
-  g.cleanup(scope)
-  g.owners.setLen(scope)
+  g.cleanup(g.source.semantics.scopes[scope].drops)
   for s in body:
     if s.kind in {VarStmt, LetStmt}:
       g.curArena.del s.name
 
-proc genBlock(g: var Gen, body: seq[Stmt]) =
+proc genBlock(g: var Gen, body: seq[Stmt], scope: int) =
+  ## Emit the body inside an indented C block.
   inc g.ind
-  g.genBody(body)
+  g.genBody(body, scope)
   dec g.ind
 
 proc genStmt(g: var Gen, s: Stmt) =
@@ -592,11 +587,10 @@ proc genStmt(g: var Gen, s: Stmt) =
     let declaration = $s.line & ":" & s.name
     if declaration in g.curOffsets:
       g.curArena[s.name] = g.curOffsets[declaration]
-    if hasOwned(s.typ):
-      let path =
+    if g.source.mode(s.binding) == OwnerMode:
+      g.ownerPaths[s.binding] =
         if s.name in g.curArena: "(*v_" & s.name & ")"
         else: "v_" & s.name
-      g.owners[^1].add (path, s.typ)
     if s.name in g.curArena:
       # A big local: a typed pointer into this thread's arena.
       let off = $g.curArena[s.name] & "LL"
@@ -697,10 +691,10 @@ proc genStmt(g: var Gen, s: Stmt) =
     if not anyEff:
       for i, br in s.elifs:
         g.put (if i == 0: "if " else: "} else if ") & g.genCond(br.cond) & " {"
-        g.genBlock(br.body)
+        g.genBlock(br.body, br.scope)
       if s.elseBody.len > 0:
         g.put "} else {"
-        g.genBlock(s.elseBody)
+        g.genBlock(s.elseBody, s.elseScope)
       g.put "}"
     else:
       # Effectful conditions run in order, each only when reached:
@@ -711,7 +705,7 @@ proc genStmt(g: var Gen, s: Stmt) =
           if g.hasEffects(br.cond): g.genOrdered(br.cond)
           else: g.genExpr(br.cond)
         g.put "if (" & cnd & ") {"
-        g.genBlock(br.body)
+        g.genBlock(br.body, br.scope)
         if i < s.elifs.len - 1 or s.elseBody.len > 0:
           g.put "} else {"
           inc g.ind
@@ -719,12 +713,11 @@ proc genStmt(g: var Gen, s: Stmt) =
         else:
           g.put "}"
       if s.elseBody.len > 0:
-        g.genBody(s.elseBody)
+        g.genBody(s.elseBody, s.elseScope)
       for _ in 0 ..< closes:
         dec g.ind
         g.put "}"
   of WhileStmt:
-    g.loopScopes.add g.owners.len
     if g.hasEffects(s.cond):
       # The condition re-runs every iteration with defined order:
       # evaluate it inside the loop, then decide.
@@ -741,7 +734,7 @@ proc genStmt(g: var Gen, s: Stmt) =
         g.put "if (" & ctr & " >= " & $s.maxTrips & "LL) break;"
       let cnd = g.genOrdered(s.cond)
       g.put "if (!(" & cnd & ")) break;"
-      g.genBody(s.body)
+      g.genBody(s.body, s.bodyScope)
       if s.maxTrips > 0:
         g.put "++" & ctr & ";"
       dec g.ind
@@ -758,7 +751,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "int64_t " & ctr & " = 0;"
       g.put "while (" & ctr & " < " & $s.maxTrips & "LL && " &
         g.genCond(s.cond) & ") {"
-      g.genBlock(s.body)
+      g.genBlock(s.body, s.bodyScope)
       inc g.ind
       g.put "++" & ctr & ";"
       dec g.ind
@@ -767,11 +760,9 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "}"
     else:
       g.put "while " & g.genCond(s.cond) & " {"
-      g.genBlock(s.body)
+      g.genBlock(s.body, s.bodyScope)
       g.put "}"
-    g.loopScopes.setLen(g.loopScopes.len - 1)
   of ForStmt:
-    g.loopScopes.add g.owners.len
     let tmp = "ni_end" & $g.tmpN
     inc g.tmpN
     g.put "{"
@@ -784,34 +775,31 @@ proc genStmt(g: var Gen, s: Stmt) =
     g.put "const int64_t " & tmp & " = " & hiS & ";"
     g.put "for (; v_" & s.name & (if s.inclusive: " <= " else: " < ") & tmp &
       "; ++v_" & s.name & ") {"
-    g.genBlock(s.body)
+    g.genBlock(s.body, s.bodyScope)
     g.put "}"
     dec g.ind
     g.put "}"
-    g.loopScopes.setLen(g.loopScopes.len - 1)
   of LoopStmt:
-    g.loopScopes.add g.owners.len
     g.put "for (;;) {"
-    g.genBlock(s.body)
+    g.genBlock(s.body, s.bodyScope)
     g.put "}"
-    g.loopScopes.setLen(g.loopScopes.len - 1)
   of WithStmt:
     if s.typ.kind == LockType:
       g.put "pthread_mutex_lock(&g_" & s.name & ");"
       g.put "{"
-      g.genBlock(s.body)
+      g.genBlock(s.body, s.bodyScope)
       g.put "}"
       g.put "pthread_mutex_unlock(&g_" & s.name & ");"
     else:
       let arg = (if s.typ.passByPtr: "&" else: "") & g.genExpr(s.lhs)
       g.put "f_start(" & arg & ");"
       g.put "{"
-      g.genBlock(s.body)
+      g.genBlock(s.body, s.bodyScope)
       g.put "}"
       g.put "f_end(" & arg & ");"
   of ReturnStmt:
     if s.value.isNil:
-      g.cleanup(0)
+      g.cleanup(s.drops)
       if g.curFrame > 0:
         g.put "ni_sp = ni_base;"
       g.put (if g.curThread: "return NULL;" else: "return;")
@@ -829,7 +817,7 @@ proc genStmt(g: var Gen, s: Stmt) =
           if g.hasEffects(s.value): g.genOrdered(s.value)
           else: g.genExpr(s.value)
         g.put "*ni_ret = " & v & ";"
-      g.cleanup(0)
+      g.cleanup(s.drops)
       if g.curFrame > 0:
         g.put "ni_sp = ni_base;"
       g.put "return;"
@@ -840,12 +828,12 @@ proc genStmt(g: var Gen, s: Stmt) =
       let captured = "ni_return" & $g.tmpN
       inc g.tmpN
       g.put cDecl(captured, g.curRet) & " = " & v & ";"
-      g.cleanup(0)
+      g.cleanup(s.drops)
       if g.curFrame > 0:
         g.put "ni_sp = ni_base;"
       g.put "return " & captured & ";"
   of BreakStmt:
-    g.cleanup(g.loopScopes[^1])
+    g.cleanup(s.drops)
     g.put "break;"
   of EchoStmt:
     # Every value argument is hoisted to a temp, in order: C leaves printf
@@ -940,10 +928,9 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "}"
   of BlockStmt:
     g.put "{"
-    g.genBlock(s.body)
+    g.genBlock(s.body, s.bodyScope)
     g.put "}"
   of ForEachStmt:
-    g.loopScopes.add g.owners.len
     let it = "ni_it" & $g.tmpN
     let ix = "ni_ix" & $g.tmpN
     let nn = "ni_n" & $g.tmpN
@@ -990,17 +977,14 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "for (int64_t " & ix & " = 0; " & ix & " < " & nn & "; ++" & ix &
         ") {"
       inc g.ind
-      if hasOwned(s.typ):
+      if g.source.mode(s.binding) == ReadBorrowMode:
         g.put "const " & cBase(s.typ) & " *v_" & s.name & " = &" &
           it & "->m_data[" & ix & "];"
-        g.borrowedLocals.incl s.name
       else:
         g.put cBase(s.typ) & " v_" & s.name & " = " & it & "->m_data[" & ix & "];"
-    g.genBody(s.body)
-    g.borrowedLocals.excl s.name
+    g.genBody(s.body, s.bodyScope)
     dec g.ind
     g.put "}"
-    g.loopScopes.setLen(g.loopScopes.len - 1)
     dec g.ind
     g.put "}"
   of DiscardStmt:
@@ -1053,16 +1037,6 @@ static void ni_free(void *p) {
   NIFTY_FREE(p);
 }
 """
-
-proc bodyHasOwners(body: seq[Stmt]): bool =
-  ## Include allocator support only for programs that define owners.
-  for s in body:
-    if hasOwned(s.typ) or bodyHasOwners(s.body) or
-        bodyHasOwners(s.elseBody):
-      return true
-    for br in s.elifs:
-      if bodyHasOwners(br.body):
-        return true
 
 proc emitTypeDefs(g: var Gen, t: Typ) =
   ## Emit typedefs (and the inline ops for seq/string) exactly once each,
@@ -1442,7 +1416,8 @@ proc emitBodyTypeDefs(g: var Gen, body: seq[Stmt]) =
 
 proc generate*(m: Module, src: string): string =
   ## Generate the complete C translation unit for a checked module.
-  var g = Gen(src: src)
+  requireChecked(m)
+  var g = Gen(src: src, source: m)
   for r in m.routines:
     g.routines[r.name] = r
   # Arena analysis: big locals leave the C stack for per-thread arenas,
@@ -1468,16 +1443,7 @@ proc generate*(m: Module, src: string): string =
       anyArena = true
   g.put "// Generated by nifty from " & src & ". Do not edit."
   g.o.add cPrelude
-  var memory = false
-  for td in m.types:
-    memory = memory or hasOwned(td.typ)
-  for gd in m.globals:
-    memory = memory or hasOwned(gd.typ)
-  for r in m.routines:
-    memory = memory or hasOwned(r.ret) or bodyHasOwners(r.body)
-    for pm in r.params:
-      memory = memory or hasOwned(pm.typ)
-  if memory:
+  if m.semantics.usesHeap:
     g.o.add cMemoryPrelude
   if m.routines.anyIt(it.externLib != ""):
     # GCC and Clang accept asm labels in C99 mode and expose the target's
@@ -1536,11 +1502,13 @@ proc generate*(m: Module, src: string): string =
       # prototypes. The linker still resolves the declared binary symbol.
       var ps: seq[string]
       for pm in r.params:
+        let mutable = m.mode(pm.binding) == MutBorrowMode
+        let qualifier = if mutable: "" else: "const "
         if pm.typ.kind == StringType:
-          ps.add (if pm.isVar: "" else: "const ") & "uint8_t *"
+          ps.add qualifier & "uint8_t *"
         elif pm.typ.kind == ArrayType:
-          ps.add (if pm.isVar: "" else: "const ") & cBase(pm.typ.elem) & " *"
-        elif pm.isVar:
+          ps.add qualifier & cBase(pm.typ.elem) & " *"
+        elif mutable:
           ps.add cBase(pm.typ) & " *"
         else:
           ps.add cBase(pm.typ)
@@ -1565,7 +1533,7 @@ proc generate*(m: Module, src: string): string =
       if g.curFrame > 0:
         g.put "uint8_t *ni_base = ni_sp;"
         g.put "ni_sp += " & $g.curFrame & "LL;"
-      g.genBody(r.body)
+      g.genBody(r.body, r.bodyScope)
       if g.curFrame > 0:
         g.put "ni_sp = ni_base;"
       g.put "return NULL;"
@@ -1574,15 +1542,15 @@ proc generate*(m: Module, src: string): string =
     else:
       var ps: seq[string]
       for pm in r.params:
-        if pm.isVar and pm.typ.passByPtr:
+        if m.mode(pm.binding) == MutBorrowMode and pm.typ.passByPtr:
           ps.add cBase(pm.typ) & " *p_" & pm.name
-        elif hasOwned(pm.typ) and pm.typ.passByPtr:
+        elif m.mode(pm.binding) == ReadBorrowMode and pm.typ.passByPtr:
           ps.add "const " & cBase(pm.typ) & " *p_" & pm.name
         elif pm.typ.kind == ArrayType:
           # Arrays decay to pointers in C either way; const makes the C
           # compiler enforce read-only non-var params as a second line
           # of defense.
-          if pm.isVar:
+          if m.mode(pm.binding) == MutBorrowMode:
             ps.add cDecl("p_" & pm.name, pm.typ)
           else:
             ps.add "const " & cDecl("p_" & pm.name, pm.typ)
@@ -1605,7 +1573,7 @@ proc generate*(m: Module, src: string): string =
       if g.curFrame > 0:
         g.put "uint8_t *ni_base = ni_sp;"
         g.put "ni_sp += " & $g.curFrame & "LL;"
-      g.genBody(r.body)
+      g.genBody(r.body, r.bodyScope)
       if g.curFrame > 0 and r.ret.isNil:
         g.put "ni_sp = ni_base;" # fall-off-the-end exit for void procs
       dec g.ind
@@ -1635,10 +1603,10 @@ proc generate*(m: Module, src: string): string =
     base += t.instances
   g.put "for (int ni_i = 0; ni_i < " & $total & "; ++ni_i)"
   g.put "  pthread_join(ni_threads[ni_i], NULL);"
-  for i in countdown(m.globals.high, 0):
-    let gd = m.globals[i]
-    if hasOwned(gd.typ):
-      g.put "ni_drop_" & mangle(gd.typ) & "(&g_" & gd.name & ");"
+  for binding in m.semantics.globalDrops:
+    let owner = m.semantics.bindings[binding]
+    g.ownerPaths[binding] = "g_" & owner.name
+  g.cleanup(m.semantics.globalDrops)
   g.put "return 0;"
   dec g.ind
   g.put "}"

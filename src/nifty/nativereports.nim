@@ -1,6 +1,6 @@
 ## Reports generated code and bounded compiler-owned native storage.
 import std/strutils
-import common, nativeplans, report, types, backend/[engine, irs]
+import common, nativeplans, report, types, semantics, backend/[engine, irs]
 
 type
   StackBounds = object
@@ -109,30 +109,6 @@ proc chain(plan: NativePlan, bounds: StackBounds, entry: int): string
     result.add(if name.len > 0: name else: "function " & $current)
     current = bounds.next[current]
 
-proc collectOwners(body: seq[Stmt], routine: string,
-    owners: var seq[string]) {.raises: [].} =
-  ## Lists local owner declarations and their scope lifetime.
-  for statement in body:
-    if statement.kind in {VarStmt, LetStmt} and
-        statement.typ.hasOwned:
-      owners.add("  local " & routine & "." & statement.name & ": " &
-        $statement.typ & " (declaration scope)")
-    collectOwners(statement.body, routine, owners)
-    collectOwners(statement.elseBody, routine, owners)
-    for branch in statement.elifs:
-      collectOwners(branch.body, routine, owners)
-
-proc ownerLines(sourceModule: Module): seq[string] {.raises: [].} =
-  ## Describes heap owners without assigning a static payload size.
-  if sourceModule.isNil:
-    return
-  for global in sourceModule.globals:
-    if global.typ.hasOwned:
-      result.add("  global " & global.name & ": " & $global.typ &
-        " (program lifetime; freed after threads finish)")
-  for routine in sourceModule.routines:
-    collectOwners(routine.body, routine.name, result)
-
 proc operationLines(sourceModule: Module, source: string): seq[string]
     {.raises: [NiftyError].} =
   ## Reuses the checked source report's abstract operation analysis.
@@ -153,6 +129,8 @@ proc nativeReport*(plan: NativePlan, image: NativeImage,
     source: string, sourceModule: Module = nil): string
     {.raises: [NiftyError].} =
   ## Reports generated sizes while excluding unknown host/runtime memory.
+  if not sourceModule.isNil:
+    requireChecked(sourceModule)
   if plan.globalBytes < 0:
     invalid("negative global storage size")
   let

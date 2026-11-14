@@ -10,6 +10,7 @@
 /tests/test_nativememory
 /tests/test_memoryfiles
 /tests/test_memory
+/tests/test_semantics
 /tests/tests
 /tests/nifty_t
 /nimcache/

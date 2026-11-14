@@ -53,10 +53,14 @@ interpret the source or compile it to C at startup.
 ## Compiler boundaries
 
 - `src/nifty.nim`: checked-source facade and backend selection.
-- `src/nifty/codegen.nim`: the AST-to-C reference implementation.
+- `src/nifty/checker.nim`: type, range, borrow, effect, lock, and termination
+  checks, plus generic instantiation and validated argument conversions.
+- `src/nifty/semantics.nim`: shared binding identities, parameter modes,
+  ownership inventory, and ordered cleanup on each scope and control edge.
+- `src/nifty/codegen.nim`: C emission from the checked AST and semantic plan.
 - `src/nifty/lowering.nim`: source evaluation order, explicit branches,
-  optional values, numeric conversions, borrowed arguments, scoped cleanup,
-  layouts, and arena planning.
+  optional values, numeric conversions, and emission of planned borrows and
+  cleanup into native IR, with target storage and arena planning.
 - `src/nifty/backend/`: IR validation, register allocation, frame layout,
   instruction encoding, and executable memory. Adapted from Nimkey with
   attribution in `src/nifty/backend/PROVENANCE.md`.
@@ -66,6 +70,12 @@ interpret the source or compile it to C at startup.
   thread startup, synchronization, and external symbol binding.
 - `src/nifty/nativefiles.nim` and `nativebundles.nim`: image validation,
   serialization, and standalone packaging.
+
+`check(module)` publishes the semantic plan only after all source checks
+succeed. Generators and source reports require that plan; they do not run
+their own type or borrow checking. Reports read ownership and lock proofs
+from the same checked module. Backend IR, ABI, and image validation remain
+separate checks on generated code and artifacts.
 
 The native path retains Nifty's checker and diagnostics. It uses Nifty's own
 fixed-capacity and growable layouts. Every routine
@@ -99,9 +109,11 @@ in their static storage figures and report heap payload separately. Allocation,
 traversal, copying, and cleanup can make abstract work runtime-dependent.
 Allocator overhead and temporary growth peaks are excluded from static totals.
 
-Borrowed parameters keep ownership with the caller. Native lowering emits
-cleanup at scope exits, early returns, and breaks; shared global owners are
-released after all threads finish. The same checker rejects escaping owners,
+Borrowed parameters keep ownership with the caller. The common semantic pass
+plans cleanup at scope exits, early returns, and breaks. Both C and native
+generation emit those ordered drops, evaluating return values first; shared
+global owners are released after all threads finish. The checker rejects
+escaping owners,
 overlapping mutable borrows, and mutation of container metadata for every
 backend. Allocation failure is a checked boolean result.
 
@@ -127,6 +139,7 @@ POSIX threads.
 
 ```sh
 nim r tests/tests.nim
+nim r tests/test_semantics.nim
 nim r tests/test_backend_engine.nim
 nim r tests/test_nativecontainers.nim
 nim r tests/test_nativeruntime.nim

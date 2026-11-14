@@ -3,7 +3,7 @@
 ## Dynamic work is propagated through calls instead of given a false bound.
 
 import std/[strutils, tables, sets]
-import types, checker
+import types, semantics
 
 const frameOverhead = 16'i64 # return address + saved frame pointer
 
@@ -175,27 +175,31 @@ proc runtimeBody(body: seq[Stmt], costs: Table[string, bool],
     if runtimeStmt(s, costs, lengths):
       return true
 
-proc collectOwners(body: seq[Stmt], routine: string,
-    owners: var seq[string]) =
-  ## List owner declarations without counting borrowed parameters.
-  for s in body:
-    if s.kind in {VarStmt, LetStmt} and s.typ.hasOwned:
-      owners.add "  local " & routine & "." & s.name & ": " &
-        $s.typ & " (declaration scope)"
-    collectOwners(s.body, routine, owners)
-    collectOwners(s.elseBody, routine, owners)
-    for br in s.elifs:
-      collectOwners(br.body, routine, owners)
+proc ownerLines*(m: Module): seq[string] =
+  ## Describes owners from the checked plan without bounding heap payloads.
+  if m.isNil:
+    return
+  requireChecked(m)
+  for binding in m.semantics.bindings:
+    if binding.mode != OwnerMode:
+      continue
+    if binding.kind == GlobalSym:
+      result.add "  global " & binding.name & ": " & $binding.typ &
+        " (program lifetime; freed after threads finish)"
+    else:
+      result.add "  local " & binding.routine & "." & binding.name & ": " &
+        $binding.typ & " (declaration scope)"
 
 ## Worst-Case Stack
 
-proc paramBytes(p: Param): int64 =
-  if p.isVar or p.typ.kind == ArrayType or p.typ.hasOwned:
+proc paramBytes(m: Module, p: Param): int64 =
+  ## Counts the C ABI storage for a checked parameter mode.
+  if m.mode(p.binding).isBorrow:
     8 # passed as a pointer
   else:
     typeSize(p.typ)
 
-proc localBytes(body: seq[Stmt]): int64 =
+proc localBytes(m: Module, body: seq[Stmt]): int64 =
   ## C-stack bytes only: big locals live on the thread arena and cost a
   ## pointer here.
   for s in body:
@@ -205,12 +209,13 @@ proc localBytes(body: seq[Stmt]): int64 =
     if s.kind == ForStmt:
       result = sadd(result, 8)
     if s.kind == ForEachStmt:
-      let size = if s.typ.hasOwned: 8'i64 else: typeSize(s.typ)
+      let size =
+        if m.mode(s.binding).isBorrow: 8'i64 else: typeSize(s.typ)
       result = sadd(result, sadd(size, 16)) # Element borrow/value + iterator.
-    result = sadd(result, localBytes(s.body))
+    result = sadd(result, localBytes(m, s.body))
     for br in s.elifs:
-      result = sadd(result, localBytes(br.body))
-    result = sadd(result, localBytes(s.elseBody))
+      result = sadd(result, localBytes(m, br.body))
+    result = sadd(result, localBytes(m, s.elseBody))
 
 proc arenaWalk(body: seq[Stmt], off: var int64, hi: var int64) =
   ## Mirrors codegen's collectBig: sequential 8-aligned allocation,
@@ -273,6 +278,8 @@ proc threadLabel(r: Routine): string =
   if r.instances > 1: r.name & " x" & $r.instances else: r.name
 
 proc buildReport*(m: Module, src: string): string =
+  ## Reports storage and work using a successfully checked source module.
+  requireChecked(m)
   var globals: Table[string, Typ]
   for gd in m.globals:
     globals[gd.name] = gd.typ
@@ -298,13 +305,7 @@ proc buildReport*(m: Module, src: string): string =
       " (platform-sized)"
   lines.add totalLine
 
-  var owners: seq[string]
-  for gd in m.globals:
-    if gd.typ.hasOwned:
-      owners.add "  global " & gd.name & ": " & $gd.typ &
-        " (program lifetime; freed after threads finish)"
-  for r in m.routines:
-    collectOwners(r.body, r.name, owners)
+  let owners = ownerLines(m)
   if owners.len > 0:
     lines.add ""
     lines.add "heap (runtime-sized; separate from static storage):"
@@ -319,10 +320,10 @@ proc buildReport*(m: Module, src: string): string =
 
   # Locks: what each one actually protects (from the checker's
   # ownership analysis - a lock that protected nothing did not compile).
-  if lockReport.len > 0:
+  if m.semantics.locks.len > 0:
     lines.add ""
     lines.add "locks (acquired in declaration order - deadlock-free):"
-    for lk in lockReport:
+    for lk in m.semantics.locks:
       var what =
         if lk.guards.len > 0: "protects " & lk.guards.join(", ")
         else: "serializes output"
@@ -350,10 +351,10 @@ proc buildReport*(m: Module, src: string): string =
         if p.typ.hasOwned:
           runtimeCosts[r.name] = true
     frames[r.name] = sadd(frameOverhead,
-      sadd(localBytes(r.body), block:
+      sadd(localBytes(m, r.body), block:
         var pb = 0'i64
         for p in r.params:
-          pb = sadd(pb, paramBytes(p))
+          pb = sadd(pb, paramBytes(m, p))
         pb))
     var calls: HashSet[string]
     collectCalls(r.body, globals, calls)

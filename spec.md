@@ -899,6 +899,12 @@ reused.
 The C backend compiles one module to one portable C file (C99 + pthreads).
 Native backends lower the same checked module into typed IR and machine code,
 with the same ownership, borrowing, and allocation-failure rules.
+Checking produces a backend-independent semantic plan with binding identities,
+value and borrow modes, lock proofs, and ordered destruction lists for normal
+scope exit, return, break, and program exit. Return expressions are evaluated
+before their destruction list runs. Generators consume this plan; type,
+borrow, range, and other source-language checks finish before backend entry.
+Backend validation checks generated IR, target layouts, and serialized images.
 The C mapping is:
 
 | nifty                  | C                                          |

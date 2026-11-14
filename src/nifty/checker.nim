@@ -12,7 +12,7 @@
 ## parameters require an exclusive borrow before facts can attach.
 
 import std/[algorithm, strutils, tables, sets]
-import common, lexer, types, parser
+import common, lexer, types, parser, semantics
 
 type
   Fact = object
@@ -235,9 +235,6 @@ proc coerceFloatLit(e: Expr, want: Typ): bool =
     e.typ = want
     return true
   false
-
-var lockReport*: seq[tuple[name: string, guards: seq[string],
-  users: seq[string]]] ## for `nifty report`: what each lock protects
 
 proc expectVal(c: var Ctx, e: Expr): Typ =
   result = c.checkExpr(e)
@@ -1128,6 +1125,7 @@ proc checkDynamicMethod(c: var Ctx, e: Expr, bt: Typ): Typ =
           source.elem.width != bt.elem.width or
           not typeRangeFits(source.elem, bt.elem):
         err(e.line, "copyFrom needs a sequence with compatible elements")
+      e.kids[1].borrowedView = not source.dynamic
     result = Typ(kind: BoolType)
   of "add", "push":
     arity(1)
@@ -2062,14 +2060,13 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           at = pt.typ
         elif coerceFloatLit(arg, pt.typ):
           at = pt.typ
-        elif coerceFloatLit(arg, pt.typ):
-          at = pt.typ
       let borrowedView = not pt.isVar and pt.typ.dynamic and
         not at.dynamic and at.kind == pt.typ.kind and
         (pt.typ.kind == StringType or (pt.typ.kind == SeqType and
           typeEq(at.elem, pt.typ.elem) and
           at.elem.width == pt.typ.elem.width and
           typeRangeFits(at.elem, pt.typ.elem)))
+      arg.borrowedView = borrowedView
       if not typeEq(at, pt.typ) and not borrowedView:
         err(arg.line, "argument " & $(i + 1) & " of '" & name & "': expected " &
           $pt.typ & ", got " & $at)
@@ -3304,8 +3301,9 @@ proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string =
   mangled
 
 proc check*(m: Module) =
-  ## Check the whole module; raises NiftyError on the first violation.
-  lockReport = @[]
+  ## Check the module and publish its shared semantic plan on success.
+  m.semantics = nil
+  var lockReport: seq[LockProof]
   var c = Ctx()
   var used: HashSet[string]
   for td in m.types:
@@ -3702,4 +3700,6 @@ proc check*(m: Module) =
       for u in users:
         us.add u
       us.sort()
-      lockReport.add (name: gd.name, guards: guards, users: us)
+      lockReport.add LockProof(name: gd.name, guards: guards, users: us)
+  prepareSemantics(m)
+  m.semantics.locks = lockReport
