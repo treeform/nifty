@@ -116,3 +116,14 @@ numeric, evaluation-order, and arena cases through C, ARM64, and AMD64.
 It verifies native executable architecture and builds and runs native programs
 with compiler tools removed from `PATH`. C remains a useful independent
 reference alongside the expected results.
+
+## Benchmarks
+
+The first benchmark is a float64 port of Nimkey's raytracer, using a bounded
+reflection stack in place of recursion. Run `python3 benchmarks/run.py --check`
+to compare C, ARM64, and AMD64 where available. Rendering is timed inside the
+program; compilation, startup, and pixel formatting are measured separately
+or excluded. Every sample is checked against its pixels, and checked-in
+Nimkey interpreter images provide independent references at 4, 16, and 64
+pixels square. See [benchmarks/README.md](benchmarks/README.md) for settings,
+artifacts, and timing details.

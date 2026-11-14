@@ -1,0 +1,36 @@
+{
+  "format": "row-major RGB8, no header",
+  "precision": "float64",
+  "max_depth": 5,
+  "oracle": "Nimkey interpreter (nimkey run), 32-pixel tiles",
+  "upstream": "https://github.com/treeform/nimkey",
+  "upstream_revision": "adcacefce18748630dccde5943bd3314dfcb422b",
+  "upstream_path": "tests/benchmarks/raytracer.nimkey",
+  "source_sha256": "c3a5e850fed88201d038bc0b5cddedbda9f920de7b31d19848f48c90fa2b3de8",
+  "images": {
+    "4": {
+      "file": "4.rgb",
+      "width": 4,
+      "height": 4,
+      "bytes": 48,
+      "checksum": 1864,
+      "sha256": "c3eb740c1611974dd843ef60d822e9bad4bc576c6278552f5b4f60273e24de6c"
+    },
+    "16": {
+      "file": "16.rgb",
+      "width": 16,
+      "height": 16,
+      "bytes": 768,
+      "checksum": 36400,
+      "sha256": "e549bed5b7b652a9f09819bcf857941fdbb29f11b5ff7fcddf066bec1de1afba"
+    },
+    "64": {
+      "file": "64.rgb",
+      "width": 64,
+      "height": 64,
+      "bytes": 12288,
+      "checksum": 544407,
+      "sha256": "59ec3da30b3909f86cb60e472f6de5929921b8bb13913566f9d453c4a8457818"
+    }
+  }
+}
