@@ -73,6 +73,11 @@ proc layout(g: var Lower, t: Typ): int =
         l.bytes += fl.bytes
         l.align = max(l.align, fl.align)
       l.bytes = int64(aligned(int(l.bytes), int(l.align)))
+    of CStringType:
+      l.kind = StringType # Runtime owner descriptor; nominality is checked in the frontend.
+      l.dynamic = true
+      l.dataOffset = 16
+      l.bytes = 24
     of StringType, StringLitType:
       if t.dynamic:
         l.dataOffset = 16
@@ -488,9 +493,9 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
       var v: ValueId
       if g.addressParam(p):
         v = g.load(g.offset(args, offsets[i]), AddressType)
-        if p.typ.kind == StringType:
+        if p.typ.kind in {StringType, CStringType}:
           v = g.data(v, p.typ)
-      elif p.typ.kind == StringType:
+      elif p.typ.kind in {StringType, CStringType}:
         v = g.data(g.offset(args, offsets[i]), p.typ)
       elif aggregate(p.typ):
         v = g.offset(args, offsets[i])
@@ -610,12 +615,13 @@ proc expression(g: var Lower, e: Expr): ValueId =
   of BoolExpr:
     result = g.constant(int64(e.bval), irs.BoolType)
   of StrExpr:
+    let terminated = e.typ.kind == CStringType
     let fixed = e.typ.kind == StringLitType or e.typ.dynamic
     let t = if fixed:
-        Typ(kind: StringType, len: int64(e.sval.len)) else: e.typ
+        Typ(kind: StringType, len: int64(e.sval.len + ord(terminated))) else: e.typ
     let storage = g.allocType(t)
     g.clear(storage, g.size(t))
-    g.store(storage, g.constant(int64(e.sval.len)))
+    g.store(storage, g.constant(int64(e.sval.len + ord(terminated))))
     for i, c in e.sval:
       g.store(g.offset(storage, 8 + i),
         g.constant(int64(ord(c)), UInt8Type))
@@ -693,7 +699,7 @@ proc expression(g: var Lower, e: Expr): ValueId =
       result = g.compare(EqualComparison, g.expression(e.kids[0]), g.constant(0))
     elif bt.kind == FloatType:
       result = g.floatInt(g.expression(e.kids[0]))
-    elif e.sval == "toInt" and bt.kind == StringType:
+    elif e.sval in ["toInt", "toCString"] and bt.kind == StringType:
       result = g.methodCall(e)
     elif e.sval == "cap" and bt.dynamic:
       result = g.load(g.offset(g.path(e.kids[0]), 8))

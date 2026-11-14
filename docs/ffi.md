@@ -63,7 +63,7 @@ extern "libc":
   proc tmpfile(): CFile
   proc fclose(file: CFile): int32
 
-func openTemporary(): CFile? =
+proc openTemporary(): CFile? =
   let file = tmpfile()
   if file.isNull:
     return none
@@ -86,3 +86,14 @@ close or free a foreign resource.
 A Nifty wrapper can return `CFile?`, using the ordinary payload and presence
 flag representation. Optional values cannot cross the foreign ABI directly;
 foreign routines return a plain handle, then wrappers test `.isNull`.
+NUL-terminated inputs use the distinct `cstring` type. NUL-free string
+literals pass directly without allocation. For a Nifty string, initialize a
+scoped local with `let input = source.toCString()` and check `input.ok`
+before passing it to a `cstring` parameter. Conversion returns `none` on an
+embedded zero, allocation failure, or size overflow. Its allocation owns a
+copy and is released automatically when the local leaves scope.
+
+The ABI receives only the bytes pointer. The foreign function must not
+modify the bytes or retain that address after returning. C-string returns
+are rejected until a foreign ownership and lifetime contract is available.
+See the [C-string rules](../spec.md#nul-terminated-input-cstring).

@@ -10,7 +10,8 @@ type
     ChannelType, # channel[N, T]: a blocking bounded queue (the semaphore system)
     TypeVarType, # a generic $T waiting to be bound at instantiation
     FloatType, # IEEE float32/float64: data values, outside the proof engine
-    OpaqueType # nominal foreign pointer; only null testing and equality
+    OpaqueType, # nominal foreign pointer; only null testing and equality
+    CStringType # Immutable owned NUL-terminated bytes; borrowed pointer at FFI.
   Field* = object
     name*: string
     typ*: Typ
@@ -167,7 +168,7 @@ const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
 # uniform call syntax - builtins keep their meaning on every type.
 const builtinMethods* = @mutMethods & @["or", "get", "contains",
   "startsWith", "endsWith", "find", "findByte", "toInt",
-  "len", "ok", "lo", "hi", "isNull"]
+  "len", "ok", "lo", "hi", "isNull", "toCString"]
 
 proc instances*(r: Routine): int =
   ## How many OS threads a thread declaration starts (thread 4 w()).
@@ -279,6 +280,7 @@ proc typeSize*(t: Typ, line = 0): int64 =
     if t.dynamic: 24
     else: sizeAlign(sizeAdd(8,
       sizeMul(t.len, typeSize(t.elem, line), line), line), 8, line)
+  of CStringType: 24
   of StringType:
     if t.dynamic: 24
     else: sizeAlign(sizeAdd(8, t.len, line), 8, line)
@@ -368,6 +370,7 @@ proc `$`*(t: Typ): string =
   of FloatType: t.dname
   of BoolType: "bool"
   of StringLitType: "string"
+  of CStringType: "cstring"
   of LockType: "Lock"
   of ArrayType: "array[" & t.sizeStr & ", " & $t.elem & "]"
   of SeqType:

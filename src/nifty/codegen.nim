@@ -59,6 +59,7 @@ proc mangle(t: Typ): string =
   of ArrayType: "a" & $t.len & "_" & mangle(t.elem)
   of SeqType:
     (if t.dynamic: "dq" else: "q" & $t.len) & "_" & mangle(t.elem)
+  of CStringType: "cs"
   of StringType: (if t.dynamic: "ds" else: "s" & $t.len)
   of SetType: "t" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi)
   of QueueType: "u" & $t.len & "_" & mangle(t.elem)
@@ -81,7 +82,7 @@ proc cBase(t: Typ): string =
     if t.width == 0 or (t.width == 8 and t.rlo < 0): "int64_t"
     else: (if t.rlo >= 0: "uint" else: "int") & $(t.width * 8) & "_t"
   of ObjectType: "S_" & t.name
-  of SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType,
+  of SeqType, StringType, CStringType, SetType, QueueType, DenseMapType, SparseMapType,
       ChannelType: "NS_" & mangle(t)
   else: "int64_t"
 
@@ -148,7 +149,11 @@ proc genExpr(g: var Gen, e: Expr): string =
   of BoolExpr:
     if e.bval: "true" else: "false"
   of StrExpr:
-    if e.typ != nil and e.typ.kind == StringType:
+    if e.typ != nil and e.typ.kind == CStringType:
+      "(" & cBase(e.typ) & "){ .m_len = " & $(e.sval.len + 1) &
+        "LL, .m_cap = " & $(e.sval.len + 1) &
+        "LL, .m_data = (uint8_t *)" & cQuote(e.sval) & " }"
+    elif e.typ != nil and e.typ.kind == StringType:
       if e.typ.dynamic:
         "(" & cBase(e.typ) & "){ .m_len = " & $e.sval.len &
           "LL, .m_cap = " & $e.sval.len &
@@ -213,7 +218,7 @@ proc genExpr(g: var Gen, e: Expr): string =
     let r = g.routines[e.sval]
     var parts: seq[string]
     for i, a in e.kids:
-      if r.externLib != "" and r.params[i].typ.kind == StringType:
+      if r.externLib != "" and r.params[i].typ.kind in {StringType, CStringType}:
         parts.add g.genExpr(a) & ".m_data"
       elif g.source.mode(r.params[i].binding).isBorrow and
           r.params[i].typ.passByPtr:
@@ -231,6 +236,10 @@ proc genExpr(g: var Gen, e: Expr): string =
       "(" & g.genExpr(e.kids[0]) & " == NULL)"
     elif e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
       "ni_ftoi(" & g.genExpr(e.kids[0]) & ")"
+    elif e.sval == "toCString" and e.kids[0].typ != nil and
+        e.kids[0].typ.kind == StringType:
+      let base = g.genExpr(e.kids[0])
+      "ni_make_cstring(" & base & ".m_data, " & base & ".m_len)"
     elif e.sval == "toInt" and e.kids[0].typ != nil and
         e.kids[0].typ.kind == StringType:
       cBase(e.kids[0].typ) & "_toInt(&" & g.genExpr(e.kids[0]) & ")"
@@ -303,6 +312,9 @@ proc genStrMethod(g: var Gen, e: Expr, ordered: bool): string =
     let lo = if ordered: g.genOrdered(e.kids[2]) else: g.genExpr(e.kids[2])
     let hi = if ordered: g.genOrdered(e.kids[3]) else: g.genExpr(e.kids[3])
     n & "_copyRange(" & basePtr & ", " & src & ", " & lo & ", " & hi & ")"
+  of "toCString":
+    let base = if ordered: g.genPathOrdered(e.kids[0]) else: g.genExpr(e.kids[0])
+    "ni_make_cstring(" & base & ".m_data, " & base & ".m_len)"
   of "toInt", "clear":
     n & "_" & e.sval & "(" & basePtr & ")"
   else:
@@ -346,7 +358,7 @@ proc tempFor(g: var Gen, e: Expr, val: string): string =
     elif e.typ.opt: cBase(e.typ)
     elif e.typ.kind in {FloatType, OpaqueType}: cBase(e.typ)
     elif e.typ.kind == BoolType: "bool"
-    elif e.typ.kind in {ObjectType, SeqType, StringType, SetType, QueueType,
+    elif e.typ.kind in {ObjectType, SeqType, StringType, CStringType, SetType, QueueType,
       DenseMapType, SparseMapType}: cBase(e.typ)
     else: "int64_t"
   g.put ctype & " " & t & " = " & val & ";"
@@ -382,6 +394,10 @@ proc genOrdered(g: var Gen, e: Expr): string =
       g.tempFor(e, "(" & g.genOrdered(e.kids[0]) & " == NULL)")
     elif e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
       g.tempFor(e, "ni_ftoi(" & g.genOrdered(e.kids[0]) & ")")
+    elif e.sval == "toCString" and e.kids[0].typ != nil and
+        e.kids[0].typ.kind == StringType:
+      let base = g.genPathOrdered(e.kids[0])
+      g.tempFor(e, "ni_make_cstring(" & base & ".m_data, " & base & ".m_len)")
     elif e.sval == "toInt" and e.kids[0].typ != nil and
         e.kids[0].typ.kind == StringType:
       let base = g.tempFor(e.kids[0], g.genOrdered(e.kids[0]))
@@ -440,7 +456,7 @@ proc genOrdered(g: var Gen, e: Expr): string =
     let r = g.routines[e.sval]
     var parts: seq[string]
     for i, a in e.kids:
-      if r.externLib != "" and r.params[i].typ.kind == StringType:
+      if r.externLib != "" and r.params[i].typ.kind in {StringType, CStringType}:
         parts.add g.genPathOrdered(a) & ".m_data"
       elif g.source.mode(r.params[i].binding).isBorrow and
           r.params[i].typ.passByPtr:
@@ -1149,6 +1165,32 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     g.put "} " & n & ";"
     g.put "static " & b & " " & n & "_or(" & n & " r, " & b &
       " fb) { return r.m_ok ? r.m_val : fb; }"
+    if base.kind == CStringType:
+      g.put "static NS_pcs ni_make_cstring(const uint8_t *p, int64_t n) {"
+      g.put "  NS_pcs out = {0};"
+      g.put "  if (n < 0 || n == INT64_MAX || (uint64_t)n >= SIZE_MAX) return out;"
+      g.put "  if (n && memchr(p, 0, (size_t)n)) return out;"
+      g.put "  uint8_t *data = ni_realloc(NULL, (size_t)n + 1);"
+      g.put "  if (!data) return out;"
+      g.put "  if (n) memcpy(data, p, (size_t)n);"
+      g.put "  data[n] = 0; out.m_val.m_data = data;"
+      g.put "  out.m_val.m_len = out.m_val.m_cap = n + 1; out.m_ok = true; return out;"
+      g.put "}"
+    return
+  if t.kind == CStringType:
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    g.put "typedef struct { int64_t m_len, m_cap; uint8_t *m_data; } NS_cs;"
+    g.put "static void ni_drop_cs(NS_cs *s) { ni_free(s->m_data); memset(s, 0, sizeof(*s)); }"
+    g.put "static bool ni_copy_cs(NS_cs *s, const NS_cs *d) {"
+    g.put "  if (s == d) return true;"
+    g.put "  uint8_t *p = ni_realloc(NULL, (size_t)d->m_len);"
+    g.put "  if (!p) return false;"
+    g.put "  memcpy(p, d->m_data, (size_t)d->m_len);"
+    g.put "  ni_drop_cs(s); s->m_data = p; s->m_len = s->m_cap = d->m_len; return true;"
+    g.put "}"
     return
   if t.dynamic:
     if t.kind == SeqType:
@@ -1596,7 +1638,7 @@ proc generate*(m: Module, src: string): string =
       for pm in r.params:
         let mutable = m.mode(pm.binding) == MutBorrowMode
         let qualifier = if mutable: "" else: "const "
-        if pm.typ.kind == StringType:
+        if pm.typ.kind in {StringType, CStringType}:
           ps.add qualifier & "uint8_t *"
         elif pm.typ.kind == ArrayType:
           ps.add qualifier & cBase(pm.typ.elem) & " *"

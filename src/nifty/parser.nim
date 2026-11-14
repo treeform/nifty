@@ -96,7 +96,7 @@ proc parseTypeCore(p: var Parser): Typ =
     return Typ(kind: TypeVarType, gname: p.expectIdent())
   let t = p.peek
   if t.kind == IdentToken and
-      (t.text in ["int", "bool", "Lock", "array", "seq", "string", "set",
+      (t.text in ["int", "bool", "Lock", "array", "seq", "string", "cstring", "set",
         "queue", "channel", "map", "int8", "uint8", "char", "int16", "uint16",
         "int32", "uint32", "int64", "uint64", "float32", "float64"] or
        t.text in p.types):
@@ -223,6 +223,8 @@ proc parseTypeCore(p: var Parser): Typ =
         err(t.line, "set range is too large (max 16777216 values)")
       p.expectOp("]")
       Typ(kind: SetType, elem: e)
+    of "cstring":
+      Typ(kind: CStringType, dynamic: true)
     of "string":
       if not p.atOp("["):
         return Typ(kind: StringType, dynamic: true)

@@ -1,5 +1,6 @@
 ## Checks native growable storage, allocation failure, and scoped release.
 import std/[os, strutils]
+import cstring_sources
 when defined(windows):
   proc dup(descriptor: cint): cint {.importc: "_dup", header: "<io.h>".}
   proc dup2(source, destination: cint): cint
@@ -293,6 +294,14 @@ for optimization in NativeOptimization:
     doAssert runSource(readFile(scripts / name & ".nifty"), name,
       optimization) == expected, name
     doAssert allocationAttempts > 0, name
+
+  doAssert runSource(CStringSource, "cstring", optimization) == CStringExpected
+  doAssert runSource(CStringLiteralSource, "cstring_literal", optimization) == "7\n0"
+  doAssert allocationAttempts == 0, "cstring literals allocated owned storage"
+  doAssert runSource(CStringFailureSource, "cstring_failure", optimization, 0) == "false\ntrue\n5"
+  doAssert failedAllocations == 1
+  doAssert runSource(CStringScopesSource, "cstring_scopes", optimization) == "5\n4\n4\n4\n5"
+  doAssert peakAllocations == 1, "cstring owners survived return, loop or break"
 
   doAssert runSource(FailedGrowth, "failed_growth", optimization, 0) ==
     "false\n0\ntrue\nnext"

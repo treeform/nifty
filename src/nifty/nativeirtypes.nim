@@ -161,6 +161,8 @@ proc layoutStorage*(plan: var NativePlan, mapping: var seq[int32],
           offset: int32(data.valOffset)))
       else:
         discard
+    of CStringType:
+      doAssert false, "CString layouts use the dynamic byte descriptor"
     of TypeVarType:
       doAssert false, "Native storage requires instantiated types"
   if result == 0:

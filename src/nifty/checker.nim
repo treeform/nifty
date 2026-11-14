@@ -37,6 +37,7 @@ type
     facts: Table[string, Fact] # names with refined ranges at this point
     mutBan: int                # >0 where mutating methods may not appear
     routineAccess: Table[string, HashSet[string]] # routine -> globals it touches
+    cstringInitializer: Expr # Only a direct local initializer may allocate a cstring.
     allowBigRet: bool        # true only for a call that IS a store target
     heldLocks: seq[string]     # Lock names currently held (lexical with-stack)
     varDecls: Table[string, int]   # var locals/params -> declaration line
@@ -334,12 +335,18 @@ proc validateOwnedType(t: Typ, line: int) =
   ## Reject layouts whose existing operations cannot preserve ownership.
   if t == nil:
     return
-  if t.opt and hasOwned(t):
+  if t.opt and hasOwned(t) and t.kind != CStringType:
     err(line, "an owning string or seq cannot be optional; use an empty owner")
   if t.kind in {QueueType, ChannelType, DenseMapType, SparseMapType} and
       hasOwned(t):
     err(line, "owning strings and seqs cannot be stored in queues, channels, " &
       "or maps; pass caller-owned storage instead")
+  if (t.elem != nil and t.elem.kind == CStringType) or
+      (t.val != nil and t.val.kind == CStringType):
+    err(line, "cstring cannot be stored inside a container; keep a scoped local")
+  for field in t.fields:
+    if field.typ.kind == CStringType:
+      err(line, "cstring cannot be stored inside an object; keep a scoped local")
   validateOwnedType(t.elem, line)
   validateOwnedType(t.val, line)
   for field in t.fields:
@@ -861,6 +868,7 @@ proc dispatchKey(t: Typ): string =
   of FloatType: "a float"
   of BoolType: "a bool"
   of StringType, StringLitType: "a string"
+  of CStringType: "a cstring"
   of ArrayType: "an array"
   of SeqType: "a seq"
   of QueueType: "a queue"
@@ -1197,6 +1205,7 @@ proc zeroOk(t: Typ): bool =
   if t.opt:
     return true # zero-init means none
   case t.kind
+  of CStringType: false
   of IntType: t.rlo <= 0 and t.rhi >= 0
   of ArrayType: zeroOk(t.elem)
   of ObjectType:
@@ -1594,6 +1603,13 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
     if base.kind == OpaqueType and e.sval == "isNull":
       e.typ = Typ(kind: BoolType)
       return e.typ
+    if base.kind == StringType and e.sval == "toCString":
+      if c.cstringInitializer != e:
+        err(e.line, "toCString() must initialize a scoped local directly")
+      if c.cur.kind == FuncRoutine:
+        err(e.line, "toCString() allocates storage; use a proc or thread")
+      e.typ = optOf(Typ(kind: CStringType, dynamic: true))
+      return e.typ
     if base.kind == StringType and e.sval == "toInt":
       # Parse a decimal number, or none: absence is a value to consult.
       e.typ = optOf(intType())
@@ -1683,6 +1699,17 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       e.setFact typeFact(e.typ)
       return e.typ
     rejectOpt(bt, e.kids[0])
+    if bt != nil and bt.kind == CStringType:
+      err(e.line, "cstring is immutable and exposes no methods")
+    if bt != nil and bt.kind == StringType and e.sval == "toCString":
+      if nArgs != 0:
+        err(e.line, "toCString takes no arguments")
+      if c.cstringInitializer != e:
+        err(e.line, "toCString() must initialize a scoped local directly")
+      if c.cur.kind == FuncRoutine:
+        err(e.line, "toCString() allocates storage; use a proc or thread")
+      e.typ = optOf(Typ(kind: CStringType, dynamic: true))
+      return e.typ
     if bt != nil and bt.kind == FloatType:
       if e.sval != "toInt":
         err(e.line, $bt & " has no method '" & e.sval & "'")
@@ -2258,6 +2285,11 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           err(arg.line, "none needs an optional parameter")
         arg.typ = pt.typ
         at = pt.typ
+      elif pt.typ.kind == CStringType and not pt.typ.opt and arg.kind == StrExpr:
+        if '\0' in arg.sval:
+          err(arg.line, "cstring literal cannot contain an embedded NUL byte")
+        arg.typ = pt.typ
+        at = pt.typ
       else:
         if c.coerceOpt(arg, pt.typ):
           at = pt.typ
@@ -2417,7 +2449,9 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     elif s.init != nil:
       if s.init.kind in {CallExpr, MethodExpr}:
         c.allowBigRet = true # MethodExpr: may become a call via uniform syntax
+      c.cstringInitializer = s.init
       var it = c.expectVal(s.init)
+      c.cstringInitializer = nil
       if c.coerceOpt(s.init, t):
         it = t
       elif c.coerceStrLit(s.init, t):
@@ -2451,7 +2485,10 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         err(s.line, "'" & s.name & "' is zero-initialized, but 0 is not in " &
           $t & "; add an initializer")
     validateOwnedType(t, s.line)
-    if hasOwned(t) and s.init != nil:
+    let freshCString = t.kind == CStringType and t.opt and s.init != nil and
+      s.init.kind in {MethodExpr, FieldExpr} and s.init.sval == "toCString"
+    if hasOwned(t) and s.init != nil and not freshCString and
+        not (t.kind == CStringType and s.init.kind == NoneExpr):
       err(s.line, "owning strings and seqs cannot be copied or initialized " &
         "from a value; declare empty storage and use copyFrom")
     if c.isDeclared(s.name):
@@ -3272,6 +3309,7 @@ proc mangleTyp(t: Typ): string =
       else: mangleVal(t.rlo) & "_" & mangleVal(t.rhi)
     of FloatType: t.dname
     of BoolType: "bool"
+    of CStringType: "cstring"
     of StringType: (if t.dynamic: "strdyn" else: "str" & $t.len)
     of SeqType:
       (if t.dynamic: "seqdyn_" else: "seq" & $t.len & "_") &
@@ -3331,6 +3369,8 @@ proc typToToks(t: Typ, line: int, gname: string): seq[Token] =
     result = @[idt(t.dname)]
   of BoolType:
     result = @[idt("bool")]
+  of CStringType:
+    result = @[idt("cstring")]
   of StringType:
     result = @[idt("string")]
     if not t.dynamic:
@@ -3913,13 +3953,13 @@ proc check*(m: Module) =
       # Binary FFI: we declared the shape; validate it is expressible.
       for pm in r.params:
         validateOwnedType(pm.typ, r.line)
-        if hasOwned(pm.typ) and pm.typ.kind != StringType:
+        if hasOwned(pm.typ) and pm.typ.kind notin {StringType, CStringType}:
           err(r.line, "extern '" & r.name &
             "' cannot access owning descriptors; pass string bytes instead")
         case pm.typ.kind
         of IntType, FloatType, OpaqueType:
           discard # by value (or by pointer when var)
-        of StringType, ArrayType:
+        of StringType, CStringType, ArrayType:
           discard # a data pointer; var makes it writable
         of ObjectType:
           if not pm.isVar:
@@ -3929,6 +3969,8 @@ proc check*(m: Module) =
           err(r.line, "extern '" & r.name & "': " & $pm.typ &
             " cannot cross the C boundary; use sized ints, floats, " &
             "string[N] buffers, arrays, or var objects")
+        if pm.typ.kind == CStringType and pm.isVar:
+          err(r.line, "extern cstring parameters are immutable borrowed inputs")
         if pm.typ.opt:
           err(r.line, "extern '" & r.name & "': optionals cannot cross " &
             "the C boundary")
