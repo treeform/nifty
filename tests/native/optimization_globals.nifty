@@ -1,0 +1,38 @@
+extern "libc":
+  proc clear "memset" (value: var int64, byte: int32, size: int64): int64
+
+var first: int64
+var second: int64
+
+proc change(value: 0 .. 99): int64 =
+  # Updates must become visible to subsequent global reads.
+  first = value
+  second = value + 1
+  return second
+
+proc read(): int64 =
+  # Reads must observe native calls and external writes.
+  let a = first
+  let b = second
+  if a >= 0 and a <= 99 and b >= 0 and b <= 99:
+    return a * 10 + b
+  return -1
+
+proc write(value: var int64) =
+  # A var argument can name a promoted global.
+  value = 4
+
+thread main() =
+  first = 2
+  second = 3
+  echo read()
+  echo first, " ", change(7), " ", read()
+  write(first)
+  echo read()
+  first = 99
+  discard clear(first, 0, 8)
+  echo first, " ", read()
+  second = 77
+  discard clear(second, 0, 8)
+  echo second, " ", read()
+  echo change(3), " ", read()

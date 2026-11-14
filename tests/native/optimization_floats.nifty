@@ -1,0 +1,27 @@
+func product(a: float64, b: float64, c: float64): float64 =
+  # Multiplication and addition retain separate rounding.
+  return a * b + c
+
+func negative(value: float64): float64 =
+  # A negative operand produces IEEE negative zero.
+  return value * 0.0
+
+func rounded(value: float32): float32 =
+  # Storing a float32 value rounds before its next use.
+  let saved: float32 = value + 1.0
+  return saved - value
+
+func ordered(value: float64): bool =
+  # A self-comparison remains unordered for NaN.
+  return value >= value
+
+thread main() =
+  let zero = negative(-1.0)
+  echo 1.0 / zero < 0.0
+  echo 1.0 / (zero + 0.0) > 0.0
+  echo product(1.000000007450580596923828125, 0.999999992549419403076171875, -1.0) == 0.0
+  echo rounded(16777216.0) == 0.0
+  let nan = 0.0 / 0.0
+  echo ordered(nan), " ", nan <= nan, " ", nan > nan
+  echo product(nan, 0.0, 1.0) != product(nan, 0.0, 1.0)
+  echo (negative(-1.0) / negative(-1.0)) != 0.0

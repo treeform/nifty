@@ -1,0 +1,41 @@
+var visits: 0 .. 1000
+
+proc choose(value: -10 .. 10): 0 .. 100 =
+  # Each early return still performs exactly one global write.
+  if visits < 1000:
+    visits = visits + 1
+  if value < 0:
+    return -value
+  if value == 0:
+    return 17
+  return value + 3
+
+func find(limit: 0 .. 8, wanted: int64): 0 .. 200 =
+  # An inlined loop exit returns from this function alone.
+  var total = 0
+  for i in 0 ..< limit:
+    if i == wanted:
+      return total
+    total = total + i
+  return total + 100
+
+func advance(value: 0 .. 10): int64 =
+  # Loop-carried values remain live across every iteration.
+  var result: int64 = value
+  var i: 0 .. 4 = 0
+  while i < 4:
+    if result >= 0 and result <= 1000:
+      result = result * 2 + i
+    i = i + 1
+  return result
+
+thread main() =
+  echo choose(-5), " ", choose(0), " ", choose(2)
+  echo visits
+  echo find(8, 4), " ", find(8, 0), " ", find(3, 7)
+  echo advance(1), " ", advance(2)
+  var total = 0
+  for i in 0 ..< 4:
+    if total >= 0 and total <= 1000:
+      total = total + choose(i) + find(3, i)
+  echo total, " ", visits

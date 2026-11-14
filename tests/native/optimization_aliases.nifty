@@ -1,0 +1,45 @@
+object Pair =
+  left: int64
+  right: int64
+
+object Rows =
+  values: array[3, Pair]
+
+proc alias(first: var int64, second: var int64): int64 =
+  # Both var arguments may name the same storage.
+  first = 11
+  let saved = second
+  if saved >= 0 and saved <= 100:
+    second = saved + 7
+  return first
+
+proc snapshot(value: int64, changed: var int64): int64 =
+  # The value argument is captured before mutation.
+  changed = 99
+  return value
+
+func reverse(value: Pair): Pair =
+  # A returned object may replace its source destination.
+  var result: Pair
+  result.left = value.right
+  result.right = value.left
+  return result
+
+thread main() =
+  var scalar: int64 = 3
+  echo alias(scalar, scalar), " ", scalar
+  echo snapshot(scalar, scalar), " ", scalar
+  var rows: Rows
+  rows.values[0].left = 2
+  rows.values[0].right = 9
+  rows.values[1] = rows.values[0]
+  rows.values[0].left = 4
+  rows.values[2] = rows.values[1]
+  rows.values[1] = rows.values[1]
+  rows.values[1] = reverse(rows.values[1])
+  let frozen = rows
+  rows.values[2].right = 8
+  echo rows.values[0].left, " ", rows.values[0].right
+  echo rows.values[1].left, " ", rows.values[1].right
+  echo frozen.values[2].left, " ", frozen.values[2].right
+  echo rows.values[2].left, " ", rows.values[2].right
