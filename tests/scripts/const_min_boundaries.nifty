@@ -1,0 +1,14 @@
+const Bottom = -9223372036854775807 - 1
+const First = Bottom * 1
+const Second = 1 * Bottom
+const Quotient = Bottom / 1
+const Remainder = Bottom % -1
+const Negative = -4611686018427387904 * 2
+const Positive = -3037000499 * -3037000499
+thread main() =
+  echo First
+  echo Second
+  echo Quotient
+  echo Remainder
+  echo Negative
+  echo Positive

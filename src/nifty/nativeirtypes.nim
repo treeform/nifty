@@ -1,5 +1,11 @@
 ## Describes Nifty value and owner representations in the shared native IR.
-import nativeplans, types, backend/irs
+import nativeplans, types, common, backend/irs
+
+proc nativeSize*(bytes: int64, line = 0): int32 =
+  ## Rejects storage that cannot be represented by the native IR.
+  if bytes < 0 or bytes > high(int32):
+    err(line, "native storage size exceeds 2147483647 bytes")
+  int32(bytes)
 
 proc addStorage*(plan: var NativePlan, data: IrStorage): int32 =
   ## Appends a storage descriptor using one-based IR references.
@@ -16,7 +22,8 @@ proc arrayStorage(plan: var NativePlan, element: int32,
   ## Declares a bounded array with the element's exact representation.
   let item = plan.module.storageTypes[element - 1]
   plan.addStorage(IrStorage(kind: ArrayStorage, element: element,
-    length: int32(count), byteCount: int32(count) * item.byteCount,
+    length: nativeSize(count),
+    byteCount: nativeSize(sizeMul(count, item.byteCount)),
     alignment: item.alignment))
 
 proc recordStorage*(plan: var NativePlan, name: string,
@@ -41,7 +48,7 @@ proc recordStorage*(plan: var NativePlan, name: string,
   let first = int32(plan.module.fields.len)
   plan.module.fields.add(fields)
   plan.addStorage(IrStorage(name: name, kind: StructStorage,
-    byteCount: int32(bytes), alignment: int32(alignment),
+    byteCount: nativeSize(bytes), alignment: int32(alignment),
     fields: Span(first: first, count: int32(fields.len))))
 
 proc layoutStorage*(plan: var NativePlan, mapping: var seq[int32],

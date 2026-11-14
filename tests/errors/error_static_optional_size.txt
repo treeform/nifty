@@ -1,0 +1,1 @@
+error_static_optional_size.nifty:4: static storage size exceeds int64

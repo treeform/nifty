@@ -1,7 +1,7 @@
 ## The AST and type representation shared by the parser, checker, and codegen.
 
 import std/tables
-import lexer
+import lexer, common
 
 type
   TypKind* = enum
@@ -221,11 +221,25 @@ proc setSize*(t: Typ): int64 =
 
 const arenaThreshold* = 256'i64 # locals bigger than this go to the arena
 
-proc sizeAdd(a, b: int64): int64 =
-  if a > high(int64) - b: high(int64) else: a + b
+proc sizeAdd*(a, b: int64, line = 0): int64 =
+  ## Adds nonnegative storage sizes without returning a false bound.
+  if a < 0 or b < 0 or a > high(int64) - b:
+    err(line, "static storage size exceeds int64")
+  a + b
 
-proc sizeMul(a, b: int64): int64 =
-  if a != 0 and b > high(int64) div a: high(int64) else: a * b
+proc sizeMul*(a, b: int64, line = 0): int64 =
+  ## Multiplies nonnegative storage sizes with an explicit overflow error.
+  if a < 0 or b < 0 or (a != 0 and b > high(int64) div a):
+    err(line, "static storage size exceeds int64")
+  a * b
+
+proc sizeAlign*(bytes, alignment: int64, line = 0): int64 =
+  ## Rounds storage up without overflowing an already aligned size.
+  if bytes < 0 or alignment <= 0:
+    err(line, "invalid static storage size or alignment")
+  let remainder = bytes mod alignment
+  if remainder == 0: bytes
+  else: sizeAdd(bytes, alignment - remainder, line)
 
 proc typeAlign*(t: Typ): int64 =
   case t.kind
@@ -247,45 +261,48 @@ proc bigRet*(t: Typ): bool
   ## threshold go through a caller-provided destination pointer instead
   ## of a by-value C return, so no copy ever lands on the C stack.
 
-proc typeSize*(t: Typ): int64 =
-  ## C layout size, with alignment and padding.
+proc typeSize*(t: Typ, line = 0): int64 =
+  ## Computes representable C layout size, including checked padding.
   if t.opt:
-    let a = typeAlign(deOpt(t))
-    return (sizeAdd(typeSize(deOpt(t)), 1) + a - 1) div a * a
+    let base = deOpt(t)
+    return sizeAlign(sizeAdd(typeSize(base, line), 1, line),
+      typeAlign(base), line)
   case t.kind
   of BoolType: 1
   of IntType: (if t.width > 0: t.width else: 8)
   of FloatType: t.width
-  of ArrayType: sizeMul(t.len, typeSize(t.elem))
+  of ArrayType: sizeMul(t.len, typeSize(t.elem, line), line)
   of SeqType:
     if t.dynamic: 24
-    else: (sizeAdd(8, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
+    else: sizeAlign(sizeAdd(8,
+      sizeMul(t.len, typeSize(t.elem, line), line), line), 8, line)
   of StringType:
     if t.dynamic: 24
-    else: (sizeAdd(8, t.len) + 7) div 8 * 8
+    else: sizeAlign(sizeAdd(8, t.len, line), 8, line)
   of SetType:
-    sizeAdd(8, (t.setSize + 63) div 64 * 8)
+    sizeAdd(8, sizeMul(sizeAdd(t.setSize, 63, line) div 64, 8, line), line)
   of QueueType:
-    (sizeAdd(16, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
+    sizeAlign(sizeAdd(16,
+      sizeMul(t.len, typeSize(t.elem, line), line), line), 8, line)
   of ChannelType:
-    # Ring (len + head + data) plus the embedded mutex and two condition
-    # variables (Darwin sizes: 64 + 2 x 48).
-    (sizeAdd(176, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
+    # Ring plus the embedded mutex and two conditions (Darwin sizes).
+    sizeAlign(sizeAdd(176,
+      sizeMul(t.len, typeSize(t.elem, line), line), line), 8, line)
   of DenseMapType:
-    (sizeAdd(sizeAdd(8, (t.setSize + 63) div 64 * 8),
-      sizeMul(t.setSize, typeSize(t.val))) + 7) div 8 * 8
+    sizeAlign(sizeAdd(sizeAdd(8,
+      sizeMul(sizeAdd(t.setSize, 63, line) div 64, 8, line), line),
+      sizeMul(t.setSize, typeSize(t.val, line), line), line), 8, line)
   of SparseMapType:
-    (sizeAdd(8, sizeAdd(sizeMul(t.len, typeSize(t.elem)),
-      sizeMul(t.len, typeSize(t.val)))) + 7) div 8 * 8
+    sizeAlign(sizeAdd(8, sizeAdd(
+      sizeMul(t.len, typeSize(t.elem, line), line),
+      sizeMul(t.len, typeSize(t.val, line), line), line), line), 8, line)
   of ObjectType:
     var off = 0'i64
     for f in t.fields:
-      let a = typeAlign(f.typ)
-      off = (off + a - 1) div a * a
-      off = sizeAdd(off, typeSize(f.typ))
-    let a = typeAlign(t)
-    (off + a - 1) div a * a
-  else: 0 # Lock: platform-sized, reported separately
+      off = sizeAlign(off, typeAlign(f.typ), line)
+      off = sizeAdd(off, typeSize(f.typ, line), line)
+    sizeAlign(off, typeAlign(t), line)
+  else: 0 # Lock is platform-sized; generic types are not concrete yet.
 
 proc typeEq*(a, b: Typ): bool =
   if a.isNil or b.isNil:

@@ -1,6 +1,7 @@
 ## Checks interval proofs against concrete signed arithmetic near int64 limits.
 import std/[random, strutils]
 import ../src/nifty
+import ../src/nifty/[lowering, types]
 
 const
   IntLow = low(int64)
@@ -78,3 +79,53 @@ thread main() =
   echo state
 """
 discard checkedModule(independentGlobalWrite, "arithmeticproofs.nifty")
+
+proc rejectsStorage(source: string) =
+  ## Requires a source diagnostic rather than an internal overflow defect.
+  var rejected = false
+  try:
+    discard checkedModule(source, "layout.nifty")
+  except NiftyError as error:
+    doAssert "static storage size exceeds int64" in error.msg, error.msg
+    rejected = true
+  doAssert rejected
+
+rejectsStorage("thread main() =\n" &
+  "  var data: seq[1152921504606846975, int]\n" &
+  "  data.add(1)\n  echo data.len\n")
+rejectsStorage("thread main() =\n" &
+  "  var data: string[9223372036854775799]\n" &
+  "  data.clear()\n  echo data.len\n")
+rejectsStorage("object Padded =\n" &
+  "  first: array[9223372036854775807, uint8]\n" &
+  "  second: int\nthread main() =\n  echo 1\n")
+
+doAssert sizeAlign(IntHigh - 7, 8) == IntHigh - 7
+doAssert typeSize(Typ(kind: ArrayType, len: IntHigh,
+  elem: sizedInt(0, 255, 1, "uint8"))) == IntHigh
+
+let giantArena = "thread main() =\n" &
+  "  var data: array[9223372036854775807, uint8]\n" &
+  "  data[0] = 1\n  echo data[0]\n"
+for render in [compileToC, reportFor]:
+  var rejected = false
+  try:
+    discard render(giantArena, "arena.nifty", "")
+  except NiftyError as error:
+    doAssert "static storage size exceeds int64" in error.msg, error.msg
+    rejected = true
+  doAssert rejected
+
+let nativeLimit = "thread main() =\n" &
+  "  var data: array[2147483648, uint8]\n" &
+  "  data[0] = 1\n  echo data[0]\n"
+discard compileToC(nativeLimit, "native-limit.nifty")
+doAssert "2147483648 bytes" in reportFor(nativeLimit, "native-limit.nifty")
+var rejectedNative = false
+try:
+  discard lowerNative(checkedModule(nativeLimit, "native-limit.nifty"))
+except NiftyError as error:
+  doAssert "native storage size exceeds 2147483647 bytes" in error.msg,
+    error.msg
+  rejectedNative = true
+doAssert rejectedNative

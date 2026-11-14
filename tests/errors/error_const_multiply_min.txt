@@ -1,0 +1,1 @@
+error_const_multiply_min.nifty:1: constant expression overflows int64

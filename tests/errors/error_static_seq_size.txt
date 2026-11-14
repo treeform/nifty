@@ -1,0 +1,1 @@
+error_static_seq_size.nifty:2: static storage size exceeds int64
