@@ -17,6 +17,8 @@ import time
 import zlib
 
 Backends = ("c", "arm64", "amd64")
+RayBackends = ("c-straight",) + Backends
+StraightCFlags = ["-O2", "-pthread", "-fno-strict-aliasing", "-ffp-contract=off"]
 Root = Path(__file__).resolve().parent.parent
 
 
@@ -135,10 +137,11 @@ def backendLabel(backend, host, architecture):
   """Describe native execution and translated AMD64 results explicitly."""
   if backend == "amd64" and host["physical_architecture"] == "arm64":
     return "AMD64 (Rosetta translated)"
-  if backend == "c":
+  if backend in ("c", "c-straight"):
     suffix = ", Rosetta translated" if (
       architecture == "amd64" and host["physical_architecture"] == "arm64") else ""
-    return f"C (-O2, {architecture}{suffix})"
+    name = "C straight" if backend == "c-straight" else "C"
+    return f"{name} (-O2, {architecture}{suffix})"
   return f"{backend.upper()} (native)"
 
 
@@ -236,17 +239,25 @@ def buildBackend(backend, size, repeat, options, env):
   """Build once per backend and configuration, preserving all artifacts."""
   directory = options.output / "build" / f"{size}x{size}-r{repeat}" / backend
   directory.mkdir(parents=True, exist_ok=True)
-  sourcePath = directory / "raytracer.nifty"
-  sourcePath.write_text(configuredSource(
-    options.source.read_text(), size, repeat))
   executable = directory / "raytracer"
-  command = [str(options.compiler), "build", str(sourcePath),
-             f"--backend:{backend}", "-o", str(executable)]
+  if backend == "c-straight":
+    sourcePath = directory / "raytracer_straight.c"
+    sourcePath.write_bytes(options.straight_c_source.read_bytes())
+    command = [options.cc] + StraightCFlags + [
+      f"-DIMAGE_SIZE={size}", f"-DREPETITIONS={repeat}",
+      f"-DCLOCK_ID={time.CLOCK_MONOTONIC}", "-DEMIT_PIXELS=1",
+      "-o", str(executable), str(sourcePath), "-lm"]
+  else:
+    sourcePath = directory / "raytracer.nifty"
+    sourcePath.write_text(configuredSource(
+      options.source.read_text(), size, repeat))
+    command = [str(options.compiler), "build", str(sourcePath),
+               f"--backend:{backend}", "-o", str(executable)]
   result, compileNs = runCommand(command, options.timeout, env)
   (directory / "build.stdout").write_bytes(result.stdout)
   (directory / "build.stderr").write_bytes(result.stderr)
   inspection = None
-  if options.emit_ir and backend != "c":
+  if options.emit_ir and backend not in ("c", "c-straight"):
     irPath = directory / "raytracer.ir"
     inspectCommand = [str(options.compiler), str(sourcePath),
                       f"--backend:{backend}", "--emit-ir", "-o", str(irPath)]
@@ -254,6 +265,8 @@ def buildBackend(backend, size, repeat, options, env):
     inspection = {"path": str(irPath), "wall_ns": inspectNs}
   return {"backend": backend, "executable": str(executable),
           "source": str(sourcePath), "compile_wall_ns": compileNs,
+          "source_sha256": hashlib.sha256(sourcePath.read_bytes()).hexdigest(),
+          "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
           "compile_command": command, "inspection": inspection,
           "render_ns_per_frame": [], "process_wall_ns": [],
           "clock_fields": [], "warmup_checksums": []}
@@ -288,15 +301,28 @@ def benchmark(size, repeat, options, backends, host, env):
   expected = golden
   results = {backend: buildBackend(backend, size, repeat, options, env)
              for backend in backends}
+  for backend, result in results.items():
+    architectures = binaryArchitectures(Path(result["executable"]))
+    if len(architectures) != 1 or (
+        backend in ("arm64", "amd64") and architectures != [backend]):
+      raise BenchmarkError(f"Wrong executable architecture for {backend}: {architectures}")
+    architecture = architectures[0]
+    result["execution_architecture"] = architecture
+    result["label"] = backendLabel(backend, host, architecture)
+    if backend == "c":
+      result["label"] = result["label"].replace("C (", "Nifty C backend (", 1)
+    command = [result["executable"]]
+    if architecture == "amd64" and host["physical_architecture"] == "arm64":
+      command = ["/usr/bin/arch", "-x86_64"] + command
+    result["execution_command"] = command
+  rounds = []
   for roundIndex in range(options.warmups + options.samples):
     offset = roundIndex % len(backends)
     order = backends[offset:] + backends[:offset]
+    rounds.append(order)
     for backend in order:
       result = results[backend]
-      command = [result["executable"]]
-      if backend == "amd64" and host["physical_architecture"] == "arm64":
-        command = ["/usr/bin/arch", "-x86_64"] + command
-      response, wallNs = runCommand(command, options.timeout, env)
+      response, wallNs = runCommand(result["execution_command"], options.timeout, env)
       parsed = parseOutput(response.stdout, size, repeat)
       if response.stderr:
         raise BenchmarkError(f"Unexpected renderer stderr ({backend}): " +
@@ -316,19 +342,11 @@ def benchmark(size, repeat, options, backends, host, env):
         result["process_wall_ns"].append(wallNs)
         result["clock_fields"].append(parsed["clock_fields"])
   for backend, result in results.items():
-    architectures = binaryArchitectures(Path(result["executable"]))
-    preferred = backend if backend != "c" else host["physical_architecture"]
-    architecture = (preferred if preferred in architectures else
-                    architectures[0] if architectures else "unknown")
-    if backend != "c" and architecture != backend:
-      raise BenchmarkError(f"Wrong executable architecture for {backend}: {architectures}")
-    result["execution_architecture"] = architecture
-    result["label"] = backendLabel(backend, host, architecture)
     result["render_ns_per_frame"] = summarize(result["render_ns_per_frame"])
     result["process_wall_ns"] = summarize(result["process_wall_ns"])
     result["checksum"] = sum(expected)
     result["pixel_sha256"] = hashlib.sha256(expected).hexdigest()
-  return {"size": size, "repeat": repeat,
+  return {"size": size, "repeat": repeat, "round_order": rounds,
           "independent_golden": str(referencePath) if golden is not None else None,
           "correctness": "independent golden and exact cross-run RGB" if golden
                          is not None else "exact cross-run RGB; no independent golden",
@@ -337,9 +355,10 @@ def benchmark(size, repeat, options, backends, host, env):
 
 def parseArguments(arguments=None):
   """Validate bounded configuration before invoking any compiler."""
-  parser = argparse.ArgumentParser(description=__doc__)
+  parser = argparse.ArgumentParser(description=__doc__,
+      epilog="Standalone C baseline details: benchmarks/C_STRAIGHT.md")
   parser.add_argument("--backend", action="append", default=[],
-                      help="Repeat or use comma-separated c,arm64,amd64")
+                      help="Repeat or use comma-separated c-straight,c,arm64,amd64")
   parser.add_argument("--size", type=int, default=64)
   parser.add_argument("--samples", type=int, default=5)
   parser.add_argument("--warmups", type=int, default=1)
@@ -349,6 +368,10 @@ def parseArguments(arguments=None):
   parser.add_argument("--compiler", type=Path, default=Root / "nifty")
   parser.add_argument("--source", type=Path,
                       default=Root / "benchmarks" / "raytracer.nifty")
+  parser.add_argument("--straight-c-source", type=Path,
+                      default=Root / "benchmarks" / "raytracer_straight.c")
+  parser.add_argument("--cc", default=os.environ.get("CC", "cc"),
+                      help="C compiler for standalone and Nifty-generated C")
   parser.add_argument("--timeout", type=float, default=300,
                       help="Seconds allowed for each build or process")
   parser.add_argument("--emit-ir", action="store_true",
@@ -367,12 +390,12 @@ def parseArguments(arguments=None):
   selected = []
   for entry in options.backend:
     for backend in entry.split(","):
-      if backend not in Backends:
+      if backend not in RayBackends:
         parser.error(f"unknown backend: {backend}")
       if backend not in selected:
         selected.append(backend)
   options.backend = selected
-  for name in ("compiler", "source", "output"):
+  for name in ("compiler", "source", "straight_c_source", "output"):
     setattr(options, name, getattr(options, name).expanduser().resolve())
   return options
 
@@ -385,7 +408,8 @@ def markdownReport(report, wall):
            "Render times use the renderer's monotonic clock and exclude startup, "
            "final checksum, RGB formatting, and PNG writing. Values are per frame. "
            "Each timed frame includes an RGB checksum reduction to keep every "
-           "repetition observable.", "",
+           "repetition observable. Each sample starts a fresh process; first-use "
+           "execution and translation within the loop remain timed.", "",
            "| Backend | Compile (ms) | Render median (ms) | Min (ms) | Max (ms) |",
            "| --- | ---: | ---: | ---: | ---: |"]
   for result in benchmarkResult["backends"]:
@@ -406,12 +430,23 @@ def markdownReport(report, wall):
 def main(arguments=None):
   """Publish timing artifacts only after every correctness check succeeds."""
   options = parseArguments(arguments)
-  if not options.compiler.is_file() or not os.access(options.compiler, os.X_OK):
-    raise BenchmarkError(f"Compiler is not executable: {options.compiler}")
-  if not options.source.is_file():
-    raise BenchmarkError(f"Renderer source does not exist: {options.source}")
   host = hostInfo()
-  available = availableBackends(host, options.compiler)
+  if host["system"] not in ("Darwin", "Linux") or not hasattr(time, "CLOCK_MONOTONIC"):
+    raise BenchmarkError("Ray timing requires POSIX clock_gettime on macOS or Linux")
+  needsNifty = options.backend != ["c-straight"]
+  if needsNifty:
+    if not options.compiler.is_file() or not os.access(options.compiler, os.X_OK):
+      raise BenchmarkError(f"Compiler is not executable: {options.compiler}")
+    if not options.source.is_file():
+      raise BenchmarkError(f"Renderer source does not exist: {options.source}")
+  options.cc = shutil.which(options.cc)
+  available = availableBackends(host, options.compiler) if needsNifty else []
+  if options.cc:
+    available.insert(0, "c-straight")
+    if needsNifty and "c" not in available:
+      available.append("c")
+  else:
+    available = [backend for backend in available if backend != "c"]
   backends = options.backend or available
   if not backends:
     raise BenchmarkError("No executable backend is available on this host")
@@ -420,10 +455,20 @@ def main(arguments=None):
       raise BenchmarkError(f"Backend {backend} is unsupported on this host or its "
                            "runtime template is unavailable; available: " +
                            ", ".join(available))
+  if "c-straight" in backends and not options.straight_c_source.is_file():
+    raise BenchmarkError(f"Standalone C source does not exist: {options.straight_c_source}")
+  inputs = ([options.compiler, options.source] if needsNifty else [])
+  if "c-straight" in backends:
+    inputs.append(options.straight_c_source)
+  if options.cc and any(backend in ("c", "c-straight") for backend in backends):
+    inputs.append(Path(options.cc))
+  fingerprints = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
   options.output.mkdir(parents=True, exist_ok=True)
   for name in ("results.json", "results.md", "raytracer.png"):
     (options.output / name).unlink(missing_ok=True)
   env = os.environ.copy()
+  if options.cc:
+    env["CC"] = options.cc
   for backend in ("arm64", "amd64"):
     template = options.compiler.parent / f"nifty-runtime-{backend}"
     if template.is_file():
@@ -438,26 +483,36 @@ def main(arguments=None):
         checks.append(checked)
   result, pixels = benchmark(options.size, options.repeat, options, backends,
                              host, env)
+  if any(hashlib.sha256(path.read_bytes()).hexdigest() != value
+         for path, value in fingerprints.items()):
+    raise BenchmarkError("Compiler or renderer source changed during benchmark")
   imagePath = options.output / "raytracer.png"
   writePng(imagePath, options.size, pixels)
   manifest = Root / "benchmarks" / "reference" / "manifest.json"
+  provenance = Root / "benchmarks" / "reference" / "c_straight.json"
   report = {
     "schema": "nifty-ray-benchmark-v1", "machine": host,
-    "toolchain": {"compiler": str(options.compiler),
-                  "compiler_architectures": binaryArchitectures(options.compiler),
-                  "compiler_sha256": hashlib.sha256(
-                    options.compiler.read_bytes()).hexdigest(),
-                  "compiler_help": optionalCommand([str(options.compiler), "--help"]),
-                  "cc": optionalCommand(["cc", "--version"]),
+    "toolchain": {"compiler": str(options.compiler) if needsNifty else None,
+                  "compiler_architectures": binaryArchitectures(options.compiler) if needsNifty else [],
+                  "compiler_sha256": fingerprints.get(options.compiler),
+                  "compiler_help": optionalCommand([str(options.compiler), "--help"]) if needsNifty else None,
+                  "cc": optionalCommand([options.cc, "--version"]) if options.cc else None,
+                  "cc_path": options.cc,
+                  "straight_c_flags": StraightCFlags if "c-straight" in backends else None,
                   "nim": optionalCommand(["nim", "--version"])},
     "settings": {"size": options.size, "samples": options.samples,
                  "warmups": options.warmups, "repeat": options.repeat,
                  "backends": backends, "timeout_seconds": options.timeout,
-                 "source": str(options.source), "source_sha256": hashlib.sha256(
-                   options.source.read_bytes()).hexdigest(),
+                 "source": str(options.source) if needsNifty else None,
+                 "source_sha256": fingerprints.get(options.source),
+                 "straight_c_source": str(options.straight_c_source) if "c-straight" in backends else None,
                  "sample_order": "rotate backend order each warmup/sample round",
                  "native_ir": options.emit_ir},
     "reference_manifest": json.loads(manifest.read_text()) if manifest.is_file() else None,
+    "inputs_sha256": {str(path): value for path, value in fingerprints.items()},
+    "straight_c_provenance": json.loads(provenance.read_text())
+        if "c-straight" in backends and provenance.is_file() and
+        options.straight_c_source == Root / "benchmarks" / "raytracer_straight.c" else None,
     "checks": checks, "benchmark": result, "image": str(imagePath),
   }
   markdown = markdownReport(report, options.wall)

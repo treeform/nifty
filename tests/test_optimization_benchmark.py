@@ -55,7 +55,7 @@ def testArchitecture():
 def testMeasurements():
   """Rotate every sample and reject an incorrect image after valid warmups."""
   variants = [("baseline", "arm64", None), ("candidate", "arm64", None),
-              ("c", "arm64", None)]
+              ("c", "arm64", None), ("c-straight", "arm64", None)]
   with tempfile.TemporaryDirectory() as directory:
     options = SimpleNamespace(output=Path(directory), timeout=1)
     with patch.object(Comparison, "build", side_effect=fakeBuild), patch.object(
@@ -63,18 +63,18 @@ def testMeasurements():
       with patch.object(Comparison.Ray, "runCommand", return_value=(
           SimpleNamespace(stdout=response(), stderr=b""), 10)) as command:
         result = Comparison.measure(1, 1, options, {}, variants, 1, 5)
-        assert command.call_count == 18
+        assert command.call_count == 24
       assert result["independent_sha256"] == result["pixel_sha256"]
       assert "fresh process" in result["render_timing_scope"]
       assert "first-use" in result["render_timing_scope"]
-      assert result["round_order"][:3] == [
-        ["baseline-arm64", "candidate-arm64", "c-arm64"],
-        ["candidate-arm64", "c-arm64", "baseline-arm64"],
-        ["c-arm64", "baseline-arm64", "candidate-arm64"]]
+      labels = ["baseline-arm64", "candidate-arm64", "c-arm64",
+                "c-straight-arm64"]
+      assert result["round_order"] == [
+        labels[index % 4:] + labels[:index % 4] for index in range(6)]
       for variant in result["variants"]:
         assert variant["render_ns_per_frame"]["samples"] == [1] * 5
         assert variant["process_wall_ns"]["samples"] == [10] * 5
-      responses = [(SimpleNamespace(stdout=response(), stderr=b""), 10)] * 3
+      responses = [(SimpleNamespace(stdout=response(), stderr=b""), 10)] * 4
       responses.append((SimpleNamespace(stdout=response(2), stderr=b""), 10))
       with patch.object(Comparison.Ray, "runCommand", side_effect=responses):
         expectError(lambda: Comparison.measure(1, 1, options, {}, variants, 1, 5))
@@ -92,11 +92,15 @@ def testCCompiler():
     for compiler in (baseline, candidate, emitter):
       compiler.write_text(compiler.name)
       compiler.chmod(0o700)
+    straight = root / "straight.c"
+    straight.write_text("int main(void) { return 0; }\n")
     arguments = ["--baseline", str(baseline), "--candidate", str(candidate),
-                 "--output", str(root / "results"), "--size", "1"]
-    with patch.object(Comparison.shutil, "which", return_value="/usr/bin/cc"):
+                 "--output", str(root / "results"), "--size", "1",
+                 "--straight-c-source", str(straight)]
+    with patch.object(Comparison.shutil, "which", return_value=__file__):
       defaults = Comparison.parseArguments(arguments)
       assert defaults.c_compiler == baseline
+      assert defaults.straight_c_source == straight
       selected = Comparison.parseArguments(arguments + ["--c-compiler", str(emitter)])
       assert selected.c_compiler == emitter
       invalidPaths = [root / "missing", root / "directory"]
@@ -120,7 +124,8 @@ def testCCompiler():
       """Inspect compiler routing while replacing every timed workload."""
       assert variants == [("baseline", "arm64", baseline),
                           ("candidate", "arm64", candidate),
-                          ("c", "arm64", options.c_compiler)]
+                          ("c", "arm64", options.c_compiler),
+                          ("c-straight", "arm64", Path(options.cc))]
       return {"size": size, "repeat": repeat, "correctness": "mock", "variants": []}
 
     with patch.object(Comparison.Ray, "hostInfo", return_value={
@@ -136,19 +141,56 @@ def testCCompiler():
         assert report["inputs_sha256"][str(options.c_compiler)] == (
           Comparison.sha256(options.c_compiler))
 
-      def changed(*args):
-        """Change only the selected emitter to exercise input validation."""
-        result = measured(*args)
-        emitter.write_text("changed")
-        return result
+      assert report["inputs_sha256"][str(selected.straight_c_source)] == (
+        Comparison.sha256(selected.straight_c_source))
 
-      with patch.object(Comparison, "parseArguments", return_value=selected), patch.object(
-          Comparison, "measure", side_effect=changed):
-        expectError(Comparison.main)
-      assert not (selected.output / "results.json").exists()
+      for changedPath in (emitter, selected.straight_c_source):
+        def changed(*args):
+          """Mutate each independently fingerprinted input during measurement."""
+          result = measured(*args)
+          changedPath.write_text("changed")
+          return result
+
+        with patch.object(Comparison, "parseArguments", return_value=selected), patch.object(
+            Comparison, "measure", side_effect=changed):
+          expectError(Comparison.main)
+        assert not (selected.output / "results.json").exists()
+
+
+def testStraightBuild():
+  """Compile standalone C directly with architecture-matched flags and identity."""
+  with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    source = root / "straight.c"
+    source.write_text("int main(void) { return 0; }\n")
+    cc = root / "cc"
+    cc.write_text("C compiler identity")
+    options = SimpleNamespace(output=root, straight_c_source=source,
+                              cc=str(cc), timeout=1)
+    host = {"system": "Darwin", "physical_architecture": "arm64"}
+    def compiled(command, *unused):
+      """Simulate a C compiler creating its requested binary."""
+      Path(command[command.index("-o") + 1]).write_bytes(b"binary")
+      return SimpleNamespace(stdout=b"", stderr=b""), 1
+    with patch.object(Comparison.Ray, "runCommand", side_effect=compiled) as run, patch.object(
+        Comparison.Ray, "binaryArchitectures", return_value=["amd64"]), patch.object(
+        Comparison, "compilerEnvironment", side_effect=AssertionError("Nifty invoked")), patch.object(
+        Comparison.time, "CLOCK_MONOTONIC", 6, create=True):
+      result = Comparison.build("c-straight", "amd64", None, 16, 3, options, host)
+    assert run.call_count == 1
+    command = result["compile_commands"][0]
+    assert command == ([str(cc), "-DIMAGE_SIZE=16", "-DREPETITIONS=3",
+                        "-DCLOCK_ID=6", "-DEMIT_PIXELS=1"] +
+                       Comparison.CFlags + ["-arch", "x86_64", "-o",
+                       result["executable"], result["source"], "-lm"])
+    assert result["compiler"] == str(cc)
+    assert result["compiler_sha256"] == Comparison.sha256(cc)
+    assert Path(result["source"]).read_bytes() == source.read_bytes()
+    assert result["execution_command"][:2] == ["/usr/bin/arch", "-x86_64"]
 
 
 testArchitecture()
+testStraightBuild()
 testMeasurements()
 testCCompiler()
 print("Optimization benchmark architecture, sample rotation, compiler selection, and validation checks passed")

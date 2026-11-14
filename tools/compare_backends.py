@@ -5,6 +5,7 @@ Builds finish before execution. Warmup/sample rounds rotate all executables.
 Only the four existing workload configuration constants may change. Every
 response must match exact RGB, and available independent goldens are mandatory.
 C emission uses --baseline unless a separate --c-compiler is selected.
+Handwritten C is compiled directly with the same C toolchain and CPU flags.
 """
 
 import argparse
@@ -21,7 +22,7 @@ Root = Path(__file__).resolve().parent.parent
 Spec = importlib.util.spec_from_file_location("ray_benchmark", Root / "benchmarks/run.py")
 Ray = importlib.util.module_from_spec(Spec)
 Spec.loader.exec_module(Ray)
-CFlags = ["-O2", "-pthread", "-fno-strict-aliasing", "-ffp-contract=off"]
+CFlags = list(Ray.StraightCFlags)
 TimingScope = ("Each sample starts a fresh process; the render interval includes "
                "first-use execution and translation. Per-frame times are the "
                "complete batch interval divided by its frame count.")
@@ -65,13 +66,21 @@ def build(variant, architecture, compiler, size, repeat, options, host):
   label = f"{variant}-{architecture}"
   directory = options.output / "build" / f"{size}-r{repeat}" / label
   directory.mkdir(parents=True, exist_ok=True)
-  source = directory / "raytracer.nifty"
-  source.write_text(Ray.configuredSource(options.source.read_text(), size, repeat))
+  straight = variant == "c-straight"
+  source = directory / ("raytracer.c" if straight else "raytracer.nifty")
+  if straight:
+    source.write_bytes(options.straight_c_source.read_bytes())
+  else:
+    source.write_text(Ray.configuredSource(options.source.read_text(), size, repeat))
   executable = directory / "raytracer"
-  environment = compilerEnvironment(compiler)
+  environment = os.environ.copy() if straight else compilerEnvironment(compiler)
   commands = []
   started = time.perf_counter_ns()
-  if variant == "c":
+  if straight:
+    commands.append(cCommand(options.cc, architecture, host, source, executable))
+    commands[-1][1:1] = [f"-DIMAGE_SIZE={size}", f"-DREPETITIONS={repeat}",
+                         f"-DCLOCK_ID={time.CLOCK_MONOTONIC}", "-DEMIT_PIXELS=1"]
+  elif variant == "c":
     generated = source.with_suffix(".c")
     commands.append([str(compiler), str(source), "--emit-c", "-o", str(generated)])
     response, _ = Ray.runCommand(commands[-1], options.timeout, environment)
@@ -88,8 +97,9 @@ def build(variant, architecture, compiler, size, repeat, options, host):
   architectures = Ray.binaryArchitectures(executable)
   if architectures != [architecture]:
     raise Ray.BenchmarkError(f"Wrong executable architecture for {label}: {architectures}")
+  identity = Path(options.cc) if straight else compiler
   return {"label": label, "architecture": architecture,
-          "compiler": str(compiler), "compiler_sha256": sha256(compiler),
+          "compiler": str(identity), "compiler_sha256": sha256(identity),
           "source": str(source), "source_sha256": sha256(source),
           "executable": str(executable), "executable_sha256": sha256(executable),
           "execution_command": executionCommand(executable, architecture, host),
@@ -154,6 +164,8 @@ def parseArguments(arguments=None):
   parser.add_argument("--samples", type=int, default=5)
   parser.add_argument("--timeout", type=float, default=300)
   parser.add_argument("--source", type=Path, default=Root / "benchmarks/raytracer.nifty")
+  parser.add_argument("--straight-c-source", type=Path,
+                      default=Root / "benchmarks/raytracer_straight.c")
   parser.add_argument("--output", type=Path, required=True)
   options = parser.parse_args(arguments)
   options.size = list(dict.fromkeys(options.size or [64, 256]))
@@ -165,7 +177,8 @@ def parseArguments(arguments=None):
   if not 0 < options.timeout <= 3600:
     parser.error("--timeout must be greater than zero and at most 3600")
   options.c_compiler = options.c_compiler or options.baseline
-  for name in ("baseline", "candidate", "c_compiler", "source", "output"):
+  for name in ("baseline", "candidate", "c_compiler", "source",
+               "straight_c_source", "output"):
     setattr(options, name, getattr(options, name).expanduser().resolve())
   for compiler in (options.baseline, options.candidate, options.c_compiler):
     if not compiler.is_file() or not os.access(compiler, os.X_OK):
@@ -194,8 +207,11 @@ def main(arguments=None):
               for kind, compiler in (("baseline", options.baseline),
                                      ("candidate", options.candidate))]
   variants += [("c", architecture, options.c_compiler) for architecture in cArchitectures]
+  variants += [("c-straight", architecture, Path(options.cc))
+               for architecture in cArchitectures]
   fingerprints = {path: sha256(path) for path in
-                  (options.baseline, options.candidate, options.c_compiler, options.source)}
+                  (options.baseline, options.candidate, options.c_compiler,
+                   options.source, options.straight_c_source, Path(options.cc))}
   for compiler in (options.baseline, options.candidate):
     environment = compilerEnvironment(compiler)
     for architecture in architectures:

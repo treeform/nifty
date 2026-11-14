@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import struct
 import tempfile
+from types import SimpleNamespace
 import zlib
 
 import run
@@ -68,6 +69,9 @@ def testConfiguration():
   options = run.parseArguments(["--backend", "c,amd64", "--backend", "c"])
   assert options.backend == ["c", "amd64"]
   assert options.samples == 5 and options.warmups == 1 and options.size == 64
+  options = run.parseArguments(["--backend", "c-straight,c", "--backend", "c-straight"])
+  assert options.backend == ["c-straight", "c"]
+  assert "c-straight" not in run.Backends
   for arguments in (["--size", "0"], ["--size", "513"], ["--samples", "4"],
                     ["--warmups", "0"], ["--repeat", "1001"],
                     ["--backend", "unknown"], ["--timeout", "nan"]):
@@ -137,6 +141,38 @@ def testArchitectures():
   host = {"physical_architecture": "arm64"}
   assert "Rosetta translated" in run.backendLabel("c", host, "amd64")
   assert "Rosetta" not in run.backendLabel("c", host, "arm64")
+  assert "C straight" in run.backendLabel("c-straight", host, "arm64")
+  assert "Rosetta translated" in run.backendLabel("c-straight", host, "amd64")
+
+
+def testStraightC():
+  """Compile handwritten C directly without a Nifty source or compiler."""
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    source = directory / "standalone.c"
+    source.write_text("int main(void) { return 0; }\n")
+    options = SimpleNamespace(output=directory / "output", straight_c_source=source,
+                              source=directory / "missing.nifty", compiler=directory / "missing-nifty",
+                              cc="test-cc", timeout=1, emit_ir=True)
+    commands = []
+
+    def build(command, timeout, env):
+      """Record the actual compilation route and synthesize its artifact."""
+      commands.append(command)
+      Path(command[command.index("-o") + 1]).write_bytes(b"standalone executable")
+      return SimpleNamespace(stdout=b"", stderr=b""), 123
+
+    with patch.object(run, "runCommand", side_effect=build), patch.object(
+        run.time, "CLOCK_MONOTONIC", 1, create=True):
+      result = run.buildBackend("c-straight", 16, 3, options, {})
+    assert len(commands) == 1
+    command = commands[0]
+    assert command[:1 + len(run.StraightCFlags)] == ["test-cc"] + run.StraightCFlags
+    for option in ("-DIMAGE_SIZE=16", "-DREPETITIONS=3", "-DCLOCK_ID=1", "-DEMIT_PIXELS=1", "-lm"):
+      assert option in command
+    assert "missing-nifty" not in " ".join(command)
+    assert Path(result["source"]).read_bytes() == source.read_bytes()
+    assert result["compile_wall_ns"] == 123 and result["inspection"] is None
 
 
 testProtocol()
@@ -144,4 +180,5 @@ testConfiguration()
 testPng()
 testReferences()
 testArchitectures()
-print("Benchmark runner protocol, configuration, PNG, reference, and architecture checks passed")
+testStraightC()
+print("Benchmark protocol, configuration, PNG, reference, architecture, and standalone C checks passed")
