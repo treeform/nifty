@@ -1,18 +1,20 @@
 ## Nifty — nimmy's super-static brother.
 ## A small systems language with Nim-flavored syntax that
-## compiles to C, ARM64, or AMD64. See spec.md for the language definition.
+## compiles to C, ARM64, AMD64, or memory64 WebAssembly.
 ##
 ## Pipeline: parser -> checker + semantics -> C, or lowering -> IR -> native.
 
 import nifty/[common, parser, checker, codegen, report, loader, types]
+import nifty/[lowering, nativeunroll, wasmfiles]
 
 export common
 
 var lastExternLibs*: seq[string] ## non-libc libs of the last compile
 
-proc checkedModule*(src, moduleName: string, dir = ""): Module =
+proc checkedModule*(src, moduleName: string, dir = "",
+    portableIo = false): Module =
   ## Checks imports and prepares shared semantics before backend selection.
-  result = parse(loadTokens(src, moduleName, dir))
+  result = parse(loadTokens(src, moduleName, dir, portableIo))
   check(result)
 
 proc compileToC*(src: string, moduleName: string, dir = ""): string =
@@ -29,12 +31,18 @@ proc reportFor*(src: string, moduleName: string, dir = ""): string =
   let m = checkedModule(src, moduleName, dir)
   buildReport(m, moduleName)
 
+proc compileToWasm*(src: string, moduleName = "input", dir = "",
+    optimization = SpeedOptimization): string =
+  ## Compiles checked source to a complete memory64 module without tools.
+  var checked = checkedModule(src, moduleName, dir, portableIo = true)
+  if optimization == SpeedOptimization:
+    checked = unrollNative(checked)
+  buildWasmProgram(lowerNative(checked, moduleName, portableIo = true),
+    optimization).bytes
+
 when isMainModule:
-  import std/[os, strutils]
-  when defined(windows):
-    import std/osproc
-  import nifty/[lowering, nativeruntime, nativereports, nativeunroll,
-    ctoolchains]
+  import std/[os, osproc, strutils]
+  import nifty/[nativeruntime, nativereports, ctoolchains]
 
   try:
     if tryRunEmbedded():
@@ -43,7 +51,7 @@ when isMainModule:
     quit("nifty: " & e.msg, 1)
 
   const usage = """
-nifty - a checked language with C, ARM64, and AMD64 backends
+nifty - a checked language with C, ARM64, AMD64, and WASM64 backends
 
 usage:
   nifty [run] file.nifty [options]   build and, if there are no errors, run (default)
@@ -51,12 +59,13 @@ usage:
   nifty report file.nifty          backend report (static RAM, heap, ops)
 
 options:
-  --backend:c|arm64|amd64          backend (default: native host architecture)
-  --opt:none|speed                native optimization (default: speed)
+  --backend:c|arm64|amd64|wasm64   backend (wasm aliases wasm64)
+  --opt:none|speed                IR optimization (default: speed)
   -o path                         output path
   --emit-c                        write reference C from the checked AST
   --emit-ir                       write selected native IR without running
   --emit-native                   write a native image without running
+  --emit-wasm                     write a memory64 module without running
 """
   var cmd = "run"
   var sawCmd = false
@@ -78,7 +87,7 @@ options:
       inc i
       if i >= params.len: quit(usage, 1)
       outPath = params[i]
-    of "--emit-c", "-c", "--emit-ir", "--emit-native":
+    of "--emit-c", "-c", "--emit-ir", "--emit-native", "--emit-wasm":
       if emission.len > 0:
         quit("nifty: choose one output format", 1)
       emission = if a == "-c": "--emit-c" else: a
@@ -105,12 +114,18 @@ options:
     inc i
   if srcPath == "":
     quit(usage, 1)
-  if backend notin ["c", "arm64", "amd64"]:
+  if backend == "wasm":
+    backend = "wasm64"
+  if backend notin ["c", "arm64", "amd64", "wasm64"]:
     quit("nifty: unknown backend " & backend, 1)
   if emission == "--emit-c":
     backend = "c"
+  elif emission == "--emit-wasm":
+    backend = "wasm64"
   if backend == "c" and emission in ["--emit-ir", "--emit-native"]:
     quit("nifty: select arm64 or amd64 for native output", 1)
+  if backend == "wasm64" and emission == "--emit-native":
+    quit("nifty: wasm64 uses --emit-wasm; --emit-native requires arm64 or amd64", 1)
   let modName = srcPath # complete path: errors are openable as printed
   if cmd == "report":
     try:
@@ -118,24 +133,34 @@ options:
       if backend == "c":
         stdout.write reportFor(source, modName, srcPath.parentDir)
       else:
-        let target = if backend == "arm64": Arm64Target else: Amd64Target
-        var checked = checkedModule(source, modName, srcPath.parentDir)
+        var checked = checkedModule(source, modName, srcPath.parentDir,
+          portableIo = backend == "wasm64")
         if optimization == SpeedOptimization:
           checked = unrollNative(checked)
-        let plan = lowerNative(checked, modName)
-        let program = buildNativeProgram(plan, target,
-          optimization = optimization)
-        stdout.write nativeReport(program.plan, program.image, modName, checked)
+        let plan = lowerNative(checked, modName, portableIo = backend == "wasm64")
+        if backend == "wasm64":
+          stdout.write wasmReport(buildWasmProgram(plan, optimization), modName)
+        else:
+          let target = if backend == "arm64": Arm64Target else: Amd64Target
+          let program = buildNativeProgram(plan, target,
+            optimization = optimization)
+          stdout.write nativeReport(program.plan, program.image, modName, checked)
     except CatchableError as e:
       quit("nifty: " & e.msg, 1)
     quit(0)
   let base = srcPath.changeFileExt("")
-  let selected = if outPath.len > 0: outPath else: base
+  let selected = if outPath.len > 0: outPath
+    elif backend == "wasm64": base & ".wasm"
+    else: base
   let bin = when defined(windows):
-      if selected.splitFile.ext.len == 0: selected & ".exe" else: selected
+      if backend != "wasm64" and selected.splitFile.ext.len == 0:
+        selected & ".exe"
+      else: selected
     else: selected
   try:
     let source = readFile(srcPath)
+    if backend == "wasm64":
+      validateWasmOutput(bin, srcPath)
     if backend == "c":
       let cCode = compileToC(source, modName, srcPath.parentDir)
       let cPath = if emission == "--emit-c" and outPath.len > 0:
@@ -148,27 +173,47 @@ options:
       if execShellCmd(cCompileCommand(cPath, bin, lastExternLibs)) != 0:
         quit("nifty: C compilation failed", 1)
     else:
-      let target = if backend == "arm64": Arm64Target else: Amd64Target
-      var checked = checkedModule(source, modName, srcPath.parentDir)
+      var checked = checkedModule(source, modName, srcPath.parentDir,
+        portableIo = backend == "wasm64")
       if optimization == SpeedOptimization:
         checked = unrollNative(checked)
-      let plan = lowerNative(checked, modName)
+      let plan = lowerNative(checked, modName, portableIo = backend == "wasm64")
       if emission == "--emit-ir":
         let path = if outPath.len > 0: outPath else: base & ".ir"
-        writeFile(path, optimizeNative(plan, optimization).module.dumpModule())
+        if backend == "wasm64":
+          validateWasmOutput(path, srcPath)
+        writeFile(path, optimizeNative(plan, optimization,
+          specializeMath = backend != "wasm64").module.dumpModule())
         echo path
         quit(0)
-      let program = buildNativeProgram(plan, target,
-        optimization = optimization)
-      if emission == "--emit-native":
-        let path = if outPath.len > 0: outPath else: base & ".niftybin"
-        writeNativeFile(program, path)
-        echo path
-        quit(0)
-      writeStandalone(program, bin)
+      if backend == "wasm64":
+        writeWasmFile(buildWasmProgram(plan, optimization), bin, srcPath)
+        if emission == "--emit-wasm":
+          echo bin
+          quit(0)
+      else:
+        let target = if backend == "arm64": Arm64Target else: Amd64Target
+        let program = buildNativeProgram(plan, target,
+          optimization = optimization)
+        if emission == "--emit-native":
+          let path = if outPath.len > 0: outPath else: base & ".niftybin"
+          writeNativeFile(program, path)
+          echo path
+          quit(0)
+        writeStandalone(program, bin)
     echo "built ", bin
     if cmd == "run":
       let exe = bin.absolutePath()
+      if backend == "wasm64":
+        let engine = getEnv("NIFTY_WASMTIME", findExe("wasmtime"))
+        if engine.len == 0:
+          quit("nifty: running wasm64 requires Wasmtime; set NIFTY_WASMTIME " &
+            "or run the module with tools/wasm/run.mjs", 1)
+        let child = startProcess(engine, args = @[exe],
+          options = {poParentStreams})
+        let status = child.waitForExit()
+        child.close()
+        quit(status)
       when defined(macosx) and defined(arm64):
         if backend == "amd64":
           quit(execShellCmd("/usr/bin/arch -x86_64 " & quoteShell(exe)))

@@ -5,12 +5,14 @@ type NativeOptimization* = enum
   NoOptimization, SpeedOptimization
 
 proc optimizeNative*(plan: NativePlan,
-    optimization = SpeedOptimization): NativePlan =
+    optimization = SpeedOptimization,
+    specializeMath = true): NativePlan =
   ## Simplifies storage, expands bounded calls, then cleans the resulting CFG.
   result = plan
   verifyIr(result.module)
   if optimization == SpeedOptimization:
-    discard result.specializeNativeMaths()
+    if specializeMath:
+      discard result.specializeNativeMaths()
     optimizeIr(result.module)
     var config = defaultInlineConfig()
     for round in 0 ..< 3:

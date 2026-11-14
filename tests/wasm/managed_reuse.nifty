@@ -1,0 +1,31 @@
+proc cycle(): bool =
+  var rows: seq[string]
+  if not rows.resize(2):
+    return false
+  if rows.len == 2:
+    if not rows[0].reserve(131072):
+      return false
+  if rows.len == 2:
+    if not rows[1].reserve(131072):
+      return false
+  if rows.len == 2:
+    discard rows[0].add("first")
+  if rows.len == 2:
+    discard rows[1].add("second")
+  var copied: seq[string]
+  if not copied.copyFrom(rows):
+    return false
+  rows.clear()
+  if copied.len == 2:
+    let lengths = copied[0].len == 5 and copied[1].len == 6
+    let first = copied[0].get(0).or(0) == 102
+    let second = copied[1].get(0).or(0) == 115
+    return lengths and first and second
+  return false
+
+thread main() =
+  var good = true
+  for i in 0 ..< 512:
+    if not cycle():
+      good = false
+  echo good

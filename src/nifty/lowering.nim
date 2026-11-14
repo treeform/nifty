@@ -1028,10 +1028,11 @@ proc statements(g: var Lower, body: seq[Stmt], scope: int) =
   if g.live:
     g.cleanup(g.source.semantics.scopes[scope].drops)
 
-proc lowerNative*(checked: Module, filename = ""): NativePlan =
+proc lowerNative*(checked: Module, filename = "",
+    portableIo = false): NativePlan =
   ## Builds native IR, fixed layouts, and executable runtime metadata.
   checked.requireChecked()
-  let source = lowerEcho(checked, filename)
+  let source = lowerEcho(checked, filename, portableIo)
   var g = Lower(source: source)
   g.plan.module.pointerBytes = 8
   g.plan.module.files = if srcFiles.len > 0: srcFiles else: @[filename]

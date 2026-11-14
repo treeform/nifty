@@ -2,7 +2,7 @@
 
 Nifty keeps one parser and proof checker. The C backend generates readable C
 directly from the checked AST. The native path lowers that AST into explicit
-control flow, storage, and typed IR, then emits ARM64 or AMD64 instructions.
+control flow, storage, and typed IR, then emits ARM64, AMD64, or WASM64 instructions.
 There is no generated C step when compiling a Nifty program natively.
 
 ## Build the toolchain
@@ -39,6 +39,7 @@ toolchain runtimes statically.
 ./nifty examples/sort.nifty --backend:amd64
 ./nifty examples/sort.nifty --backend:c
 ./nifty build examples/sort.nifty --backend:arm64 -o /tmp/sort
+./nifty build examples/growable.nifty --backend:wasm64 -o /tmp/growable.wasm
 ```
 
 The default backend matches the compiler's native architecture. `run` is the
@@ -49,6 +50,103 @@ Native builds use `--opt:speed` by default. Select `--opt:none` to inspect or
 execute the lowered IR without the shared optimization pipeline. The same
 selection applies to `--emit-ir`, `--emit-native`, and native resource reports.
 The C backend continues to generate directly from the checked source AST.
+
+## WebAssembly memory64
+
+`--backend:wasm64` selects actual 64-bit WebAssembly memory and table indexes.
+`--backend:wasm` is an alias, and `--emit-wasm` writes a module without running
+it. Default output names end in `.wasm`. Both `--opt:none` and `--opt:speed`
+use the same checked frontend, layouts, ownership cleanup, and shared IR as
+the native backends. The portable runtime supplies its own libm, so WASM skips
+the native host's platform-specific math substitutions.
+
+```sh
+./nifty build examples/growable.nifty --backend:wasm64
+wasmtime examples/growable.wasm
+node tools/wasm/run.mjs examples/growable.wasm
+./nifty run examples/growable.nifty --backend:wasm64
+./nifty report examples/growable.nifty --backend:wasm64
+```
+
+The `run` command uses Wasmtime, with `NIFTY_WASMTIME` selecting another path.
+The Node adapter is an alternative execution host. Both require an engine with
+memory64 support; validation covers the installed Node and Wasmtime engines.
+The adapters provide WASI I/O, exit, and clocks. Arithmetic, libm, containers,
+allocation, and cleanup execute inside the module. There is no JavaScript
+language evaluator, interpreter fallback, or source-to-C step for programs.
+
+This backend currently accepts exactly one thread instance. Multi-thread
+programs and channels are rejected rather than executed sequentially. Arbitrary
+native libraries, file access, and networking are not yet available. Supported
+extern symbols and precise scalar signatures are listed in
+`src/nifty/wasmexterns.nim`; unsupported bindings fail during compilation.
+WASI clocks use `0` for realtime and `1` for monotonic time, independently of
+the compiler host's clock constants.
+
+Every pointer, stored integer, and linear-memory address keeps its full 64-bit
+representation. The runtime starts with 16 MiB of memory and may grow up to
+2 GiB; this physical limit does not change the memory64 ABI. It reserves a
+4 MiB script stack, a 1 MiB runtime C stack, and a 1 MiB metadata region.
+Generated functions check their linear stack before reserving frames. Growable
+values use the same fallible allocation and recursive release helpers as native
+code. Output crosses WASI Preview 1 through a low-memory staging buffer, without
+truncating program pointers, and handles partial writes.
+
+The compiler embeds `src/nifty/assets/wasm64.bin`. Compiling a Nifty program
+requires no linker, Emscripten, or other compiler. Runtime source or ABI changes
+invalidate its fingerprint; developers regenerate it with:
+
+```sh
+nim r -d:niftyBuildWasmRuntime tools/gen_wasm_runtime.nim
+nim r tools/build.nim
+```
+
+Runtime regeneration requires memory64-capable Emscripten; `NIFTY_EMCC` selects
+its executable. The generator compiles only the reusable runtime, validates its
+exports and memory64/table64 declarations, and embeds a source fingerprint.
+The module writer preserves runtime indexes and appends generated IR functions
+and serialized descriptors. Publication is atomic, and source/output aliases
+are rejected. `compileToWasm` also exposes complete module bytes as a library API.
+
+```sh
+nim r tests/test_irwasm.nim
+nim r tests/test_wasm.nim ./nifty
+```
+
+The direct IR tests cover typed calls, edited IR, integer widths, multi-value
+returns, SIMD, bulk memory, and table64 calls. The end-to-end tests run supported
+source fixtures in both optimization modes on Node and Wasmtime, check exact
+raytracer reference pixels, exercise allocation failure and storage reuse, and
+prove an address above 4 GiB traps instead of wrapping to a low address.
+The large-arena fixture exercises actual linear-memory growth. Partial-write
+and zero-progress output tests validate the WASI staging boundary.
+
+The existing benchmark runner selects the WASI clock and verifies memory64
+output when asked to benchmark WASM:
+
+```sh
+python3 benchmarks/run.py --backend wasm64 --check --size 64 \
+  --samples 5 --warmups 1 --output benchmarks/output/wasm64
+```
+
+Add `--backend c --backend arm64 --backend amd64` to compare the available
+backends. Compilation, engine startup, and the timed render are reported
+separately; engine compilation and tiering can still affect measurements.
+
+Validation on the Apple M4 Pro with Node 26.3.1 and Wasmtime 49.0.0 passes
+484 WASM checks across both optimization modes. Eight corpus fixtures require
+threads/channels or unavailable native host APIs and are explicitly excluded
+in each mode. The native C/ARM64/AMD64 suite passes 783 checks, inspecting 152
+native executables; the Windows-specific fixture is skipped on this Mac.
+All 264 C golden/integration checks also pass, with memory sanitizers enabled.
+
+The 64x64 raytracer matches the independent reference exactly. Five measured
+processes after two warmups, ten frames per process, yield median render times
+of 0.467 ms for C, 0.504 ms for ARM64, 0.792 ms for AMD64 through Rosetta, and
+2.755 ms for WASM64 through Wasmtime. This establishes correctness and a WASM
+performance baseline; WASM does not yet match native throughput. Local raw
+measurements, compiler hashes, and the rendered image are retained in
+`benchmarks/output/wasm64-final/results.json` and `results.md`.
 
 Inspect the C reference and native IR for the same program:
 

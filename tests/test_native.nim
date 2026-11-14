@@ -166,6 +166,7 @@ proc main() =
         let built = run(compiler, arguments, isolated = target != "c")
         if mode == Reject:
           var actual = normalized(built.output)
+            .replace(expandFilename(path.parentDir) & DirSep, "")
             .replace(path.parentDir & DirSep, "")
           actual.removePrefix("nifty: ")
           if built.code notin [0, -1] and actual == expected:

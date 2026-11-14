@@ -12,6 +12,7 @@ type
   Loader = object
     dir: string              # imports resolve next to the importing file
     standardDirs: seq[string] # executable-relative distribution, then development
+    portableIo: bool         # WASI uses the portable write adapter on every host
     seen: HashSet[string]    # canonical paths already spliced
     stack: seq[string]       # canonical import chain, for cycle detection
     names: seq[string]       # display names matching the stack
@@ -37,8 +38,10 @@ proc standardLibraryDirs(): seq[string] =
 proc importPath(ld: Loader, name: string, line: int): string =
   let moduleName =
     if name == "_io_platform":
-      when defined(windows): "_io_windows"
-      else: "_io_posix"
+      if ld.portableIo: "_io_posix"
+      else:
+        when defined(windows): "_io_windows"
+        else: "_io_posix"
     else: name
   result = ld.dir / moduleName & ".nifty"
   if fileExists(result):
@@ -94,21 +97,24 @@ proc processImports(ld: var Loader, toks: seq[Token]): seq[Token] =
     i = j
   result.add toks[i .. ^1]
 
-proc loadTokens*(mainSrc, mainName, dir: string): seq[Token] =
+proc loadTokens*(mainSrc, mainName, dir: string,
+    portableIo = false): seq[Token] =
   ## Tokenize a whole program: the main source plus every import,
   ## spliced once each, in import order.
   srcFiles = @[mainName]
-  var ld = Loader(dir: dir, standardDirs: standardLibraryDirs())
+  var ld = Loader(dir: dir, standardDirs: standardLibraryDirs(),
+    portableIo: portableIo)
   var toks = tokenize(mainSrc, 0)
   ld.processImports(toks)
 
 
-proc loadStandardTokens*(name: string): seq[Token] =
+proc loadStandardTokens*(name: string, portableIo = false): seq[Token] =
   ## Loads an implicit support module without resetting user source locations.
   let directories = standardLibraryDirs()
   for directory in directories:
     if fileExists(directory / name & ".nifty"):
-      var ld = Loader(dir: directory, standardDirs: directories)
+      var ld = Loader(dir: directory, standardDirs: directories,
+        portableIo: portableIo)
       result = ld.spliceImport(name, 1)
       result.add(Token(kind: EofToken, line: 1))
       return
