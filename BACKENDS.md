@@ -121,6 +121,12 @@ Floating arithmetic retains its source order and precision, without fused
 multiply-add or reassociation. Floating records and SSA joins preserve their
 bits, including signed zero and NaN payloads.
 
+Static type sizes and alignment are checked before backend entry. Storage
+calculations that overflow produce diagnostics rather than saturated reports.
+Native IR storage descriptors use signed 32-bit byte counts, so layouts larger
+than 2,147,483,647 bytes are rejected with a target-limit diagnostic. The C
+backend can retain larger representable layouts.
+
 Standard `m.sqrt` and `m.sqrtf` declarations with their exact scalar signatures
 have a guarded hardware path. Integer bit classification accepts nonnegative
 numbers and negative zero; negative arguments and NaNs still call libm. Tests
@@ -208,6 +214,7 @@ nim r tests/tests.nim
 nim r tests/test_semantics.nim
 nim r tests/test_progress.nim
 nim r tests/test_arithmeticproofs.nim
+NIFTY_SANITIZE=1 nim r tests/test_copyrange.nim
 nim r tests/test_runtimefailures.nim
 nim r tests/test_backend_engine.nim
 nim r tests/test_nativecontainers.nim
