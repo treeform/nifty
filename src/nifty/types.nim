@@ -75,6 +75,7 @@ type
     rlo*, rhi*: int64 # proven value range, set by the checker for int exprs
     rnz*: bool        # proven nonzero, set by the checker for int exprs
     wrapOpt*: bool    # codegen: wrap this value into an optional
+    wrapSource*: Typ  # Original value type before optional coercion.
     unwrapOpt*: bool  # codegen: read .m_val (ident proven ok)
     isOptOk*: bool    # codegen: this FieldExpr reads the optional's ok flag
 

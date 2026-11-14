@@ -585,7 +585,7 @@ proc expression(g: var Lower, e: Expr): ValueId =
   g.line = e.line
   if e.wrapOpt:
     let saved = e.typ
-    e.typ = deOpt(saved)
+    e.typ = e.wrapSource
     e.wrapOpt = false
     let value = g.expression(e)
     e.typ = saved
