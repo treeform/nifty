@@ -35,6 +35,10 @@ func complete(x, y: float64): Pair =
   value.x = x
   value.y = y
   return value
+func capture(value: Pair): Pair =
+  return value
+func nested(x, y: float64): Pair =
+  return capture(complete(x, y))
 func partial(x: float64): Pair =
   var value: Pair
   value.x = x
@@ -57,7 +61,7 @@ extern "libc":
   proc unknown(value: float64): float64
 thread main() =
   var global: Pair
-  global = complete(2.0, 3.0)
+  global = nested(2.0, 3.0)
   mutate(global)
   echo global.x
   let maybe = optional(padded(9.0))
@@ -66,6 +70,7 @@ thread main() =
 """)
 let
   complete = module.routine("complete")
+  nested = module.routine("nested")
   partial = module.routine("partial")
   observed = module.routine("observed")
   padded = module.routine("padded")
@@ -80,6 +85,7 @@ doAssert optionalField
 doAssert complete.directOnly and not main.directOnly
 doAssert complete.count(ClearBytesOp) == 0
 doAssert complete.count(MoveBytesOp) == 1
+doAssert nested.count(MoveBytesOp) == 0
 doAssert complete.count(FieldAddressOp) >= 4
 doAssert partial.count(ClearBytesOp) == 1
 doAssert observed.count(ClearBytesOp) == 1

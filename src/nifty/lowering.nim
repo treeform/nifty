@@ -316,6 +316,7 @@ proc branch(g: var Lower, cond: ValueId, yes, no: int) =
 
 proc expression(g: var Lower, e: Expr): ValueId
 proc path(g: var Lower, e: Expr): ValueId
+proc assignExpression(g: var Lower, dest: ValueId, e: Expr, t: Typ)
 
 proc packed(g: var Lower, args: seq[Expr], host: var NativeHost): ValueId =
   ## Captures arguments in source order into a fixed storage frame.
@@ -423,8 +424,8 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
       g.store(g.fieldAddress(args, r.params[i].name, offsets[i]),
         g.path(a))
     else:
-      g.copy(g.fieldAddress(args, r.params[i].name, offsets[i]),
-        g.expression(a), r.params[i].typ)
+      g.assignExpression(g.fieldAddress(args, r.params[i].name, offsets[i]),
+        a, r.params[i].typ)
   let output = if r.ret.isNil: g.null
     elif int32(dest) >= 0: dest
     else: g.allocType(r.ret)
