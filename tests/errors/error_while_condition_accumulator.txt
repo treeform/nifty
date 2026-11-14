@@ -1,0 +1,1 @@
+error_while_condition_accumulator.nifty:8: cannot prove '+' does not overflow: int + 1; narrow the ranges or guard first

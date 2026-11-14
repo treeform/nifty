@@ -1104,9 +1104,11 @@ proc whileBound(c: Ctx, s: Stmt): int64 =
   for st in s.body:
     classify(st, true)
 
+  var conditionWrites: HashSet[string]
+  c.collectAssignedExpr(s.cond, conditionWrites)
   result = 0
   for v, cd in cands:
-    if cd.bad or not cd.top or cd.dir == 0:
+    if cd.bad or not cd.top or cd.dir == 0 or v in conditionWrites:
       continue
     var t: Typ = nil
     for i in countdown(c.scopes.len - 1, 0):
@@ -2649,6 +2651,12 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     if c.expectVal(s.cond).kind != BoolType:
       err(s.cond.line, "condition must be a bool")
     dec c.mutBan
+    var conditionWrites: HashSet[string]
+    c.collectAssignedExpr(s.cond, conditionWrites)
+    var widenCandidates: HashSet[string]
+    for name in assigned:
+      if name notin conditionWrites:
+        widenCandidates.incl name
     # The termination proof: strict induction progress, or an explicit
     # max N (which bounds the loop by construction - it also stops after
     # N iterations). Runs after the condition is checked (the halving
@@ -2661,9 +2669,9 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         "ranged variable makes strict progress every iteration; add " &
         "'max N' to bound it (the loop then also stops after N iterations)")
     s.tripBound = bound
-    let widenedIn = c.accumWiden(s, assigned, fullFact(), entry,
+    let widenedIn = c.accumWiden(s, widenCandidates, fullFact(), entry,
       max(0'i64, bound - 1))
-    let widenedOut = c.accumWiden(s, assigned, fullFact(), entry, bound)
+    let widenedOut = c.accumWiden(s, widenCandidates, fullFact(), entry, bound)
     for n, f in widenedIn:
       c.facts[n] = f
     var dropped = c.facts
