@@ -29,6 +29,124 @@ type
     frameBytes*: seq[int]
     wrapperFrameBytes*: int
 
+proc memorySnapshot(code: var XAssembler, bytes: int, baseOffset = 0) =
+  ## Loads all source bytes before stores, including overlapping end chunks.
+  # R8/R9, RAX/RCX/RDX and XMM0/XMM1 are excluded from allocation.
+  doAssert bytes in 1 .. 48
+  let vectors = min(bytes div 16, 2)
+  for i in 0 ..< vectors:
+    code.vectorMemory(i, R9, baseOffset + i * 16, false)
+  let
+    offset = vectors * 16
+    remaining = bytes - offset
+    width = if remaining >= 8: 8 elif remaining >= 4: 4
+      elif remaining >= 2: 2 else: 1
+  if remaining > 0:
+    code.loadSized(Rax, R9, baseOffset + offset, width)
+    if remaining > width:
+      code.loadSized(Rdx, R9, baseOffset + bytes - width, width)
+  for i in 0 ..< vectors:
+    code.vectorMemory(i, R8, baseOffset + i * 16, true)
+  if remaining > 0:
+    code.storeSized(Rax, R8, baseOffset + offset, width)
+    if remaining > width:
+      code.storeSized(Rdx, R8, baseOffset + bytes - width, width)
+
+proc clearMemory(code: var XAssembler, bytes: int) =
+  ## Clears exact bounds with one vector zero and a narrow remainder.
+  if bytes >= 16:
+    code.vectorBinary(0x57, 0, 0)
+  var remaining = bytes
+  if remaining > 128:
+    let repeat = code.label()
+    code.loadImmediate(Rcx, int64(remaining div 32))
+    code.place(repeat)
+    code.vectorMemory(0, R8, 0, true)
+    code.vectorMemory(0, R8, 16, true)
+    code.addImmediate(R8, 32)
+    code.addImmediate(Rcx, -1)
+    code.jumpIf(NotEqual, repeat)
+    remaining = remaining mod 32
+  var offset = 0
+  while remaining >= 16:
+    code.vectorMemory(0, R8, offset, true)
+    offset += 16
+    remaining -= 16
+  if remaining > 0:
+    code.loadImmediate(Rax, 0)
+    for width in [8, 4, 2, 1]:
+      if remaining >= width:
+        code.storeSized(Rax, R8, offset, width)
+        offset += width
+        remaining -= width
+
+proc moveMemory(code: var XAssembler, bytes: int) =
+  ## Moves exact bounds with snapshots or directional 32-byte iterations.
+  let finished = code.label()
+  code.compare(R8, R9)
+  code.jumpIf(Equal, finished)
+  if bytes <= 48:
+    code.memorySnapshot(bytes)
+  elif bytes <= 128:
+    let
+      backward = code.label()
+      tail = bytes mod 32
+      head = bytes - tail
+    code.jumpIf(Above, backward)
+    for offset in countup(0, head - 32, 32):
+      code.vectorMemory(0, R9, offset, false)
+      code.vectorMemory(1, R9, offset + 16, false)
+      code.vectorMemory(0, R8, offset, true)
+      code.vectorMemory(1, R8, offset + 16, true)
+    if tail > 0:
+      code.memorySnapshot(tail, head)
+    code.jump(finished)
+    code.place(backward)
+    if tail > 0:
+      code.memorySnapshot(tail, head)
+    for offset in countdown(head - 32, 0, 32):
+      code.vectorMemory(0, R9, offset, false)
+      code.vectorMemory(1, R9, offset + 16, false)
+      code.vectorMemory(0, R8, offset, true)
+      code.vectorMemory(1, R8, offset + 16, true)
+  else:
+    let
+      backward = code.label()
+      forward = code.label()
+      repeat = code.label()
+      tail = bytes mod 32
+    code.jumpIf(Above, backward)
+    code.loadImmediate(Rcx, int64(bytes div 32))
+    code.place(forward)
+    code.vectorMemory(0, R9, 0, false)
+    code.vectorMemory(1, R9, 16, false)
+    code.vectorMemory(0, R8, 0, true)
+    code.vectorMemory(1, R8, 16, true)
+    code.addImmediate(R8, 32)
+    code.addImmediate(R9, 32)
+    code.addImmediate(Rcx, -1)
+    code.jumpIf(NotEqual, forward)
+    if tail > 0:
+      code.memorySnapshot(tail)
+    code.jump(finished)
+    code.place(backward)
+    code.loadImmediate(Rcx, int64(bytes - tail))
+    code.add(R8, Rcx)
+    code.add(R9, Rcx)
+    if tail > 0:
+      code.memorySnapshot(tail)
+    code.loadImmediate(Rcx, int64(bytes div 32))
+    code.place(repeat)
+    code.addImmediate(R8, -32)
+    code.addImmediate(R9, -32)
+    code.vectorMemory(0, R9, 0, false)
+    code.vectorMemory(1, R9, 16, false)
+    code.vectorMemory(0, R8, 0, true)
+    code.vectorMemory(1, R8, 16, true)
+    code.addImmediate(Rcx, -1)
+    code.jumpIf(NotEqual, repeat)
+  code.place(finished)
+
 proc copyFloat(code: var XAssembler, destination, source: int,
     single: bool) =
   ## Copies scalar payloads without depending on dead upper destination bits.
@@ -719,42 +837,15 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
             code.loadImmediate(Rcx, item.offset)
             code.add(Rax, Rcx)
         of ir.MoveBytesOp, ir.ClearBytesOp:
-          if item.byteCount == 0:
+          if item.byteCount == 0 or
+              (item.op == ir.MoveBytesOp and int32(operand(0)) == int32(operand(1))):
             continue
           code.integer(operand(0), R8)
-          code.loadImmediate(Rcx, int64(item.byteCount))
-          let
-            forward = code.label()
-            backward = code.label()
-            finished = code.label()
           if item.op == ir.MoveBytesOp:
             code.integer(operand(1), R9)
-            code.compare(R8, R9)
-            code.jumpIf(Above, backward)
+            code.moveMemory(int(item.byteCount))
           else:
-            code.loadImmediate(Rax, 0)
-          code.place(forward)
-          if item.op == ir.MoveBytesOp:
-            code.loadSized(Rax, R9, 0, 1)
-            code.addImmediate(R9, 1)
-          code.storeSized(Rax, R8, 0, 1)
-          code.addImmediate(R8, 1)
-          code.addImmediate(Rcx, -1)
-          code.jumpIf(NotEqual, forward)
-          code.jump(finished)
-          code.place(backward)
-          if item.op == ir.MoveBytesOp:
-            code.add(R8, Rcx)
-            code.add(R9, Rcx)
-            let repeat = code.label()
-            code.place(repeat)
-            code.addImmediate(R8, -1)
-            code.addImmediate(R9, -1)
-            code.loadSized(Rax, R9, 0, 1)
-            code.storeSized(Rax, R8, 0, 1)
-            code.addImmediate(Rcx, -1)
-            code.jumpIf(NotEqual, repeat)
-          code.place(finished)
+            code.clearMemory(int(item.byteCount))
           continue
         of ir.LoadOp, ir.StoreOp:
           var

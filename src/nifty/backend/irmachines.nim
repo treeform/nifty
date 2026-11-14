@@ -75,6 +75,136 @@ proc comparisonCondition(comparison: ir.IrComparison,
   of ir.GreaterEqualComparison:
     if unsigned: CarrySetCondition else: GreaterEqualCondition
 
+proc memorySnapshot(code: var machine.Assembler, bytes: int,
+    firstFloat, secondFloat: int, baseOffset = 0) =
+  ## Loads every source byte before storing, preserving arbitrary overlap.
+  # X12..X17 and the selected float pair are excluded from allocation.
+  doAssert bytes in 1 .. 48
+  let vectors = min(bytes div 16, 2)
+  if vectors == 2:
+    code.vectorPair(firstFloat, secondFloat, X13, baseOffset, false)
+  elif vectors == 1:
+    code.vectorMemory(firstFloat, X13, baseOffset, false)
+  var
+    offset = baseOffset + vectors * 16
+    parts: seq[tuple[offset, width: int, register: machine.Register]]
+    next = 0
+  const Registers = [X14, X15, X16, X17]
+  if bytes + baseOffset - offset == 16:
+    code.loadPair(X14, X15, X13, offset)
+    parts.add((offset, 16, X14))
+    offset += 16
+  for width in [8, 4, 2, 1]:
+    if bytes + baseOffset - offset >= width:
+      let register = Registers[next]
+      inc next
+      case width
+      of 8: code.loadDouble(register, X13, offset)
+      of 4: code.loadWord(register, X13, offset)
+      of 2: code.loadHalf(register, X13, offset)
+      else: code.loadByte(register, X13, offset)
+      parts.add((offset, width, register))
+      offset += width
+  if vectors == 2:
+    code.vectorPair(firstFloat, secondFloat, X12, baseOffset, true)
+  elif vectors == 1:
+    code.vectorMemory(firstFloat, X12, baseOffset, true)
+  for part in parts:
+    case part.width
+    of 16: code.storePair(X14, X15, X12, part.offset)
+    of 8: code.storeDouble(part.register, X12, part.offset)
+    of 4: code.storeWord(part.register, X12, part.offset)
+    of 2: code.storeHalf(part.register, X12, part.offset)
+    else: code.storeByte(part.register, X12, part.offset)
+
+proc clearMemory(code: var machine.Assembler, bytes: int) =
+  ## Clears exact bounds using paired words and a narrow final remainder.
+  var remaining = bytes
+  if remaining > 128:
+    let repeat = code.label()
+    code.loadImmediate(Word64, X14, int64(remaining div 32))
+    code.place(repeat)
+    code.storePair(ZeroRegister, ZeroRegister, X12, 0)
+    code.storePair(ZeroRegister, ZeroRegister, X12, 16)
+    code.addImmediate(Word64, X12, X12, 32)
+    code.subtractImmediate(Word64, X14, X14, 1)
+    code.branchIfNotZero(Word64, X14, repeat)
+    remaining = remaining mod 32
+  var offset = 0
+  while remaining >= 16:
+    code.storePair(ZeroRegister, ZeroRegister, X12, offset)
+    offset += 16
+    remaining -= 16
+  for width in [8, 4, 2, 1]:
+    if remaining >= width:
+      case width
+      of 8: code.storeDouble(ZeroRegister, X12, offset)
+      of 4: code.storeWord(ZeroRegister, X12, offset)
+      of 2: code.storeHalf(ZeroRegister, X12, offset)
+      else: code.storeByte(ZeroRegister, X12, offset)
+      offset += width
+      remaining -= width
+
+proc moveMemory(code: var machine.Assembler, bytes: int,
+    firstFloat, secondFloat: int) =
+  ## Moves exact bounds with snapshots or directional 32-byte iterations.
+  let finished = code.label()
+  code.compareRegister(Word64, X12, X13)
+  code.branchIf(EqualCondition, finished)
+  if bytes <= 48:
+    code.memorySnapshot(bytes, firstFloat, secondFloat)
+  elif bytes <= 128:
+    let
+      backward = code.label()
+      tail = bytes mod 32
+      head = bytes - tail
+    code.branchIf(UnsignedGreaterCondition, backward)
+    for offset in countup(0, head - 32, 32):
+      code.vectorPair(firstFloat, secondFloat, X13, offset, false)
+      code.vectorPair(firstFloat, secondFloat, X12, offset, true)
+    if tail > 0:
+      code.memorySnapshot(tail, firstFloat, secondFloat, head)
+    code.branch(finished)
+    code.place(backward)
+    if tail > 0:
+      code.memorySnapshot(tail, firstFloat, secondFloat, head)
+    for offset in countdown(head - 32, 0, 32):
+      code.vectorPair(firstFloat, secondFloat, X13, offset, false)
+      code.vectorPair(firstFloat, secondFloat, X12, offset, true)
+  else:
+    let
+      backward = code.label()
+      forward = code.label()
+      repeat = code.label()
+      tail = bytes mod 32
+    code.branchIf(UnsignedGreaterCondition, backward)
+    code.loadImmediate(Word64, X14, int64(bytes div 32))
+    code.place(forward)
+    code.vectorPair(firstFloat, secondFloat, X13, 0, false)
+    code.vectorPair(firstFloat, secondFloat, X12, 0, true)
+    code.addImmediate(Word64, X12, X12, 32)
+    code.addImmediate(Word64, X13, X13, 32)
+    code.subtractImmediate(Word64, X14, X14, 1)
+    code.branchIfNotZero(Word64, X14, forward)
+    if tail > 0:
+      code.memorySnapshot(tail, firstFloat, secondFloat)
+    code.branch(finished)
+    code.place(backward)
+    code.loadImmediate(Word64, X14, int64(bytes - tail))
+    code.addRegister(Word64, X12, X12, X14)
+    code.addRegister(Word64, X13, X13, X14)
+    if tail > 0:
+      code.memorySnapshot(tail, firstFloat, secondFloat)
+    code.loadImmediate(Word64, X14, int64(bytes div 32))
+    code.place(repeat)
+    code.subtractImmediate(Word64, X12, X12, 32)
+    code.subtractImmediate(Word64, X13, X13, 32)
+    code.vectorPair(firstFloat, secondFloat, X13, 0, false)
+    code.vectorPair(firstFloat, secondFloat, X12, 0, true)
+    code.subtractImmediate(Word64, X14, X14, 1)
+    code.branchIfNotZero(Word64, X14, repeat)
+  code.place(finished)
+
 proc emitArm64Ir*(module: ir.IrModule,
     maxBytes: int, pairedSaves = DefaultArmPairedSaves,
     floatColors = DefaultIrFloatColors,
@@ -626,42 +756,15 @@ proc emitArm64Ir*(module: ir.IrModule,
             code.loadImmediate(Word64, X13, item.offset)
             code.addRegister(Word64, integerResult, integerResult, X13)
         of ir.MoveBytesOp, ir.ClearBytesOp:
-          if item.byteCount == 0:
+          if item.byteCount == 0 or
+              (item.op == ir.MoveBytesOp and int32(operand(0)) == int32(operand(1))):
             continue
           code.integer(operand(0), X12)
-          code.loadImmediate(Word64, X14, int64(item.byteCount))
-          let
-            forward = code.label()
-            backward = code.label()
-            finished = code.label()
           if item.op == ir.MoveBytesOp:
             code.integer(operand(1), X13)
-            code.compareRegister(Word64, X12, X13)
-            code.branchIf(UnsignedGreaterCondition, backward)
-          code.place(forward)
-          if item.op == ir.MoveBytesOp:
-            code.loadByte(X15, X13)
-            code.storeByte(X15, X12)
-            code.addImmediate(Word64, X13, X13, 1)
+            code.moveMemory(int(item.byteCount), scratchFloat, scratchFloat2)
           else:
-            code.storeByte(ZeroRegister, X12)
-          code.addImmediate(Word64, X12, X12, 1)
-          code.subtractImmediate(Word64, X14, X14, 1)
-          code.branchIfNotZero(Word64, X14, forward)
-          code.branch(finished)
-          code.place(backward)
-          if item.op == ir.MoveBytesOp:
-            code.addRegister(Word64, X12, X12, X14)
-            code.addRegister(Word64, X13, X13, X14)
-            let repeat = code.label()
-            code.place(repeat)
-            code.subtractImmediate(Word64, X12, X12, 1)
-            code.subtractImmediate(Word64, X13, X13, 1)
-            code.loadByte(X15, X13)
-            code.storeByte(X15, X12)
-            code.subtractImmediate(Word64, X14, X14, 1)
-            code.branchIfNotZero(Word64, X14, repeat)
-          code.place(finished)
+            code.clearMemory(int(item.byteCount))
           continue
         of ir.LoadOp, ir.StoreOp:
           var base = code.integerOperand(operand(0), X13)

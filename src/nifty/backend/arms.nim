@@ -482,6 +482,27 @@ proc loadFloatPair*(assembler: var Assembler, first, second: int,
       (uint32(second) shl 10) or (base.number shl 5) or uint32(first)
   )
 
+proc vectorMemory*(assembler: var Assembler, register: int,
+    base: Register, offset: int, store: bool) {.raises: [BackendError].} =
+  ## Transfers 128 bits without requiring an aligned base address.
+  if register notin 0 .. 31:
+    fail("assembler vector register is out of range")
+  let opcode = if store: 0x3D800000'u32 else: 0x3DC00000'u32
+  assembler.emit(opcode or (scaledOffset(offset, 16) shl 10) or
+    (base.number shl 5) or uint32(register))
+
+proc vectorPair*(assembler: var Assembler, first, second: int,
+    base: Register, offset: int, store: bool) {.raises: [BackendError].} =
+  ## Transfers two unaligned 128-bit vectors without base writeback.
+  if first notin 0 .. 31 or second notin 0 .. 31 or
+      first == second or offset mod 16 != 0 or
+      offset div 16 notin -64 .. 63:
+    fail("assembler vector pair operand is out of range")
+  let opcode = if store: 0xAD000000'u32 else: 0xAD400000'u32
+  assembler.emit(opcode or
+    ((uint32(offset div 16) and 0x7F'u32) shl 15) or
+    (uint32(second) shl 10) or (base.number shl 5) or uint32(first))
+
 proc branch*(assembler: var Assembler, target: Label) {.raises: [].} =
   ## Jumps unconditionally to a label.
   assembler.fixups.add(
