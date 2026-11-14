@@ -1,11 +1,20 @@
 ## Checks guarded libm specialization and exact exceptional fallbacks.
+import std/dynlib
 import nifty/[nativeplans, nativemaths]
 import nifty/[parser, loader, checker, lowering]
 import nifty/backend/[irs, irchecks, engine, context, memories]
 import nifty/backend/iroptimizations
 
-proc sqrtLib(value: cdouble): cdouble {.importc: "sqrt", header: "<math.h>".}
-proc sqrtfLib(value: cfloat): cfloat {.importc: "sqrtf", header: "<math.h>".}
+type
+  Sqrt64 = proc(value: cdouble): cdouble {.cdecl, raises: [].}
+  Sqrt32 = proc(value: cfloat): cfloat {.cdecl, raises: [].}
+
+# Resolve libm at runtime so C optimizers cannot fold across rounding changes.
+let
+  mathLibrary = loadLib(when defined(macosx): "libm.dylib" else: "libm.so.6")
+  sqrtLib = cast[Sqrt64](symAddr(mathLibrary, "sqrt"))
+  sqrtfLib = cast[Sqrt32](symAddr(mathLibrary, "sqrtf"))
+doAssert mathLibrary != nil and sqrtLib != nil and sqrtfLib != nil
 proc clearExceptions(exceptions: cint): cint
   {.importc: "feclearexcept", header: "<fenv.h>".}
 proc testExceptions(exceptions: cint): cint
@@ -159,7 +168,9 @@ for mode in [nearest, downward, upward, towardZero]:
     let expected = sqrtLib(input)
     specialized.module.invoke(input.addr, output.addr,
       cast[pointer](observedSqrt), exceptions)
-    doAssert cast[uint64](output) == cast[uint64](expected)
+    doAssert cast[uint64](output) == cast[uint64](expected),
+      "mode=" & $mode & " input=" & $value & " actual=" &
+      $cast[uint64](output) & " expected=" & $cast[uint64](expected)
 doAssert setRounding(originalRounding) == 0
 
 let source = parse(loadTokens("""
@@ -189,3 +200,4 @@ for kind in [Float32Type, Float64Type]:
     symbol = if kind == Float64Type: "sqrtf" else: "sqrt")
   doAssert mismatched.specializeNativeMaths() == 0
 echo "Guarded native libm square roots passed"
+unloadLib(mathLibrary)
