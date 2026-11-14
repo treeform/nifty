@@ -1,0 +1,1 @@
+error_accum_saturated_delta.nifty:4: cannot prove '-' does not overflow: int - 2; narrow the ranges or guard first

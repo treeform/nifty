@@ -106,11 +106,12 @@ proc satMul(a, b: int64): tuple[v: int64, ov: bool] =
 proc satNeg(a: int64): tuple[v: int64, ov: bool] =
   if a == IntLow: (IntHigh, true) else: (-a, false)
 
-proc maxMag(f: Fact): int64 =
-  ## Largest absolute value in the interval, saturated.
-  let (nl, ovl) = satNeg(f.lo)
-  let m = if ovl: IntHigh else: nl
-  max(m, max(f.hi, 0'i64))
+proc maxMag(f: Fact): uint64 =
+  ## Largest absolute value in the interval, including |int64.low|.
+  if f.lo == IntLow:
+    uint64(IntHigh) + 1'u64
+  else:
+    uint64(max(-f.lo, max(f.hi, 0'i64)))
 
 proc addF(a, b: Fact): tuple[f: Fact, ov: bool] =
   let l = satAdd(a.lo, b.lo)
@@ -149,13 +150,15 @@ proc divF(a, b: Fact): Fact =
   else:
     # Nonzero but sign-unknown divisor: |result| <= |dividend|.
     let m = maxMag(a)
-    let (nm, _) = satNeg(m)
-    Fact(lo: nm, hi: m)
+    if m > uint64(IntHigh):
+      Fact(lo: IntLow, hi: IntHigh)
+    else:
+      Fact(lo: -int64(m), hi: int64(m))
 
 proc modF(a, b: Fact): Fact =
   ## Divisor proven nonzero; |result| < |divisor| and sign follows dividend.
   let m = maxMag(b)
-  let bound = if m == 0: 0'i64 else: m - 1
+  let bound = if m == 0: 0'i64 else: int64(m - 1'u64)
   var lo = if a.lo >= 0: 0'i64 else: -bound
   var hi = bound
   if a.lo >= 0:
@@ -387,7 +390,8 @@ proc tryConstEval(c: Ctx, e: Expr): tuple[known: bool, val: int64] =
       (false, 0'i64)
   of NegExpr:
     let r = c.tryConstEval(e.kids[0])
-    (r.known, -r.val)
+    let negated = satNeg(r.val)
+    (r.known and not negated.ov, negated.v)
   of BinExpr:
     let a = c.tryConstEval(e.kids[0])
     let b = c.tryConstEval(e.kids[1])
@@ -395,13 +399,25 @@ proc tryConstEval(c: Ctx, e: Expr): tuple[known: bool, val: int64] =
       (false, 0'i64)
     else:
       case e.sval
-      of "+": (true, a.val + b.val)
-      of "-": (true, a.val - b.val)
-      of "*": (true, a.val * b.val)
+      of "+":
+        let sum = satAdd(a.val, b.val)
+        (not sum.ov, sum.v)
+      of "-":
+        let difference = satSub(a.val, b.val)
+        (not difference.ov, difference.v)
+      of "*":
+        let product = satMul(a.val, b.val)
+        (not product.ov, product.v)
       of "/":
-        if b.val == 0: (false, 0'i64) else: (true, a.val div b.val)
+        if b.val == 0 or (a.val == IntLow and b.val == -1):
+          (false, 0'i64)
+        else:
+          (true, a.val div b.val)
       of "%":
-        if b.val == 0: (false, 0'i64) else: (true, a.val mod b.val)
+        if b.val == 0 or (a.val == IntLow and b.val == -1):
+          (false, 0'i64)
+        else:
+          (true, a.val mod b.val)
       else: (false, 0'i64)
   else:
     (false, 0'i64)
@@ -896,6 +912,8 @@ proc accumWiden(c: Ctx, s: Stmt, assigned: HashSet[string],
     # Per-iteration delta: each site runs at most once per iteration.
     var dLo = 0'i64
     var dHi = 0'i64
+    var dLoOverflow = false
+    var dHiOverflow = false
     var good = true
     for site in sites:
       let r = c.declFact(site.e, s.name, loopFact)
@@ -912,17 +930,27 @@ proc accumWiden(c: Ctx, s: Stmt, assigned: HashSet[string],
           break
         lo = nl.v
         hi = nh.v
-      dLo = satAdd(dLo, min(0'i64, lo)).v
-      dHi = satAdd(dHi, max(0'i64, hi)).v
+      let
+        lowerStep = satAdd(dLo, min(0'i64, lo))
+        upperStep = satAdd(dHi, max(0'i64, hi))
+      dLoOverflow = dLoOverflow or lowerStep.ov
+      dHiOverflow = dHiOverflow or upperStep.ov
+      dLo = lowerStep.v
+      dHi = upperStep.v
     if not good:
       continue
     # Saturation only widens the interval, which stays sound; the declared
     # range is an invariant, so the intersection is sound and tighter.
     let v0 = entry.getOrDefault(v, c.declFactByName(v))
     let dt = typeFact(declTyp)
-    result[v] = Fact(
-      lo: max(satAdd(v0.lo, satMul(trips, dLo).v).v, dt.lo),
-      hi: min(satAdd(v0.hi, satMul(trips, dHi).v).v, dt.hi))
+    let
+      lowerDelta = satMul(trips, dLo)
+      upperDelta = satMul(trips, dHi)
+      lower = if (trips > 0 and dLoOverflow) or lowerDelta.ov: IntLow
+        else: satAdd(v0.lo, lowerDelta.v).v
+      upper = if (trips > 0 and dHiOverflow) or upperDelta.ov: IntHigh
+        else: satAdd(v0.hi, upperDelta.v).v
+    result[v] = Fact(lo: max(lower, dt.lo), hi: min(upper, dt.hi))
 
 ## Termination Proof
 
@@ -1021,7 +1049,11 @@ proc whileBound(c: Ctx, s: Stmt): int64 =
     case cd.dir
     of 1, -1:
       if t.rhi < IntHigh and t.rlo > IntLow:
-        bound = satSub(t.rhi, t.rlo).v div cd.minStep + 1
+        let span = satSub(t.rhi, t.rlo)
+        if not span.ov:
+          let count = satAdd(span.v div cd.minStep, 1)
+          if not count.ov:
+            bound = count.v
     else:
       if c.condZeroExit(s.cond, v):
         bound = 64 # |v| at least halves every pass; int64 is 64 bits
@@ -1702,7 +1734,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             alf = c.curFact(a.sval & ".len")
           addLo = alf.lo
           addHi = alf.hi
-        if satAdd(lf.hi, addHi).v > bt.len:
+        let total = satAdd(lf.hi, addHi)
+        if total.ov or total.v > bt.len:
           err(e.line, "cannot prove '" & e.kids[0].sval & "' has room for " &
             "up to " & $addHi & " more bytes (length is up to " & $lf.hi &
             " of " & $bt.len & "); test .len first")
@@ -2539,15 +2572,29 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
           "int64.max; use ..< or a ranged bound")
     else:
       iHi = satSub(iHi, 1).v
-    s.tripBound = max(0'i64, satAdd(satSub(iHi, lof.lo).v, 1).v)
+    let
+      span = satSub(iHi, lof.lo)
+      count = satAdd(span.v, 1)
+      finiteTrips = not span.ov and not count.ov
+    s.tripBound =
+      if span.ov and iHi < lof.lo: 0'i64
+      elif finiteTrips: max(0'i64, count.v)
+      else: IntHigh
     let loopFact = Fact(lo: lof.lo, hi: iHi)
     var assigned: HashSet[string]
     c.collectAssigned(s.body, assigned)
     # Simple accumulators keep a widened fact instead of losing everything.
-    let widenedIn = c.accumWiden(s, assigned, loopFact, c.facts,
-      max(0'i64, s.tripBound - 1))
-    let widenedOut = c.accumWiden(s, assigned, loopFact, c.facts,
-      s.tripBound)
+    let widenedIn =
+      if finiteTrips:
+        c.accumWiden(s, assigned, loopFact, c.facts,
+          max(0'i64, s.tripBound - 1))
+      else:
+        initTable[string, Fact]()
+    let widenedOut =
+      if finiteTrips:
+        c.accumWiden(s, assigned, loopFact, c.facts, s.tripBound)
+      else:
+        initTable[string, Fact]()
     for n in assigned:
       c.delFacts n
     var dropped = c.facts

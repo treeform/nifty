@@ -1,0 +1,6 @@
+thread main() =
+  let smallest = -9223372036854775807 - 1
+  let largest = 9223372036854775807
+  echo largest % smallest
+  echo (smallest % largest) + 1
+  echo ((-largest) % smallest) - 1

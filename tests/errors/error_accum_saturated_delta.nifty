@@ -1,0 +1,5 @@
+thread main() =
+  var total = 9223372036854775807
+  for i in 0 ..< 9223372036854775807:
+    total = total - 2
+  echo total
