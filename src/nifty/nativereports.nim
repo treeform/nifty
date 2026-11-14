@@ -152,6 +152,8 @@ proc nativeReport*(plan: NativePlan, image: NativeImage,
       " bytes (initial contents; not additional runtime globals)"]
   lines.add("  read-only global payload: " & $readonlyBytes & " bytes")
   let owners = ownerLines(sourceModule)
+  if not sourceModule.isNil and sourceModule.semantics.channelProgress.len > 0:
+    lines.add("channels: " & sourceModule.semantics.channelProgress)
   if owners.len > 0:
     lines.add("")
     lines.add("heap (runtime-sized; separate from static storage):")

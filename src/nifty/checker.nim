@@ -12,7 +12,7 @@
 ## parameters require an exclusive borrow before facts can attach.
 
 import std/[algorithm, strutils, tables, sets]
-import common, lexer, types, parser, semantics
+import common, lexer, types, parser, semantics, progress
 
 type
   Fact = object
@@ -3701,5 +3701,7 @@ proc check*(m: Module) =
         us.add u
       us.sort()
       lockReport.add LockProof(name: gd.name, guards: guards, users: us)
+  let channelProgress = checkProgress(m)
   prepareSemantics(m)
   m.semantics.locks = lockReport
+  m.semantics.channelProgress = channelProgress

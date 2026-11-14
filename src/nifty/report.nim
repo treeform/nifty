@@ -306,6 +306,9 @@ proc buildReport*(m: Module, src: string): string =
   lines.add totalLine
 
   let owners = ownerLines(m)
+  if m.semantics.channelProgress.len > 0:
+    lines.add ""
+    lines.add "channels: " & m.semantics.channelProgress
   if owners.len > 0:
     lines.add ""
     lines.add "heap (runtime-sized; separate from static storage):"

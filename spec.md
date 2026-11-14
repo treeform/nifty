@@ -713,11 +713,23 @@ static rules keep the story provable:
   closes the lock/channel deadlock the same way declaration order
   closes the lock/lock one.
 
-What remains honest: waiting time is not bounded (a channel whose
-peer never delivers is a quiet program, not a trap — the same
-category as a socket peer that never writes), and channel-only cycles
-(A waits on a channel B fills only after waiting on A's) are not yet
-excluded statically.
+The checker also explores all channel interleavings for closed protocols
+whose communication order is independent of data. It models queue capacity,
+counted threads, finite constant-count loops, procedure calls, and repeating
+thread loops. A reachable state with unfinished threads blocked on empty or
+full channels is a compile error. This catches receive-before-send cycles,
+send cycles that fill their buffers, and mismatched send/receive counts.
+
+Data-dependent communication, foreign calls, and analyses exceeding the
+compiler's state or trace limits are reported as `not proven`. Acceptance
+in those cases does not imply channel progress. Reports on every backend
+state the result; even a completed protocol analysis assumes runnable
+threads eventually execute and establishes no wall-clock deadline.
+
+Foreign routines have unknown blocking behavior. Calling one while a Nifty
+lock is held, including through a helper routine, is rejected. Move the
+foreign call outside the lock and copy the required state while protected.
+This restriction does not make allocator or output latency bounded.
 
 ## Evaluation order
 

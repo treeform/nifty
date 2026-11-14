@@ -51,6 +51,7 @@ type
     globalDrops*: seq[BindingId]
     usesHeap*: bool
     locks*: seq[LockProof]
+    channelProgress*: string
 
   ExprKind* = enum
     IntExpr, FloatExpr, BoolExpr, StrExpr, IdentExpr, BinExpr, NotExpr, NegExpr, IndexExpr, CallExpr,

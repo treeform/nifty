@@ -204,6 +204,7 @@ POSIX calls and Darwin socket structures are not emulated.
 ```sh
 nim r tests/tests.nim
 nim r tests/test_semantics.nim
+nim r tests/test_progress.nim
 nim r tests/test_backend_engine.nim
 nim r tests/test_nativecontainers.nim
 nim r tests/test_nativeruntime.nim

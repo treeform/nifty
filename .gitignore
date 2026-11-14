@@ -11,6 +11,7 @@
 /tests/test_memoryfiles
 /tests/test_memory
 /tests/test_semantics
+/tests/test_progress
 /tests/tests
 /tests/nifty_t
 /nimcache/
