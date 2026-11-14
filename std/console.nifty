@@ -1,0 +1,11 @@
+import _console
+
+# A write call is atomic with other console writes and complete echo lines.
+proc write(text: string): bool =
+  consoleLock()
+  if consoleFlush(consoleStream()) != 0:
+    consoleUnlock()
+    return false
+  let written = consoleWrite(text)
+  consoleUnlock()
+  return written

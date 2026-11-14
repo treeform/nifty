@@ -1,0 +1,10 @@
+thread main() =
+  var text: string
+  discard text.add("keep")
+  let capacity = text.cap
+  echo text.reserve(3000000000)
+  echo text.cap == capacity
+  echo text.len
+  echo text
+  echo text.add("!")
+  echo text

@@ -113,9 +113,9 @@ def parseOutput(output, size, repeat, expected):
   return parsed
 
 
-def configuredSource(source, size, repeat):
+def configuredSource(source, size, repeat, backend=None):
   """Substitute exactly one occurrence of each build configuration constant."""
-  for name, value in (("Size", size), ("Repetitions", repeat), ("ClockId", time.CLOCK_MONOTONIC)):
+  for name, value in (("Size", size), ("Repetitions", repeat), ("ClockId", 1 if backend == "wasm64" else time.CLOCK_MONOTONIC)):
     source, count = re.subn(rf"(?m)^(const {name} = )[0-9]+$", lambda match: match[1] + str(value), source)
     if count != 1:
       raise BenchmarkError(f"Expected unique constant {name}")
@@ -129,7 +129,7 @@ def buildBackend(backend, options, env):
   """Compile deterministic source snapshots once and preserve diagnostics."""
   directory = options.output / "build" / f"n{options.size}-r{options.repeat}" / backend
   directory.mkdir(parents=True, exist_ok=True)
-  executable = directory / "snappy"
+  executable = directory / ("snappy.wasm" if backend == "wasm64" else "snappy")
   executable.unlink(missing_ok=True)
   assembly = None
   provenance = None
@@ -155,18 +155,18 @@ def buildBackend(backend, options, env):
     for name, data in options.library_files.items():
       (directory / "lib" / name).write_bytes(data)
     source = directory / "snappy.nifty"
-    source.write_bytes(configuredSource(options.source_text, options.size, options.repeat).encode("utf-8"))
+    source.write_bytes(configuredSource(options.source_text, options.size, options.repeat, backend).encode("utf-8"))
     command = [str(options.compiler), "build", str(source), f"--backend:{backend}", f"--opt:{options.opt}", "-o", str(executable)]
   response, elapsed = Ray.runCommand(command, options.timeout, env)
   (directory / "build.stdout").write_bytes(response.stdout)
   (directory / "build.stderr").write_bytes(response.stderr)
   architectures = Ray.binaryArchitectures(executable)
-  if len(architectures) != 1 or (backend in ("arm64", "amd64", "hand-asm") and
+  if len(architectures) != 1 or (backend in ("arm64", "amd64", "wasm64", "hand-asm") and
       architectures != ["arm64" if backend == "hand-asm" else backend]):
     raise BenchmarkError("Unexpected Snappy executable architecture")
-  execution = [str(executable)]
-  if architectures == ["amd64"] and options.host["physical_architecture"] == "arm64":
-    execution = ["/usr/bin/arch", "-x86_64"] + execution
+  if (backend == "wasm64") != (architectures == ["wasm64"]):
+    raise BenchmarkError(f"Wrong module ABI for {backend}: {architectures}")
+  execution = Ray.executionCommand(architectures[0], executable, options.host, env)
   return {"backend": backend, "label": Ray.backendLabel(backend, options.host, architectures[0]),
           "assembly_sha256": hashlib.sha256(assembly.read_bytes()).hexdigest() if assembly else None,
           "provenance_sha256": hashlib.sha256(provenance.read_bytes()).hexdigest() if provenance else None,
@@ -244,6 +244,7 @@ def parseArguments(arguments=None):
   for entry in options.backend:
     for backend in entry.split(","):
       backend = "c-straight" if backend == "hand-c" else backend
+      backend = "wasm64" if backend == "wasm" else backend
       if backend not in Backends:
         parser.error(f"Unknown backend: {backend}")
       if backend not in selected:
@@ -277,7 +278,7 @@ def handAsmSupported(host):
 
 def availableBackends(host, compiler, cc, needsNifty=True):
   """Discover standalone backends without requiring a Nifty compiler."""
-  available = list(Ray.availableBackends(host, compiler)) if needsNifty else []
+  available = list(Ray.availableBackends(host, compiler, includeWasm=True)) if needsNifty else []
   if cc:
     available += ["c-straight"]
     if needsNifty and "c" not in available:
@@ -319,6 +320,8 @@ def main(arguments=None):
   manifest = options.hand_asm_source.with_name("snappy_manifest.json")
   options.hand_asm_manifest_bytes = manifest.read_bytes() if "hand-asm" in backends else None
   inputs = [options.compiler] if needsNifty else []
+  if "wasm64" in backends:
+    inputs.append(Path(Ray.wasmtimeExecutable()))
   if options.cc and any(backend in ("c",) + StandaloneBackends for backend in backends):
     inputs.append(Path(options.cc))
   if standalone:
@@ -337,7 +340,7 @@ def main(arguments=None):
   if any(hashlib.sha256(Path(path).read_bytes()).hexdigest() != digest for path, digest in hashes.items()):
     raise BenchmarkError("Compiler changed during benchmark")
   report = {"schema": "nifty-snappy-benchmark-v1", "machine": host, "timing_scope": TimingScope,
-            "inputs_sha256": hashes, "toolchain": {"compiler": str(options.compiler) if needsNifty else None, "cc": options.cc,
+            "inputs_sha256": hashes, "toolchain": {"wasmtime": Ray.engineMetadata(backends), "compiler": str(options.compiler) if needsNifty else None, "cc": options.cc,
             "compiler_help": Ray.optionalCommand([str(options.compiler), "--help"]) if needsNifty else None,
             "cc_version": Ray.optionalCommand([options.cc, "--version"]) if options.cc else None},
             "settings": {"size": options.size, "repeat": options.repeat, "samples": options.samples,

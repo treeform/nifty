@@ -1,7 +1,11 @@
 /nifty
 /nifty-runtime-*
 /tools/build
+/tools/gen_wasm_runtime
 /tests/test_native
+/tests/test_wasm
+/tests/test_irwasm
+/tests/test_wasmmetadata
 /tests/test_backend_engine
 /tests/test_nativecontainers
 /tests/test_nativereports

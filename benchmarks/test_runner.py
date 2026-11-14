@@ -72,9 +72,9 @@ def testConfiguration():
   options = run.parseArguments(["--backend", "c-straight,c", "--backend", "c-straight"])
   assert options.backend == ["c-straight", "c"]
   assert "c-straight" not in run.Backends
-  options = run.parseArguments(["--backend", "amd64,hand-c,hand-asm,c-straight,c,arm64"])
+  options = run.parseArguments(["--backend", "amd64,hand-c,hand-asm,c-straight,c,arm64,wasm"])
   assert options.backend == list(run.RayBackends)
-  assert run.Backends == ("c", "arm64", "amd64")
+  assert run.Backends == ("c", "arm64", "amd64", "wasm64")
   for arguments in (["--size", "0"], ["--size", "513"], ["--samples", "4"],
                     ["--warmups", "0"], ["--repeat", "1001"],
                     ["--backend", "unknown"], ["--timeout", "nan"]):
@@ -256,6 +256,88 @@ def testHandAsm():
 
 testNiftySnapshot()
 testHandAsm()
+def unsigned(value):
+  """Encode unsigned LEB128 fields for focused binary architecture fixtures."""
+  result = bytearray()
+  while value >= 128:
+    result.append((value & 127) | 128)
+    value >>= 7
+  result.append(value)
+  return bytes(result)
+
+
+def wasmModule(flags=5, minimum=1, maximum=65536, padding=0):
+  """Construct the minimal sections needed to inspect a WASM memory ABI."""
+  memory = b"\x01" + unsigned(flags) + unsigned(minimum) + unsigned(maximum)
+  custom = b"\0" + unsigned(padding) + bytes(padding) if padding else b""
+  return b"\0asm\x01\0\0\0" + custom + b"\x05" + unsigned(len(memory)) + memory
+
+
+def testWasm():
+  """Validate memory64 binaries, WASI clocks, command construction, and builds."""
+  source = ("const ImageSize = 64\nconst Repetitions = 1\n"
+            "const EmitPixels = 0\nconst ClockId = 6\n")
+  with patch.object(run.time, "CLOCK_MONOTONIC", 6, create=True):
+    for backend in (None, "c", "arm64", "amd64"):
+      assert "const ClockId = 6\n" in run.configuredSource(source, 4, 3, backend)
+    assert "const ClockId = 1\n" in run.configuredSource(source, 4, 3, "wasm64")
+  options = run.parseArguments(["--backend", "wasm,c,wasm64"])
+  assert options.backend == ["c", "wasm64"]
+  assert run.parseArguments([]).backend == []
+  host = {"physical_architecture": "arm64", "rosetta_available": True}
+  assert run.executionCommand("arm64", "raytracer", host) == ["raytracer"]
+  assert run.executionCommand("amd64", "raytracer", host) == [
+    "/usr/bin/arch", "-x86_64", "raytracer"]
+  assert run.executionCommand("c", "raytracer", host) == ["raytracer"]
+  environment = {"NIFTY_WASMTIME": "/custom/wasmtime", "PATH": "/custom"}
+  with patch.object(run.shutil, "which", return_value="/custom/wasmtime") as which:
+    assert run.executionCommand("wasm64", "raytracer.wasm", host, environment) == [
+      "/custom/wasmtime", "run", "-W", "memory64=y", "raytracer.wasm"]
+    which.assert_called_once_with("/custom/wasmtime", path="/custom")
+  with patch.object(run.shutil, "which", return_value=None):
+    expectError(lambda: run.executionCommand("wasm64", "raytracer.wasm", host))
+  assert run.backendLabel("wasm64", host, "wasm64") == "WASM64 (Wasmtime WASI)"
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    path = directory / "module.wasm"
+    for data in (wasmModule(), wasmModule(padding=5000)):
+      path.write_bytes(data)
+      assert run.binaryArchitectures(path) == ["wasm64"]
+    for data in (wasmModule(flags=1), wasmModule(flags=4),
+                 wasmModule(minimum=2, maximum=1), wasmModule()[:-1],
+                 b"\0asm\x02\0\0\0", b"\0asm\x01\0\0\0",
+                 wasmModule() + b"\x05\x04\x01\x05\x01\x01",
+                 b"\0asm\x01\0\0\0\x05\xff\xff\xff\xff\x7f"):
+      path.write_bytes(data)
+      expectError(lambda: run.binaryArchitectures(path))
+    compiler = directory / "nifty"
+    compiler.write_bytes(b"\xcf\xfa\xed\xfe" + struct.pack("<I", 0x0100000c))
+    with patch.object(run.shutil, "which", return_value="/bin/tool"):
+      assert run.availableBackends(host, compiler) == ["c", "arm64"]
+      assert run.availableBackends(host, compiler, includeWasm=True) == [
+        "c", "arm64", "wasm64"]
+    sourcePath = directory / "raytracer.nifty"
+    sourcePath.write_text(source)
+    settings = SimpleNamespace(output=directory / "output", source=sourcePath,
+      compiler=compiler, timeout=30, emit_ir=False)
+    commands = []
+
+    def compileModule(command, timeout, env):
+      """Capture the build command and supply a real memory64 header."""
+      commands.append(command)
+      Path(command[-1]).write_bytes(wasmModule())
+      return SimpleNamespace(stdout=b"", stderr=b""), 10
+
+    with patch.object(run, "runCommand", side_effect=compileModule):
+      with patch.object(run.time, "CLOCK_MONOTONIC", 6, create=True):
+        built = run.buildBackend("wasm64", 4, 3, settings, environment)
+    assert commands == [[str(compiler), "build", built["source"],
+                         "--backend:wasm64", "-o", built["executable"]]]
+    assert built["executable"].endswith("raytracer.wasm")
+    assert "const ClockId = 1\n" in Path(built["source"]).read_text()
+    assert "const ClockId = 6\n" in sourcePath.read_text()
+
+
 testProtocol()
 testConfiguration()
 testPng()
@@ -263,3 +345,5 @@ testReferences()
 testArchitectures()
 testStraightC()
 print("Benchmark protocol, configuration, PNG, reference, architecture, and standalone C checks passed")
+testWasm()
+print("Benchmark runner protocol, configuration, PNG, reference, architecture, and WASM checks passed")

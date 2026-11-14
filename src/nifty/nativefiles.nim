@@ -85,6 +85,12 @@ proc validateNative*(program: NativeProgram) =
     if layout.bytes < 0 or layout.bytes > MaxNativeStorage or
         layout.align <= 0 or layout.align > 16 or layout.capacity < 0:
       raise newException(NiftyError, "invalid native type layout")
+    if layout.kind == OpaqueType and
+        (layout.align != 8 or layout.dynamic or layout.owned or
+        (not layout.optional and layout.bytes != 8) or
+        (layout.optional and
+          (layout.bytes != 16 or layout.okOffset != 8))):
+      raise newException(NiftyError, "invalid native opaque handle layout")
     if layout.dynamic and
         (layout.kind notin {StringType, SeqType} or
         not layout.owned or layout.dataOffset != 16 or
@@ -138,8 +144,23 @@ proc validateNative*(program: NativeProgram) =
       if plan.ownedGlobals[j].offset == global.offset:
         raise newException(NiftyError, "duplicate native owned global")
   for host in plan.hosts:
+    if host.kind == ReservedHost:
+      raise newException(NiftyError, "unsupported legacy native host service")
     if host.paramTypes.len != host.paramOffsets.len:
       raise newException(NiftyError, "invalid native host parameters")
+    if host.kind == ContainerHost:
+      if host.receiverType < 0 or host.receiverType >= plan.layouts.len or
+          host.resultType < -1 or host.resultType >= plan.layouts.len:
+        raise newException(NiftyError, "invalid native container host layout")
+      if host.operation == "toCString":
+        if host.resultType < 0 or host.paramTypes.len != 0:
+          raise newException(NiftyError, "invalid native cstring conversion")
+        let source = plan.layouts[host.receiverType]
+        let target = plan.layouts[host.resultType]
+        if source.kind != StringType or source.optional or
+            target.kind != StringType or not target.optional or
+            not target.dynamic or not target.owned:
+          raise newException(NiftyError, "invalid native cstring conversion")
     for i, typ in host.paramTypes:
       if typ < 0 or typ >= plan.layouts.len or host.paramOffsets[i] < 0:
         raise newException(NiftyError, "invalid native host argument")

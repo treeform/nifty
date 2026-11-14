@@ -30,3 +30,21 @@ build host platform's C calling convention.
 locals, outgoing argument storage, preserved registers, and (on AMD64) its
 incoming return address. `wrapperFrameBytes` reports the separate wrapper's
 occupancy using the same convention.
+
+The memory64 WebAssembly binary encoders, runtime module composer, and shared IR
+selector (`wasmbinaries.nim`, `wasmmodules.nim`, and `irwasms.nim`) are adapted
+from the same Nimkey revision. They consume Nifty's verified IR and
+`RuntimeContext`, select the requested thread entry, and preserve native scalar
+host signatures through explicit runtime export mappings. Runtime storage and
+function signatures are checked before composition. The module requires bounded
+memory64 and table64, uses i64 addresses throughout, and preserves its runtime
+memory budget. Private direct floating result bundles, SIMD values, bulk memory
+operations, and float32/float64 rounding retain the shared IR contract. Failure
+continuations are rejected explicitly. No Nimkey packed runtime is included.
+
+The runtime composition workflow, low-memory WASI output bridge, and Node host
+adapter also follow that Nimkey revision. Nifty supplies its own serialized
+metadata, shared container runtime, typed foreign-call exports, ownership
+cleanup, and source/ABI fingerprint. These adaptations are covered by the same
+preserved MIT license. Runtime page allocation and memory-growth notification
+use the standalone memory64 Emscripten ABI.

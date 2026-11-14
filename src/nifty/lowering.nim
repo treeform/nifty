@@ -1,6 +1,7 @@
 ## Lowers checked Nifty syntax to explicit native SSA and storage.
 import std/[tables, sets]
-import types, common, semantics, nativeplans, nativeirtypes, nativecontainers, backend/irs
+import types, common, semantics, nativeplans, nativeirtypes, nativecontainers,
+  echolowering, backend/irs
 
 type
   Binding = object
@@ -52,7 +53,7 @@ proc layout(g: var Lower, t: Typ): int =
     l.bytes = int64(aligned(int(l.bytes) + 1, int(l.align)))
   else:
     case t.kind
-    of IntType, FloatType:
+    of IntType, FloatType, OpaqueType:
       l.bytes = if t.width > 0: t.width else: 8
       l.align = l.bytes
     of BoolType:
@@ -82,6 +83,11 @@ proc layout(g: var Lower, t: Typ): int =
       l.dataOffset = int(unionPayloadOffset(t))
       for member in t.members:
         l.members.add(g.layout(member))
+    of CStringType:
+      l.kind = StringType # Runtime owner descriptor; nominality is checked in the frontend.
+      l.dynamic = true
+      l.dataOffset = 16
+      l.bytes = 24
     of StringType, StringLitType:
       if t.dynamic:
         l.dataOffset = 16
@@ -152,7 +158,8 @@ proc scalar(t: Typ): IrType =
 
 proc aggregate(t: Typ): bool =
   ## Reports values represented by a storage address.
-  t != nil and (t.opt or t.kind notin {IntType, FloatType, types.BoolType})
+  t != nil and (t.opt or
+    t.kind notin {IntType, FloatType, OpaqueType, types.BoolType})
 
 proc operands(g: var Lower, values: openArray[ValueId]): Span =
   ## Appends an explicit operand range.
@@ -496,9 +503,9 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
       var v: ValueId
       if g.addressParam(p):
         v = g.load(g.offset(args, offsets[i]), AddressType)
-        if p.typ.kind == StringType:
+        if p.typ.kind in {StringType, CStringType}:
           v = g.data(v, p.typ)
-      elif p.typ.kind == StringType:
+      elif p.typ.kind in {StringType, CStringType}:
         v = g.data(g.offset(args, offsets[i]), p.typ)
       elif aggregate(p.typ):
         v = g.offset(args, offsets[i])
@@ -656,12 +663,13 @@ proc expression(g: var Lower, e: Expr): ValueId =
   of BoolExpr:
     result = g.constant(int64(e.bval), irs.BoolType)
   of StrExpr:
+    let terminated = e.typ.kind == CStringType
     let fixed = e.typ.kind == StringLitType or e.typ.dynamic
     let t = if fixed:
-        Typ(kind: StringType, len: int64(e.sval.len)) else: e.typ
+        Typ(kind: StringType, len: int64(e.sval.len + ord(terminated))) else: e.typ
     let storage = g.allocType(t)
     g.clear(storage, g.size(t))
-    g.store(storage, g.constant(int64(e.sval.len)))
+    g.store(storage, g.constant(int64(e.sval.len + ord(terminated))))
     for i, c in e.sval:
       g.store(g.offset(storage, 8 + i),
         g.constant(int64(ord(c)), UInt8Type))
@@ -735,9 +743,11 @@ proc expression(g: var Lower, e: Expr): ValueId =
       result = g.routineCall(e)
   of FieldExpr:
     let bt = e.kids[0].typ
-    if bt.kind == FloatType:
+    if bt.kind == OpaqueType and e.sval == "isNull":
+      result = g.compare(EqualComparison, g.expression(e.kids[0]), g.constant(0))
+    elif bt.kind == FloatType:
       result = g.floatInt(g.expression(e.kids[0]))
-    elif e.sval == "toInt" and bt.kind == StringType:
+    elif e.sval in ["toInt", "toCString"] and bt.kind == StringType:
       result = g.methodCall(e)
     elif e.sval == "cap" and bt.dynamic:
       result = g.load(g.offset(g.path(e.kids[0]), 8))
@@ -960,10 +970,7 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
     g.cleanup(s.drops)
     g.jump(g.breaks[^1])
   of EchoStmt:
-    var host = NativeHost(kind: EchoHost, operation: "echo",
-      receiverType: -1, resultType: -1)
-    let args = g.packed(s.args, host)
-    g.hostCall(host, g.null, args, g.null)
+    raise newException(NiftyError, "echo must be expanded before native lowering")
   of DiscardStmt, CallStmt:
     discard g.expression(s.value)
   of BlockStmt:
@@ -1080,9 +1087,11 @@ proc statements(g: var Lower, body: seq[Stmt], scope: int) =
   if g.live:
     g.cleanup(g.source.semantics.scopes[scope].drops)
 
-proc lowerNative*(source: Module, filename = ""): NativePlan =
+proc lowerNative*(checked: Module, filename = "",
+    portableIo = false): NativePlan =
   ## Builds native IR, fixed layouts, and executable runtime metadata.
-  source.requireChecked()
+  checked.requireChecked()
+  let source = lowerEcho(checked, filename, portableIo)
   var g = Lower(source: source)
   g.plan.module.pointerBytes = 8
   g.plan.module.files = if srcFiles.len > 0: srcFiles else: @[filename]

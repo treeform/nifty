@@ -738,6 +738,27 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
   if host.operation == "initialize":
     initializeValue(layouts, host.receiverType, receiver)
     return
+  if host.operation == "toCString":
+    let target = layouts[host.resultType]
+    zeroMem(output, int(target.bytes))
+    let count = length(receiver)
+    if count < 0 or count == high(int64) or uint64(count) >= uint64(high(int)):
+      return
+    let source = dataPointer(receiver, layout)
+    for i in 0 ..< count:
+      if cast[ptr byte](at(source, i))[] == 0:
+        return
+    let address = reallocate(memory, nil, csize_t(count + 1))
+    if address == nil:
+      return
+    if count > 0:
+      copyMem(address, source, int(count))
+    cast[ptr byte](at(address, count))[] = 0
+    length(output) = count + 1 # Internal owner length includes its terminator.
+    capacity(output) = count + 1
+    dataSlot(output) = address
+    cast[ptr bool](at(output, target.okOffset))[] = true
+    return
   if host.operation == "drop":
     dropOwned(layouts, host.receiverType, receiver, memory)
     return

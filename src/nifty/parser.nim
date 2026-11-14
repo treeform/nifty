@@ -99,7 +99,7 @@ proc parseTypeCore(p: var Parser): Typ =
     return Typ(kind: TypeVarType, gname: p.expectIdent())
   let t = p.peek
   if t.kind == IdentToken and
-      (t.text in ["int", "bool", "Lock", "array", "seq", "string", "set",
+      (t.text in ["int", "bool", "Lock", "array", "seq", "string", "cstring", "set",
         "queue", "channel", "map", "int8", "uint8", "char", "int16", "uint16",
         "int32", "uint32", "int64", "uint64", "float32", "float64"] or
        t.text in p.types):
@@ -229,6 +229,8 @@ proc parseTypeCore(p: var Parser): Typ =
         err(t.line, "set range is too large (max 16777216 values)")
       p.expectOp("]")
       Typ(kind: SetType, elem: e)
+    of "cstring":
+      Typ(kind: CStringType, dynamic: true)
     of "string":
       if not p.atOp("["):
         return Typ(kind: StringType, dynamic: true)
@@ -280,8 +282,10 @@ proc parseType(p: var Parser): Typ =
   result = p.parseTypeCore()
   if p.atOp("?"):
     discard p.next
-    if result.kind notin {IntType, ObjectType, UnionType, StringType}:
-      err(p.peek.line, "only ints, objects, unions, and strings can be optional")
+    if result.kind notin {IntType, ObjectType, UnionType, StringType,
+        OpaqueType}:
+      err(p.peek.line, "only ints, objects, unions, strings, and opaque " &
+        "handles can be optional")
     let source = result
     result = optOf(result)
     if p.predeclared:
@@ -698,8 +702,14 @@ proc parseModule(p: var Parser): Module =
       if name in p.consts:
         err(t.line, "duplicate or reserved type name: '" & name & "'")
       p.expectOp("=")
-      let first = p.parseType()
       let typ = p.types[name]
+      if p.atIdent("opaque"):
+        discard p.next
+        typ.kind = OpaqueType
+        result.types.add TypeDef(name: name, typ: typ, line: t.line)
+        p.expectNewline()
+        continue
+      let first = p.parseType()
       if p.atIdent("or"):
         typ.kind = UnionType
         typ.members = @[first]
@@ -853,7 +863,7 @@ proc parseModule(p: var Parser): Module =
       result.routines.add r
     else:
       err(t.line, "unknown declaration: '" & t.text &
-        "' (expected const, var, object, func, proc, thread, or extern; " &
+        "' (expected const, var, type, object, func, proc, thread, or extern; " &
         "import must be at the top of the file)")
 
 proc predeclare(p: var Parser) =
@@ -875,7 +885,7 @@ proc predeclare(p: var Parser) =
     if name in p.types or name in ["int", "bool", "Lock", "array", "seq",
         "string", "set", "queue", "channel", "map", "int8", "uint8",
         "char", "int16", "uint16", "int32", "uint32", "int64",
-        "uint64", "float32", "float64"]:
+        "uint64", "float32", "float64", "opaque", "cstring"]:
       err(token.line, "duplicate or reserved type name: '" & name & "'")
     p.types[name] = Typ(kind: ObjectType, name: name)
   p.predeclared = true
@@ -900,7 +910,7 @@ proc resolveAlias(p: var Parser, name: string, visiting: var seq[string],
   for dependency in dependencies(p.aliases[name]):
     p.resolveAlias(dependency, visiting, finished)
   for optional in p.optionals:
-    if optional.source.kind in {IntType, ObjectType, UnionType, StringType}:
+    if optional.source.kind in {IntType, ObjectType, UnionType, StringType, OpaqueType}:
       optional.target[] = optional.source[]
       optional.target.opt = true
   p.types[name][] = p.aliases[name][]
@@ -915,8 +925,8 @@ proc finishTypes(p: var Parser, m: Module) =
   for name in names:
     p.resolveAlias(name, visiting, finished)
   for optional in p.optionals:
-    if optional.source.kind notin {IntType, ObjectType, UnionType, StringType}:
-      err(0, "only ints, objects, unions, and strings can be optional")
+    if optional.source.kind notin {IntType, ObjectType, UnionType, StringType, OpaqueType}:
+      err(0, "only ints, objects, unions, strings, and opaque handles can be optional")
     optional.target[] = optional.source[]
     optional.target.opt = true
   for definition in m.types:

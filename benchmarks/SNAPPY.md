@@ -91,6 +91,7 @@ performance claim against the original Nim implementation.
 python3 benchmarks/run_snappy.py
 python3 benchmarks/run_snappy.py --samples 7 --repeat 10 --wall
 python3 benchmarks/run_snappy.py --backend hand-asm,hand-c
+python3 benchmarks/run_snappy.py --backend wasm64 --samples 7 --repeat 100
 python3 benchmarks/run_snappy.py --backend c,arm64 --size 65537
 python3 benchmarks/run_snappy.py --opt none --output /tmp/snappy-unoptimized
 ```
@@ -130,6 +131,12 @@ Hand C and the C backend require a C compiler, selected with `--cc` or `CC`.
 Hand ASM requires macOS on ARM64. Selecting only Hand C or Hand ASM does
 not require the Nifty compiler.
 
+WASM64 runs the same Nifty codec through Wasmtime with memory64 enabled.
+Select `--backend wasm64` (or `wasm`); `NIFTY_WASMTIME` overrides the engine
+executable. The runner uses WASI's monotonic clock and records the engine
+version and hash. Compilation and process startup are outside the timed
+compression and decompression intervals. WASM64 appears last when available.
+
 [snappy_straight.c](snappy_straight.c) is a standalone C port of the same
 Supersnappy algorithm. It uses wide loads and match scanning, retains the
 same fragment, hash, probe, and copy-splitting rules, and produces the same
@@ -141,7 +148,7 @@ per-thread arena instead.
 Hand ASM links a persisted ARM64 codec into the same C benchmark driver.
 See [SNAPPY_HAND_ASM.md](SNAPPY_HAND_ASM.md) for its provenance, manual
 changes, and validation. Default row order is Hand ASM, Hand C, Nifty C
-backend, ARM64 backend, and AMD64 backend via Rosetta where applicable.
+backend, ARM64 backend, AMD64 backend via Rosetta where applicable, and WASM64.
 
 An independent Python decoder validates each process's compressed bytes
 against separately generated inputs. Every timed round trip compares all

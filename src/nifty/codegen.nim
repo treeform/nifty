@@ -3,7 +3,7 @@
 ## forward prototypes: definitions appear in call order.
 
 import std/[math, strutils, tables, sets, sequtils]
-import types, semantics
+import types, semantics, echolowering, standardbridges
 
 type
   Gen = object
@@ -65,6 +65,7 @@ proc mangle(t: Typ): string =
   of ArrayType: "a" & $t.len & "_" & mangle(t.elem)
   of SeqType:
     (if t.dynamic: "dq" else: "q" & $t.len) & "_" & mangle(t.elem)
+  of CStringType: "cs"
   of StringType: (if t.dynamic: "ds" else: "s" & $t.len)
   of SetType: "t" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi)
   of QueueType: "u" & $t.len & "_" & mangle(t.elem)
@@ -74,6 +75,7 @@ proc mangle(t: Typ): string =
   of SparseMapType: "m" & $t.len & "_" & mangle(t.elem) & "_" & mangle(t.val)
   of ObjectType: "o" & t.name
   of UnionType: "u_" & t.name
+  of OpaqueType: "h" & t.name
   else: "x"
 
 proc cBase(t: Typ): string =
@@ -81,13 +83,14 @@ proc cBase(t: Typ): string =
     return "NS_" & mangle(t)
   case t.kind
   of BoolType: "bool"
+  of OpaqueType: "void *"
   of FloatType: (if t.width == 4: "float" else: "double")
   of IntType:
     if t.width == 0 or (t.width == 8 and t.rlo < 0): "int64_t"
     else: (if t.rlo >= 0: "uint" else: "int") & $(t.width * 8) & "_t"
   of ObjectType: "S_" & t.name
   of UnionType: "U_" & t.name
-  of SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType,
+  of SeqType, StringType, CStringType, SetType, QueueType, DenseMapType, SparseMapType,
       ChannelType: "NS_" & mangle(t)
   else: "int64_t"
 
@@ -161,6 +164,8 @@ proc floatLiteral(e: Expr): string =
     $value & suffix
 
 proc genExpr(g: var Gen, e: Expr): string =
+  if e.wrapOpt and typeSize(e.typ) > arenaThreshold:
+    return g.genOrdered(e)
   if e.wrapOpt:
     # A plain value flowing into an optional destination.
     let optT = e.typ
@@ -195,7 +200,11 @@ proc genExpr(g: var Gen, e: Expr): string =
   of BoolExpr:
     if e.bval: "true" else: "false"
   of StrExpr:
-    if e.typ != nil and e.typ.kind == StringType:
+    if e.typ != nil and e.typ.kind == CStringType:
+      "(" & cBase(e.typ) & "){ .m_len = " & $(e.sval.len + 1) &
+        "LL, .m_cap = " & $(e.sval.len + 1) &
+        "LL, .m_data = (uint8_t *)" & cQuote(e.sval) & " }"
+    elif e.typ != nil and e.typ.kind == StringType:
       if e.typ.dynamic:
         "(" & cBase(e.typ) & "){ .m_len = " & $e.sval.len &
           "LL, .m_cap = " & $e.sval.len &
@@ -237,7 +246,7 @@ proc genExpr(g: var Gen, e: Expr): string =
     of "and": "(" & a & " && " & b & ")"
     of "or": "(" & a & " || " & b & ")"
     else:
-      if isFloat:
+      if isFloat or e.kids[0].typ.kind == OpaqueType:
         "(" & a & " " & e.sval & " " & b & ")"
       else:
         "((int64_t)" & a & " " & e.sval & " (int64_t)" & b & ")"
@@ -261,7 +270,7 @@ proc genExpr(g: var Gen, e: Expr): string =
     let r = g.routines[e.sval]
     var parts: seq[string]
     for i, a in e.kids:
-      if r.externLib != "" and r.params[i].typ.kind == StringType:
+      if r.externLib != "" and r.params[i].typ.kind in {StringType, CStringType}:
         parts.add g.genExpr(a) & ".m_data"
       elif bigRet(r.params[i].typ) and r.params[i].typ.passByPtr and
           not g.source.mode(r.params[i].binding).isBorrow:
@@ -278,8 +287,14 @@ proc genExpr(g: var Gen, e: Expr): string =
   of FieldExpr:
     if e.isOptOk:
       g.genExpr(e.kids[0]) & ".m_ok"
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind == OpaqueType:
+      "(" & g.genExpr(e.kids[0]) & " == NULL)"
     elif e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
       "ni_ftoi(" & g.genExpr(e.kids[0]) & ")"
+    elif e.sval == "toCString" and e.kids[0].typ != nil and
+        e.kids[0].typ.kind == StringType:
+      let base = g.genExpr(e.kids[0])
+      "ni_make_cstring(" & base & ".m_data, " & base & ".m_len)"
     elif e.sval == "toInt" and e.kids[0].typ != nil and
         e.kids[0].typ.kind == StringType:
       cBase(e.kids[0].typ) & "_toInt(&" & g.genExpr(e.kids[0]) & ")"
@@ -352,6 +367,9 @@ proc genStrMethod(g: var Gen, e: Expr, ordered: bool): string =
     let lo = if ordered: g.genOrdered(e.kids[2]) else: g.genExpr(e.kids[2])
     let hi = if ordered: g.genOrdered(e.kids[3]) else: g.genExpr(e.kids[3])
     n & "_copyRange(" & basePtr & ", " & src & ", " & lo & ", " & hi & ")"
+  of "toCString":
+    let base = if ordered: g.genPathOrdered(e.kids[0]) else: g.genExpr(e.kids[0])
+    "ni_make_cstring(" & base & ".m_data, " & base & ".m_len)"
   of "toInt", "clear":
     n & "_" & e.sval & "(" & basePtr & ")"
   else:
@@ -419,9 +437,9 @@ proc tempFor(g: var Gen, e: Expr, val: string): string =
   let ctype =
     if e.typ == nil: "int64_t"
     elif e.typ.opt: cBase(e.typ)
-    elif e.typ.kind == FloatType: cBase(e.typ)
+    elif e.typ.kind in {FloatType, OpaqueType}: cBase(e.typ)
     elif e.typ.kind == BoolType: "bool"
-    elif e.typ.kind in {ObjectType, UnionType, SeqType, StringType, SetType, QueueType,
+    elif e.typ.kind in {ObjectType, UnionType, SeqType, StringType, CStringType, SetType, QueueType,
       DenseMapType, SparseMapType}: cBase(e.typ)
     else: "int64_t"
   g.put ctype & " " & t & " = " & val & ";"
@@ -432,8 +450,6 @@ proc genOrdered(g: var Gen, e: Expr): string =
   ## included: effectful nodes become their own C statements, and every
   ## read is captured at the moment the program text reaches it, so C's
   ## unspecified subexpression order can never be observed.
-  if e.wrapOpt and typeSize(e.typ) > arenaThreshold:
-    return g.genOrdered(e)
   if e.wrapOpt and typeSize(e.typ) > arenaThreshold:
     let temporary = g.freshTemp(e)
     let optional = e.typ
@@ -504,8 +520,14 @@ proc genOrdered(g: var Gen, e: Expr): string =
       g.genPathOrdered(e)
     elif e.isOptOk:
       g.tempFor(e, g.genOrdered(e.kids[0]) & ".m_ok")
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind == OpaqueType:
+      g.tempFor(e, "(" & g.genOrdered(e.kids[0]) & " == NULL)")
     elif e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
       g.tempFor(e, "ni_ftoi(" & g.genOrdered(e.kids[0]) & ")")
+    elif e.sval == "toCString" and e.kids[0].typ != nil and
+        e.kids[0].typ.kind == StringType:
+      let base = g.genPathOrdered(e.kids[0])
+      g.tempFor(e, "ni_make_cstring(" & base & ".m_data, " & base & ".m_len)")
     elif e.sval == "toInt" and e.kids[0].typ != nil and
         e.kids[0].typ.kind == StringType:
       let base = g.tempFor(e.kids[0], g.genOrdered(e.kids[0]))
@@ -552,7 +574,7 @@ proc genOrdered(g: var Gen, e: Expr): string =
     else:
       let a = g.genOrdered(e.kids[0])
       let b = g.genOrdered(e.kids[1])
-      if e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
+      if e.kids[0].typ != nil and e.kids[0].typ.kind in {FloatType, OpaqueType}:
         "(" & a & " " & e.sval & " " & b & ")"
       else:
         "((int64_t)" & a & " " & e.sval & " (int64_t)" & b & ")"
@@ -564,7 +586,7 @@ proc genOrdered(g: var Gen, e: Expr): string =
     let r = g.routines[e.sval]
     var parts: seq[string]
     for i, a in e.kids:
-      if r.externLib != "" and r.params[i].typ.kind == StringType:
+      if r.externLib != "" and r.params[i].typ.kind in {StringType, CStringType}:
         parts.add g.genPathOrdered(a) & ".m_data"
       elif bigRet(r.params[i].typ) and r.params[i].typ.passByPtr and
           not g.source.mode(r.params[i].binding).isBorrow:
@@ -1011,102 +1033,7 @@ proc genStmt(g: var Gen, s: Stmt) =
     g.cleanup(s.drops)
     g.put "break;"
   of EchoStmt:
-    # Every value argument is hoisted to a temp, in order: C leaves printf
-    # argument evaluation order unspecified, nifty does not.
-    var temps: Table[int, string]
-    for i, a in s.args:
-      if a.typ.kind != StringLitType:
-        temps[i] = "ni_e" & $g.tmpN
-        inc g.tmpN
-    if temps.len > 0:
-      g.put "{"
-      inc g.ind
-      for i, a in s.args:
-        if i in temps:
-          let ctype =
-            case a.typ.kind
-            of BoolType: "bool"
-            of StringType: cBase(a.typ)
-            of FloatType: "double"
-            else: "int64_t"
-          let v =
-            if g.hasEffects(a): g.genOrdered(a) else: g.genExpr(a)
-          g.put ctype & " " & temps[i] & " = " & v & ";"
-    if s.args.anyIt(it.typ.kind in {StringType, StringLitType}):
-      # Strings are length-exact and may contain embedded NUL bytes.
-      # Evaluate every argument above, then keep the complete echo atomic.
-      g.put "flockfile(stdout);"
-      for i, a in s.args:
-        case a.typ.kind
-        of StringLitType:
-          if a.sval.len > 0:
-            g.put "if (fwrite(" & cQuote(a.sval) & ", 1, " &
-              $a.sval.len & ", stdout) != " & $a.sval.len &
-              ") ni_output_failure();"
-        of StringType:
-          let v = temps[i]
-          g.put "if (" & v & ".m_len > 0 && fwrite(" & v &
-            ".m_data, 1, (size_t)" & v & ".m_len, stdout) != " &
-            "(size_t)" & v & ".m_len) ni_output_failure();"
-        of IntType:
-          if a.typ.dname == "char":
-            g.put "if (printf(\"%c\", (int)" & temps[i] &
-              ") < 0) ni_output_failure();"
-          else:
-            g.put "if (printf(\"%lld\", (long long)" & temps[i] &
-              ") < 0) ni_output_failure();"
-        of BoolType:
-          g.put "if (fputs(" & temps[i] &
-            " ? \"true\" : \"false\", stdout) < 0) ni_output_failure();"
-        of FloatType:
-          g.put "if (printf(\"%g\", " & temps[i] &
-            ") < 0) ni_output_failure();"
-        else:
-          discard
-      g.put "if (fputc(10, stdout) == EOF) ni_output_failure();"
-      g.put "funlockfile(stdout);"
-      if temps.len > 0:
-        dec g.ind
-        g.put "}"
-      return
-    var fmt = ""
-    var cargs: seq[string]
-    for i, a in s.args:
-      case a.typ.kind
-      of StringLitType:
-        fmt.add a.sval.replace("%", "%%")
-      of StringType:
-        fmt.add "%.*s"
-        cargs.add "(int)(" & temps[i] & ".m_len)"
-        cargs.add (if a.typ.dynamic:
-          "(" & temps[i] & ".m_len ? (const char *)" &
-            temps[i] & ".m_data : \"\")"
-          else: "(const char *)" & temps[i] & ".m_data")
-      of IntType:
-        if a.typ.dname == "char":
-          # char exists to say "this byte is text": print it as text.
-          fmt.add "%c"
-          cargs.add "(int)(" & temps[i] & ")"
-        else:
-          fmt.add "%lld"
-          cargs.add "(long long)(" & temps[i] & ")"
-      of BoolType:
-        fmt.add "%s"
-        cargs.add "((" & temps[i] & ") ? \"true\" : \"false\")"
-      of FloatType:
-        fmt.add "%g"
-        cargs.add temps[i]
-      else:
-        discard
-    fmt.add "\n"
-    var call = "printf(" & cQuote(fmt)
-    for x in cargs:
-      call.add ", " & x
-    call.add ")"
-    g.put "if (" & call & " < 0) ni_output_failure();"
-    if temps.len > 0:
-      dec g.ind
-      g.put "}"
+    raise newException(ValueError, "echo must be expanded before C generation")
   of BlockStmt:
     g.put "{"
     g.genBlock(s.body, s.bodyScope)
@@ -1282,7 +1209,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
   ## dependencies first. Declare-before-use makes this a simple post-order.
   if t.isNil:
     return
-  if hasOwned(t) and (not t.dynamic or t.opt):
+  if hasOwned(t) and (not t.dynamic or t.opt) and t.kind != CStringType:
     if not g.pendingOwners.anyIt(mangle(it) == mangle(t)):
       g.pendingOwners.add t
   if needsDefault(t) and not g.defaultTypes.anyIt(mangle(it) == mangle(t)):
@@ -1303,6 +1230,43 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     g.put "} " & n & ";"
     g.put "static " & b & " " & n & "_or(" & n & " r, " & b &
       " fb) { return r.m_ok ? r.m_val : fb; }"
+    if base.kind == CStringType:
+      g.put "static void ni_drop_pcs(NS_pcs *s) {"
+      g.put "  if (s->m_ok) ni_drop_cs(&s->m_val);"
+      g.put "  memset(s, 0, sizeof(*s)); }"
+      g.put "static bool ni_copy_pcs(NS_pcs *s, const NS_pcs *d) {"
+      g.put "  if (s == d) return true;"
+      g.put "  NS_pcs tmp = {0};"
+      g.put "  if (d->m_ok && !ni_copy_cs(&tmp.m_val, &d->m_val)) return false;"
+      g.put "  tmp.m_ok = d->m_ok; ni_drop_pcs(s); *s = tmp; return true; }"
+      g.put "static NS_pcs ni_make_cstring(const uint8_t *p, int64_t n) {"
+      g.put "  NS_pcs out = {0};"
+      g.put "  if (n < 0 || n == INT64_MAX || (uint64_t)n >= SIZE_MAX) return out;"
+      g.put "  if (n && memchr(p, 0, (size_t)n)) return out;"
+      g.put "  uint8_t *data = ni_realloc(NULL, (size_t)n + 1);"
+      g.put "  if (!data) return out;"
+      g.put "  if (n) memcpy(data, p, (size_t)n);"
+      g.put "  data[n] = 0; out.m_val.m_data = data;"
+      g.put "  out.m_val.m_len = out.m_val.m_cap = n + 1; out.m_ok = true; return out;"
+      g.put "}"
+    return
+  if t.kind == CStringType:
+    let key = mangle(t)
+    if key in g.emitted:
+      return
+    g.emitted.incl key
+    if "forward:" & key notin g.emitted:
+      g.put "typedef struct NS_cs NS_cs;"
+      g.emitted.incl "forward:" & key
+    g.put "struct NS_cs { int64_t m_len, m_cap; uint8_t *m_data; };"
+    g.put "static void ni_drop_cs(NS_cs *s) { ni_free(s->m_data); memset(s, 0, sizeof(*s)); }"
+    g.put "static bool ni_copy_cs(NS_cs *s, const NS_cs *d) {"
+    g.put "  if (s == d) return true;"
+    g.put "  uint8_t *p = ni_realloc(NULL, (size_t)d->m_len);"
+    g.put "  if (!p) return false;"
+    g.put "  memcpy(p, d->m_data, (size_t)d->m_len);"
+    g.put "  ni_drop_cs(s); s->m_data = p; s->m_len = s->m_cap = d->m_len; return true;"
+    g.put "}"
     return
   if t.dynamic:
     if t.kind == SeqType:
@@ -1696,14 +1660,15 @@ proc generatePass(m: Module, src: string,
     expressionBytes: var Table[string, int64]): string =
   ## Emits C while recording only expression temporaries actually materialized.
   requireChecked(m)
+  let routines = backendRoutines(m)
   var g = Gen(src: src, source: m, exprOffsets: expressions,
     exprBytes: expressionBytes)
-  for r in m.routines:
+  for r in routines:
     g.routines[r.name] = r
   # Arena analysis: big locals leave the C stack for per-thread arenas,
   # sized by the same call-DAG walk the report uses. One bump pointer
   # per thread; constant offsets; overflow impossible by sizing.
-  for r in m.routines:
+  for r in routines:
     var offs: Table[string, int64]
     var off = 0'i64
     var hiWater = 0'i64
@@ -1723,7 +1688,7 @@ proc generatePass(m: Module, src: string,
   var
     anyArena = false
     anyArenaPointer = false
-  for r in m.routines:
+  for r in routines:
     # Unreachable routines are emitted too and may reference the bump pointer.
     if g.frameOf[r.name] > 0:
       anyArenaPointer = true
@@ -1731,6 +1696,7 @@ proc generatePass(m: Module, src: string,
       anyArena = true
   g.put "// Generated by nifty from " & src & ". Do not edit."
   g.o.add cPrelude
+  g.o.add consoleBridgeC
   if m.semantics.usesHeap:
     g.o.add cMemoryPrelude
   if m.routines.anyIt(it.externLib != ""):
@@ -1775,7 +1741,7 @@ proc generatePass(m: Module, src: string,
     g.emitTypeDefs(td.typ)
   for gd in m.globals:
     g.emitTypeDefs(gd.typ)
-  for r in m.routines:
+  for r in routines:
     for pm in r.params:
       g.emitTypeDefs(pm.typ)
     g.emitTypeDefs(r.ret)
@@ -1838,7 +1804,7 @@ proc generatePass(m: Module, src: string,
         g.put "static " & cDecl("g_" & gd.name, gd.typ) & ";"
   if anyArena:
     g.put ""
-    for r in m.routines:
+    for r in routines:
       if r.kind == ThreadRoutine and g.needOf[r.name] > 0:
         if r.instances > 1:
           # One arena row per instance, rows padded to keep 16-alignment.
@@ -1849,7 +1815,7 @@ proc generatePass(m: Module, src: string,
         else:
           g.put "static _Alignas(16) uint8_t ni_arena_" & r.name & "[" &
             $g.needOf[r.name] & "];"
-  for r in m.routines:
+  for r in routines:
     if r.externLib != "":
       # Private identifiers avoid conflicts with incidental runtime header
       # prototypes. The linker still resolves the declared binary symbol.
@@ -1857,7 +1823,7 @@ proc generatePass(m: Module, src: string,
       for pm in r.params:
         let mutable = m.mode(pm.binding) == MutBorrowMode
         let qualifier = if mutable: "" else: "const "
-        if pm.typ.kind == StringType:
+        if pm.typ.kind in {StringType, CStringType}:
           ps.add qualifier & "uint8_t *"
         elif bigRet(pm.typ) and pm.typ.passByPtr:
           ps.add "const " & cBase(pm.typ) & " *p_" & pm.name
@@ -2007,12 +1973,14 @@ proc generatePass(m: Module, src: string,
 proc cArenaFrames*(m: Module): Table[string, int64] =
   ## Plans exact C arena frames using the same materialization as emission.
   var expressions: Table[string, Table[pointer, int64]]
-  discard generatePass(m, "arena-plan", expressions, result)
-  for routine in m.routines:
+  let storage = lowerEcho(m, "arena-plan")
+  discard generatePass(storage, "arena-plan", expressions, result)
+  for routine in backendRoutines(storage):
     result[routine.name] = sizeAlign(result[routine.name], 16, routine.line)
 
-proc generate*(m: Module, src: string): string =
+proc generate*(source: Module, src: string): string =
   ## Plans expression storage, then emits C with exact arena frame sizes.
+  let m = lowerEcho(source, src)
   var
     expressions: Table[string, Table[pointer, int64]]
     expressionBytes: Table[string, int64]

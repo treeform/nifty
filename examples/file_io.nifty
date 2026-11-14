@@ -1,0 +1,25 @@
+import io
+
+# Writes a local file, reads it back, and sends its bytes to stdout.
+proc roundtrip(): bool =
+  let output = openWrite("nifty-io-example.bin")
+  if not output.ok:
+    return false
+  let written = writeFile(output, "Hello through the FFI layer!\n")
+  let outputClosed = close(output)
+  if not written or not outputClosed:
+    return false
+
+  let input = openRead("nifty-io-example.bin")
+  if not input.ok:
+    return false
+  var buffer: string[128]
+  let count = readChunk(input, buffer)
+  let inputClosed = close(input)
+  if not count.ok or not inputClosed:
+    return false
+  return write(buffer)
+
+thread main() =
+  if not roundtrip():
+    discard write("File I/O failed\n")

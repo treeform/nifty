@@ -23,5 +23,5 @@ proc cCompileCommand*(source, output: string,
     result.add " " & quoteShell(option)
   result.add " -o " & quoteShell(output) & " " & quoteShell(source)
   for library in libraries:
-    if library != "libc":
+    if library notin ["libc", "nifty"]:
       result.add " " & quoteShell("-l" & library)

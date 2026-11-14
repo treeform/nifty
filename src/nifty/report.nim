@@ -3,7 +3,7 @@
 ## Dynamic work is propagated through calls instead of given a false bound.
 
 import std/[strutils, tables, sets]
-import types, semantics, codegen
+import types, semantics, codegen, echolowering
 
 const frameOverhead = 16'i64 # return address + saved frame pointer
 
@@ -212,8 +212,10 @@ proc unionLines*(m: Module): seq[string] =
 
 ## Worst-Case Stack
 
-proc paramBytes(m: Module, p: Param): int64 =
-  ## Counts the C ABI storage for a checked parameter mode.
+proc paramBytes(m: Module, r: Routine, p: Param): int64 =
+  ## Counts pointer parameters and foreign scalar ABI argument slots.
+  if r.externLib != "":
+    return 8
   if m.mode(p.binding).isBorrow or bigRet(p.typ):
     8 # Passed as a pointer.
   else:
@@ -272,6 +274,10 @@ proc threadLabel(r: Routine): string =
 proc buildReport*(m: Module, src: string): string =
   ## Reports storage and work using a successfully checked source module.
   requireChecked(m)
+  # Echo's ordinary helpers and value captures consume real C storage.
+  # Keep source work/proof reporting on the original checked syntax.
+  let storage = lowerEcho(m, src)
+  let storageRoutines = backendRoutines(storage)
   var globals: Table[string, Typ]
   for gd in m.globals:
     globals[gd.name] = gd.typ
@@ -331,13 +337,9 @@ proc buildReport*(m: Module, src: string): string =
       lines.add "  " & lk.name & ": " & what & "; used by " &
         lk.users.join(", ")
 
-  # Per-routine cost and frame tables, in declaration order (callees
-  # first, so a single pass suffices - declare-before-use is a topological
-  # sort of the call DAG).
+  # Abstract work remains a source-language metric, with original proofs.
   var costs: Table[string, int64]
   var runtimeCosts: Table[string, bool]
-  var frames: Table[string, int64]
-  var deepest: Table[string, tuple[bytes: int64, chain: string]]
   for r in m.routines:
     costs[r.name] = bodyOps(r.body, costs)
     var lengths: HashSet[string]
@@ -351,18 +353,27 @@ proc buildReport*(m: Module, src: string): string =
       for p in r.params:
         if p.typ.hasOwned:
           runtimeCosts[r.name] = true
+    var calls: HashSet[string]
+    collectCalls(r.body, globals, calls)
+    for callee in calls:
+      if runtimeCosts.getOrDefault(callee, false):
+        runtimeCosts[r.name] = true
+
+  # Storage follows the same normalized call DAG as C generation, including
+  # standard-library formatting buffers and readonly echo argument captures.
+  var frames: Table[string, int64]
+  var deepest: Table[string, tuple[bytes: int64, chain: string]]
+  for r in storageRoutines:
     frames[r.name] = sizeAdd(frameOverhead,
-      sizeAdd(localBytes(m, r.body), block:
+      sizeAdd(localBytes(storage, r.body), block:
         var pb = 0'i64
         for p in r.params:
-          pb = sizeAdd(pb, paramBytes(m, p), r.line)
+          pb = sizeAdd(pb, paramBytes(storage, r, p), r.line)
         pb))
     var calls: HashSet[string]
     collectCalls(r.body, globals, calls)
     var best = (bytes: 0'i64, chain: "")
     for callee in calls:
-      if runtimeCosts.getOrDefault(callee, false):
-        runtimeCosts[r.name] = true
       if callee in deepest:
         let d = deepest[callee]
         if d.bytes > best.bytes:
@@ -381,10 +392,10 @@ proc buildReport*(m: Module, src: string): string =
       d.chain & ")"
 
   # Arenas: exact, allocated at that size, so overflow is impossible.
-  let aframes = cArenaFrames(m)
+  let aframes = cArenaFrames(storage)
   var adeep: Table[string, tuple[bytes: int64, chain: string]]
   var anyArena = false
-  for r in m.routines:
+  for r in storageRoutines:
     var calls: HashSet[string]
     collectCalls(r.body, globals, calls)
     var best = (bytes: 0'i64, chain: "")

@@ -16,7 +16,7 @@ import sys
 import time
 import zlib
 
-Backends = ("c", "arm64", "amd64")
+Backends = ("c", "arm64", "amd64", "wasm64")
 RayBackends = ("hand-asm", "c-straight") + Backends
 StraightCFlags = ["-O2", "-pthread", "-fno-strict-aliasing", "-ffp-contract=off"]
 Root = Path(__file__).resolve().parent.parent
@@ -88,10 +88,91 @@ def hostInfo():
   return info
 
 
+def wasmArchitecture(data):
+  """Require a bounded, defined memory64 in a version-one core WASM module."""
+  if data[:8] != b"\0asm\x01\0\0\0":
+    raise BenchmarkError("Invalid WASM module header")
+
+  def unsigned(position, stop, bits=32):
+    """Read a bounded unsigned LEB128 index or memory limit."""
+    value = 0
+    for shift in range(0, bits, 7):
+      if position >= stop:
+        raise BenchmarkError("Truncated WASM integer")
+      byte = data[position]
+      position += 1
+      payload = byte & 127
+      if payload >= 1 << min(7, bits - shift):
+        raise BenchmarkError("WASM integer exceeds its declared width")
+      value |= payload << shift
+      if byte < 128:
+        return value, position
+    raise BenchmarkError("WASM integer exceeds its declared width")
+
+  position = 8
+  memory = False
+  while position < len(data):
+    section = data[position]
+    size, position = unsigned(position + 1, len(data))
+    stop = position + size
+    if stop > len(data):
+      raise BenchmarkError("Truncated WASM section")
+    if section == 5:
+      if memory:
+        raise BenchmarkError("Duplicate WASM memory section")
+      memory = True
+      count, position = unsigned(position, stop)
+      flags, position = unsigned(position, stop)
+      if count != 1 or flags != 5:
+        raise BenchmarkError("WASM benchmark requires one bounded memory64")
+      minimum, position = unsigned(position, stop, 64)
+      maximum, position = unsigned(position, stop, 64)
+      if minimum > maximum or maximum > 1 << 48 or position != stop:
+        raise BenchmarkError("Invalid WASM memory64 bounds")
+    position = stop
+  if not memory:
+    raise BenchmarkError("WASM benchmark requires defined memory64")
+  return "wasm64"
+
+
+def wasmtimeExecutable(env=None):
+  """Resolve the explicit WASI engine override or the installed Wasmtime."""
+  environment = os.environ if env is None else env
+  requested = environment.get("NIFTY_WASMTIME", "wasmtime")
+  return shutil.which(requested, path=environment.get("PATH"))
+
+
+def engineMetadata(backends, env=None):
+  """Capture the actual WASI engine executable, version, and content hash."""
+  if "wasm64" not in backends:
+    return None
+  executable = wasmtimeExecutable(env)
+  if not executable:
+    raise BenchmarkError("wasm64 requires Wasmtime; set NIFTY_WASMTIME")
+  return {"path": executable, "version": optionalCommand([executable, "--version"]),
+          "sha256": hashlib.sha256(Path(executable).read_bytes()).hexdigest()}
+
+
+def executionCommand(backend, executable, host, env=None):
+  """Run WASM with Wasmtime or retain the host's native execution convention."""
+  if backend == "wasm64":
+    engine = wasmtimeExecutable(env)
+    if not engine:
+      raise BenchmarkError("wasm64 requires Wasmtime; set NIFTY_WASMTIME "
+                           "to its executable")
+    return [engine, "run", "-W", "memory64=y", str(executable)]
+  command = [str(executable)]
+  if backend == "amd64" and host["physical_architecture"] == "arm64":
+    command = ["/usr/bin/arch", "-x86_64"] + command
+  return command
+
+
 def binaryArchitectures(path):
-  """Read Mach-O or ELF CPU metadata without invoking platform tools."""
+  """Read native CPU metadata or validate WASM memory64 without other tools."""
   with path.open("rb") as binary:
     header = binary.read(4096)
+    if header[:4] == b"\0asm":
+      return [wasmArchitecture(header + binary.read())]
   cpus = []
   macho = {b"\xcf\xfa\xed\xfe": "<", b"\xce\xfa\xed\xfe": "<",
            b"\xfe\xed\xfa\xcf": ">", b"\xfe\xed\xfa\xce": ">"}
@@ -115,7 +196,7 @@ def binaryArchitectures(path):
     for cpu in cpus if cpu in (0x01000007, 0x0100000c)))
 
 
-def availableBackends(host, compiler):
+def availableBackends(host, compiler, includeWasm=False):
   """List targets executable on this host with available runtime templates."""
   result = []
   if shutil.which("cc"):
@@ -130,11 +211,15 @@ def availableBackends(host, compiler):
     if runnable and (backend in compilerArches or template.is_file() or
                      (runtime and Path(runtime).is_file())):
       result.append(backend)
+  if includeWasm and wasmtimeExecutable():
+    result.append("wasm64")
   return result
 
 
 def backendLabel(backend, host, architecture):
   """Describe native execution and translated AMD64 results explicitly."""
+  if backend == "wasm64":
+    return "WASM64 (Wasmtime WASI)"
   if backend == "hand-asm":
     return "Hand ASM (ARM64)"
   if backend == "amd64" and host["physical_architecture"] == "arm64":
@@ -207,10 +292,11 @@ def parseOutput(output, size, repeat):
           "pixels": bytes(pixels), "clock_fields": fields}
 
 
-def configuredSource(source, size, repeat):
+def configuredSource(source, size, repeat, backend=None):
   """Substitute only exact configuration constants in a generated copy."""
+  clockId = 1 if backend == "wasm64" else time.CLOCK_MONOTONIC
   for name, value in (("ImageSize", size), ("Repetitions", repeat),
-                      ("EmitPixels", 1), ("ClockId", time.CLOCK_MONOTONIC)):
+                      ("EmitPixels", 1), ("ClockId", clockId)):
     pattern = rf"(?m)^(const {name} = )[0-9]+$"
     source, count = re.subn(pattern, lambda match: match[1] + str(value), source)
     if count != 1:
@@ -241,7 +327,7 @@ def buildBackend(backend, size, repeat, options, env):
   """Build once per backend and configuration, preserving all artifacts."""
   directory = options.output / "build" / f"{size}x{size}-r{repeat}" / backend
   directory.mkdir(parents=True, exist_ok=True)
-  executable = directory / "raytracer"
+  executable = directory / ("raytracer.wasm" if backend == "wasm64" else "raytracer")
   executable.unlink(missing_ok=True)
   snapshots = {}
   if backend in ("c-straight", "hand-asm"):
@@ -269,12 +355,14 @@ def buildBackend(backend, size, repeat, options, env):
     snapshots[originalPath.name] = hashlib.sha256(originalPath.read_bytes()).hexdigest()
     sourcePath.write_bytes(configuredSource(
       originalPath.read_bytes().decode("utf-8").replace("\r\n", "\n"),
-      size, repeat).encode("utf-8"))
+      size, repeat, backend).encode("utf-8"))
     command = [str(options.compiler), "build", str(sourcePath),
                f"--backend:{backend}", "-o", str(executable)]
   result, compileNs = runCommand(command, options.timeout, env)
   (directory / "build.stdout").write_bytes(result.stdout)
   (directory / "build.stderr").write_bytes(result.stderr)
+  if backend == "wasm64" and binaryArchitectures(executable) != ["wasm64"]:
+    raise BenchmarkError("Compiler did not produce a memory64 WASM module")
   inspection = None
   if options.emit_ir and backend not in ("c", "c-straight", "hand-asm"):
     irPath = directory / "raytracer.ir"
@@ -324,15 +412,15 @@ def benchmark(size, repeat, options, backends, host, env):
   for backend, result in results.items():
     architectures = binaryArchitectures(Path(result["executable"]))
     if len(architectures) != 1 or (
-        backend in ("arm64", "amd64", "hand-asm") and
+        backend in ("arm64", "amd64", "wasm64", "hand-asm") and
         architectures != ["arm64" if backend == "hand-asm" else backend]):
       raise BenchmarkError(f"Wrong executable architecture for {backend}: {architectures}")
+    if (backend == "wasm64") != (architectures == ["wasm64"]):
+      raise BenchmarkError(f"Wrong module ABI for {backend}: {architectures}")
     architecture = architectures[0]
     result["execution_architecture"] = architecture
     result["label"] = backendLabel(backend, host, architecture)
-    command = [result["executable"]]
-    if architecture == "amd64" and host["physical_architecture"] == "arm64":
-      command = ["/usr/bin/arch", "-x86_64"] + command
+    command = executionCommand(architecture, result["executable"], host, env)
     result["execution_command"] = command
   rounds = []
   for roundIndex in range(options.warmups + options.samples):
@@ -377,7 +465,7 @@ def parseArguments(arguments=None):
   parser = argparse.ArgumentParser(description=__doc__,
       epilog="Standalone C baseline details: benchmarks/C_STRAIGHT.md")
   parser.add_argument("--backend", action="append", default=[],
-                      help="Repeat or use comma-separated hand-asm,hand-c,c,arm64,amd64 (c-straight aliases hand-c)")
+                      help="Repeat or use comma-separated hand-asm,hand-c,c,arm64,amd64,wasm64 (aliases c-straight and wasm)")
   parser.add_argument("--size", type=int, default=64)
   parser.add_argument("--samples", type=int, default=5)
   parser.add_argument("--warmups", type=int, default=1)
@@ -411,7 +499,7 @@ def parseArguments(arguments=None):
   selected = []
   for entry in options.backend:
     for backend in entry.split(","):
-      backend = "c-straight" if backend == "hand-c" else backend
+      backend = {"hand-c": "c-straight", "wasm": "wasm64"}.get(backend, backend)
       if backend not in RayBackends:
         parser.error(f"unknown backend: {backend}")
       if backend not in selected:
@@ -467,7 +555,7 @@ def main(arguments=None):
       raise BenchmarkError(f"Compiler is not executable: {options.compiler}")
     if not options.source.is_file():
       raise BenchmarkError(f"Renderer source does not exist: {options.source}")
-  available = availableBackends(host, options.compiler) if needsNifty else []
+  available = availableBackends(host, options.compiler, includeWasm=True) if needsNifty else []
   if options.cc:
     available.insert(0, "c-straight")
     if handAsmSupported:
@@ -481,6 +569,9 @@ def main(arguments=None):
     raise BenchmarkError("No executable backend is available on this host")
   for backend in backends:
     if backend not in available:
+      if backend == "wasm64":
+        raise BenchmarkError("wasm64 requires Wasmtime; set NIFTY_WASMTIME "
+                             "to its executable")
       raise BenchmarkError(f"Backend {backend} is unsupported on this host or its "
                            "runtime template is unavailable; available: " +
                            ", ".join(available))
@@ -499,6 +590,8 @@ def main(arguments=None):
       inputs.append(assemblyManifest)
   if options.cc and any(backend in ("c", "c-straight", "hand-asm") for backend in backends):
     inputs.append(Path(options.cc))
+  if "wasm64" in backends:
+    inputs.append(Path(wasmtimeExecutable()))
   fingerprints = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
   options.output.mkdir(parents=True, exist_ok=True)
   for name in ("results.json", "results.md", "raytracer.png"):
@@ -537,7 +630,8 @@ def main(arguments=None):
                   "cc_path": options.cc,
                   "straight_c_flags": StraightCFlags if standalone else None,
                   "hand_asm_flags": StraightCFlags + ["-DRAY_HAND_ASM", "-arch", "arm64"] if "hand-asm" in backends else None,
-                  "nim": optionalCommand(["nim", "--version"])},
+                  "nim": optionalCommand(["nim", "--version"]),
+                  "wasmtime": engineMetadata(backends)},
     "settings": {"size": options.size, "samples": options.samples,
                  "warmups": options.warmups, "repeat": options.repeat,
                  "backends": backends, "timeout_seconds": options.timeout,

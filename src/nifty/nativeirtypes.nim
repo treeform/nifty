@@ -90,7 +90,7 @@ proc layoutStorage*(plan: var NativePlan, mapping: var seq[int32],
       role: RuntimeField))
   else:
     case data.kind
-    of IntType, FloatType, types.BoolType:
+    of IntType, FloatType, OpaqueType, types.BoolType:
       let scalar = case data.kind
         of FloatType:
           if data.bytes == 4: Float32Type else: Float64Type
@@ -172,6 +172,8 @@ proc layoutStorage*(plan: var NativePlan, mapping: var seq[int32],
           offset: int32(data.valOffset)))
       else:
         discard
+    of CStringType:
+      doAssert false, "CString layouts use the dynamic byte descriptor"
     of TypeVarType:
       doAssert false, "Native storage requires instantiated types"
   if result == 0:

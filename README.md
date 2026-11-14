@@ -1,11 +1,15 @@
 # Nifty - a super static language.
 
-Nifty is nimmy's super-static brother: a tiny systems language with
-Nim-flavored syntax where memory, threads, and control flow are all fixed at
-compile time. No heap, no recursion, no exceptions, no hidden anything.
-It compiles to portable C (C99 + pthreads).
+Nifty is a small systems language with Nim-flavored syntax, checked integer
+ranges, and statically checked memory and thread access. Fixed-capacity
+containers need no heap; growable containers report allocation failure
+explicitly. It compiles to C (C99 + pthreads) or native AMD64 and ARM64.
 
 See [spec.md](spec.md) for the language, `examples/` for programs.
+The [FFI guide](docs/ffi.md) covers foreign buffer contracts, opaque handles,
+and checked C-string inputs. The ordinary [console and file library](docs/io.md)
+uses that FFI; [file_io.nifty](examples/file_io.nifty) shows a binary file
+roundtrip without compiler output builtins.
 
 ```nim
 var total: int

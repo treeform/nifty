@@ -10,7 +10,9 @@ type
     ChannelType, # channel[N, T]: a blocking bounded queue (the semaphore system)
     TypeVarType, # a generic $T waiting to be bound at instantiation
     FloatType, # IEEE float32/float64: data values, outside the proof engine
-    UnionType # A tagged union of nominal object alternatives.
+    UnionType, # A tagged union of nominal object alternatives.
+    OpaqueType, # nominal foreign pointer; only null testing and equality
+    CStringType # Immutable owned NUL-terminated bytes; borrowed pointer at FFI.
   Field* = object
     name*: string
     typ*: Typ
@@ -19,7 +21,7 @@ type
     len*: int64          # ArrayType/SeqType/StringType: capacity
     dynamic*: bool       # Growable seq/string: len is not a static capacity.
     elem*: Typ           # ArrayType/SeqType; SetType: the range element type
-    name*: string        # ObjectType
+    name*: string        # ObjectType/OpaqueType: nominal identity
     fields*: seq[Field]  # ObjectType
     members*: seq[Typ]   # UnionType alternatives in declaration order.
     typeId*: int64       # Canonical identity within the checked program.
@@ -117,6 +119,7 @@ type
     elifs*: seq[Elif]  # if: all condition branches, first is the `if`
     elseBody*: seq[Stmt]
     bodyScope*, elseScope*: int
+    nonowningTemp*: bool # Compiler-generated readonly descriptor snapshot.
     drops*: seq[BindingId] # Ordered owners released by return or break.
 
   RoutineKind* = enum
@@ -164,6 +167,7 @@ type
     globals*: seq[GlobalDef]
     types*: seq[TypeDef]
     routines*: seq[Routine]
+    supportCount*: int        # Trailing backend support routines.
     semantics*: SemanticPlan # Present only after all source checks pass.
     typeIds*: Table[string, int64] # Build-local, collision-free identities.
 
@@ -176,7 +180,7 @@ const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
 # uniform call syntax - builtins keep their meaning on every type.
 const builtinMethods* = @mutMethods & @["or", "get", "contains",
   "startsWith", "endsWith", "find", "findByte", "toInt",
-  "len", "ok", "lo", "hi"]
+  "len", "ok", "lo", "hi", "isNull", "toCString"]
 
 proc instances*(r: Routine): int =
   ## How many OS threads a thread declaration starts (thread 4 w()).
@@ -282,6 +286,10 @@ proc typeLayout(t: Typ, line = 0): tuple[bytes, alignment: int64] =
     of IntType, FloatType:
       let width = if current.width > 0: int64(current.width) else: 8'i64
       result = (width, width)
+    of OpaqueType:
+      result = (8'i64, 8'i64)
+    of CStringType:
+      result = (24'i64, 8'i64)
     of ArrayType:
       let item = layout(current.elem)
       result = (sizeMul(current.len, item.bytes, line), item.alignment)
@@ -400,7 +408,7 @@ proc typeEq*(a, b: Typ): bool =
     return a.len == b.len and typeEq(a.elem, b.elem) and
       sameStorage(a.elem, b.elem) and
       typeEq(a.val, b.val) and sameStorage(a.val, b.val)
-  if a.kind in {ObjectType, UnionType}:
+  if a.kind in {ObjectType, UnionType, OpaqueType}:
     return a.name == b.name
   if a.kind == ChannelType:
     return false # channels are never copied or compared
@@ -422,6 +430,7 @@ proc `$`*(t: Typ): string =
   of FloatType: t.dname
   of BoolType: "bool"
   of StringLitType: "string"
+  of CStringType: "cstring"
   of LockType: "Lock"
   of ArrayType: "array[" & t.sizeStr & ", " & $t.elem & "]"
   of SeqType:
@@ -435,7 +444,7 @@ proc `$`*(t: Typ): string =
   of ChannelType: "channel[" & t.sizeStr & ", " & $t.elem & "]"
   of DenseMapType: "map[" & $t.elem & ", " & $t.val & "]"
   of SparseMapType: "map[" & $t.len & ", " & $t.elem & ", " & $t.val & "]"
-  of ObjectType, UnionType: t.name
+  of ObjectType, UnionType, OpaqueType: t.name
   of TypeVarType: "$" & t.gname
 
 proc bigRet*(t: Typ): bool =

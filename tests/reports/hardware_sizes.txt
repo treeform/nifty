@@ -7,7 +7,10 @@ globals:
   total: 804 bytes
 
 stack, worst case per thread (estimate: locals + params + 16 bytes/frame; big locals are on the arena):
-  main: 32 bytes (main -> fill)
+  main: 303 bytes (main -> niftyEchoSupport_echoFloat -> niftyEchoSupport_echoText -> niftyEchoSupport_consoleWrite -> niftyEchoSupport_ioWriteChunk -> niftyEchoSupport_ioRawWrite)
+
+arena per thread (exact; big locals, allocated up front):
+  main: 8208 bytes (main -> niftyEchoSupport_echoFinish -> niftyEchoSupport_echoText -> niftyEchoSupport_consoleWrite)
 
 worst-case abstract ops per thread:
   main: 30 ops total

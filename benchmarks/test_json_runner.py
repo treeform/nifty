@@ -121,7 +121,7 @@ def testConfiguration():
   assert options.backend == ["hand-asm", "c-straight", "c", "amd64"]
   assert options.hand_asm_source == run.Root / "benchmarks/arm64/json_parser_hand.S"
   assert options.straight_c_source == run.Root / "benchmarks/json_parser_straight.c"
-  assert run.parseArguments(["--backend", "amd64,hand-c,hand-asm,c,arm64"]).backend == list(run.Backends)
+  assert run.parseArguments(["--backend", "amd64,hand-c,hand-asm,c,arm64,wasm"]).backend == list(run.Backends)
   with patch.dict(run.os.environ, {"CC": "test-json-cc"}):
     assert run.parseArguments([]).cc == "test-json-cc"
     assert run.parseArguments(["--cc", "explicit-cc"]).cc == "explicit-cc"
@@ -374,3 +374,44 @@ testStandaloneMain()
 testAvailability()
 testSampling()
 print("JSON benchmark oracle, protocol, configuration, and sampling checks passed")
+
+
+def testWasmBuild():
+  """Require WASI clocks, memory64 artifacts, and engine execution commands."""
+  assert run.parseArguments(["--backend", "wasm,wasm64"]).backend == ["wasm64"]
+  host = {"system": "Darwin", "physical_architecture": "arm64", "rosetta_available": True}
+  with patch.object(run.Ray, "availableBackends", return_value=["c", "arm64", "amd64", "wasm64"]):
+    assert run.availableBackends(host, Path("nifty"), "cc") == list(run.Backends)
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    options = SimpleNamespace(output=directory, compiler=directory / "nifty", timeout=1,
+                              opt="speed", emit_ir=False, host=host, library_files={},
+                              records=4, repeat=2,
+                              source_text=(run.Root / "benchmarks/json_parser.nifty").read_text())
+    commands = []
+    def build(command, timeout, env):
+      """Write a bounded memory64 module only at the compiler output path."""
+      commands.append(command)
+      Path(command[command.index("-o") + 1]).write_bytes(b"\0asm\x01\0\0\0\x05\x04\x01\x05\x01\x02")
+      return SimpleNamespace(stdout=b"", stderr=b""), 1
+    with patch.object(run.Ray, "runCommand", side_effect=build), patch.object(
+        run.Ray, "wasmtimeExecutable", return_value="/engine/wasmtime"), patch.object(
+        run.time, "CLOCK_MONOTONIC", 6, create=True):
+      result = run.buildBackend("wasm64", options, {})
+      assert result["executable"].endswith(".wasm")
+      assert result["execution_command"] == ["/engine/wasmtime", "run", "-W", "memory64=y", result["executable"]]
+      assert "const ClockId = 1\n" in Path(result["source"]).read_text()
+      assert "--backend:wasm64" in commands[0]
+    def nativeBuild(command, timeout, env):
+      """Simulate an incompatible native artifact returned for WASM."""
+      Path(command[command.index("-o") + 1]).write_bytes(b"\xcf\xfa\xed\xfe\x0c\0\0\x01")
+      return SimpleNamespace(stdout=b"", stderr=b""), 1
+    with patch.object(run.Ray, "runCommand", side_effect=nativeBuild):
+      try:
+        run.buildBackend("wasm64", options, {})
+      except run.BenchmarkError:
+        pass
+      else:
+        raise AssertionError("Native executable accepted for WASM")
+
+testWasmBuild()

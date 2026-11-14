@@ -30,10 +30,11 @@ try:
       binary = directory / (name & ExeExt)
     doAssert "static _Thread_local uint8_t *ni_sp;" in generated
     doAssert "static void f_unused(" in generated
+    # Echo helpers require 8208 bytes; only reachable scratch adds 8192.
     if name == "large":
-      doAssert "uint8_t ni_arena_main[8192]" in generated
+      doAssert "uint8_t ni_arena_main[16400]" in generated
     else:
-      doAssert "uint8_t ni_arena_" notin generated
+      doAssert "uint8_t ni_arena_main[8208]" in generated
     writeFile(cPath, generated)
     let build = execCmdEx(cCompileCommand(cPath, binary))
     doAssert build.exitCode == 0, build.output

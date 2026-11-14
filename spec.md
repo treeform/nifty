@@ -264,6 +264,46 @@ extern "libc":
   externs honor their declared shapes." The declaration file is the
   contract; everything on nifty's side of it stays proven.
 
+### NUL-terminated input: `cstring`
+
+An extern `cstring` parameter passes a borrowed pointer to NUL-terminated
+bytes, never the Nifty owner descriptor. The foreign routine must read only
+through the first NUL and must neither modify nor retain the address.
+Foreign `cstring` returns and writable `var cstring` parameters are rejected.
+Bindings must not expose aliases into a scoped C-string owner's bytes through
+opaque results, output parameters, or retained global pointers. Use an
+offset/copy adapter for APIs returning views until borrowed lifetimes can be
+expressed. This non-escape promise is part of the trusted foreign contract.
+NUL-free literals can be passed directly to an extern or ordinary `cstring`
+parameter with no heap allocation, including the empty literal.
+
+```nifty
+extern "libc":
+  proc cLength "strlen"(text: cstring): int64
+
+proc inspect(path: string) =
+  let converted = path.toCString()
+  if converted.ok:
+    echo cLength(converted)
+
+thread main() =
+  echo cLength("literal")
+```
+
+`string.toCString()` returns `cstring?`: it copies into an independent owned
+allocation and adds its terminator, or returns `none` for an embedded zero,
+allocation failure, or an unrepresentable allocation size. The empty string
+also receives a valid one-byte allocation. Changing the source after conversion
+does not change the resulting bytes.
+
+A conversion must directly initialize a scoped local in a proc or thread.
+The owner is released on scope exit, return, or break. The optional must be
+checked before passing it as `cstring`. A cstring cannot be copied, assigned,
+returned, stored inside a container or object, indexed, compared, printed,
+or changed through string methods. Ordinary parameters borrow it for the
+call. These restrictions also prevent an allocating conversion temporary
+from escaping cleanup.
+
 ## Generics: `$` substitution variables
 
 A routine becomes generic by using `$name` variables in its parameter

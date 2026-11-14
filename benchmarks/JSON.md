@@ -4,7 +4,7 @@
 raytracer benchmark. `json_parser_straight.c` is an independent handwritten
 C parser with its own owned tree. It compiles directly with the C compiler
 and does not use Nifty. Tables list Hand ASM, Hand C, Nifty C backend,
-ARM64, then AMD64 when available. Build the Nifty compiler and runtime templates from
+ARM64, AMD64, then WASM64 when available. Build the Nifty compiler and runtime templates from
 the repository root with `nim r tools/build.nim`, then compare them:
 
 ```sh
@@ -12,6 +12,7 @@ python3 benchmarks/run_json.py
 python3 benchmarks/run_json.py --backend hand-c,c,arm64 --records 512 --repeat 20 --wall
 python3 benchmarks/run_json.py --backend hand-c
 python3 benchmarks/run_json.py --backend hand-asm,hand-c --repeat 100
+python3 benchmarks/run_json.py --backend wasm64 --records 128 --repeat 100
 python3 benchmarks/run_json.py --opt none --output /tmp/nifty-json-unoptimized
 python3 benchmarks/test_json_runner.py
 python3 benchmarks/test_json_straight.py
@@ -26,6 +27,12 @@ selects available executable targets. AMD64 on an ARM64 Mac requires
 Rosetta and is explicitly labeled as translated execution. The Python
 protocol tests also run on Windows, where the timed workload is currently
 unsupported.
+
+`wasm64` (alias `wasm`) runs the same Nifty parser through Wasmtime with
+memory64 enabled. Install Wasmtime or set `NIFTY_WASMTIME` to its executable.
+The runner selects WASI's monotonic clock, validates the module's memory64
+ABI, and records the engine version and hash. Engine compilation and process
+startup are outside the guest's timed parse/consume/cleanup intervals.
 
 `hand-c` (also `c-straight`) is the handwritten C parser; `c` is the Nifty parser compiled
 through Nifty's C backend. Both C entries use the same C compiler and

@@ -144,10 +144,10 @@ def parseOutput(output, records, repeat, expected):
           "clock_fields": {key: fields[key] for key in names[3:]}}
 
 
-def configuredSource(source, records, repeat):
+def configuredSource(source, records, repeat, backend=None):
   """Change only workload constants and the generated copy's library path."""
   for name, value in (("Records", records), ("Repetitions", repeat),
-                      ("ClockId", time.CLOCK_MONOTONIC)):
+                      ("ClockId", 1 if backend == "wasm64" else time.CLOCK_MONOTONIC)):
     source, count = re.subn(rf"(?m)^(const {name} = )[0-9]+$",
                             lambda match: match[1] + str(value), source)
     if count != 1:
@@ -162,7 +162,8 @@ def buildBackend(backend, options, env):
   """Build a self-contained snapshot and preserve commands and diagnostics."""
   directory = options.output / "build" / f"n{options.records}-r{options.repeat}" / backend
   directory.mkdir(parents=True, exist_ok=True)
-  executable = directory / "json_parser"
+  executable = directory / ("json_parser.wasm" if backend == "wasm64" else "json_parser")
+  executable.unlink(missing_ok=True)
   assembly = None
   provenance = None
   if backend in StandaloneBackends:
@@ -188,7 +189,7 @@ def buildBackend(backend, options, env):
       (directory / "lib" / name).write_bytes(data)
     source = directory / "json_parser.nifty"
     source.write_bytes(configuredSource(options.source_text, options.records,
-                                       options.repeat).encode("utf-8"))
+                                       options.repeat, backend).encode("utf-8"))
     command = [str(options.compiler), "build", str(source), f"--backend:{backend}",
                f"--opt:{options.opt}", "-o", str(executable)]
   response, elapsed = Ray.runCommand(command, options.timeout, env)
@@ -196,13 +197,13 @@ def buildBackend(backend, options, env):
   (directory / "build.stderr").write_bytes(response.stderr)
   architectures = Ray.binaryArchitectures(executable)
   if len(architectures) != 1 or (
-      backend in ("arm64", "amd64", "hand-asm") and
+      backend in ("arm64", "amd64", "wasm64", "hand-asm") and
       architectures != ["arm64" if backend == "hand-asm" else backend]):
     raise BenchmarkError(f"Unexpected executable architecture for {backend}: {architectures}")
   architecture = architectures[0]
-  execution = [str(executable)]
-  if architecture == "amd64" and options.host["physical_architecture"] == "arm64":
-    execution = ["/usr/bin/arch", "-x86_64"] + execution
+  if (backend == "wasm64") != (architectures == ["wasm64"]):
+    raise BenchmarkError(f"Wrong module ABI for {backend}: {architectures}")
+  execution = Ray.executionCommand(architectures[0], executable, options.host, env)
   inspection = None
   if options.emit_ir and backend not in ("c",) + StandaloneBackends:
     ir = directory / "json_parser.ir"
@@ -294,6 +295,7 @@ def parseArguments(arguments=None):
     for backend in entry.split(","):
       if backend == "hand-c":
         backend = "c-straight"
+      backend = "wasm64" if backend == "wasm" else backend
       if backend not in Backends:
         parser.error(f"unknown backend: {backend}")
       if backend not in selected:
@@ -336,7 +338,7 @@ def handAsmSupported(host):
 
 def availableBackends(host, compiler, cc, needsNifty=True):
   """Select JSON backends without changing the shared ray backend registry."""
-  available = list(Ray.availableBackends(host, compiler)) if needsNifty else []
+  available = list(Ray.availableBackends(host, compiler, includeWasm=True)) if needsNifty else []
   if cc:
     available.insert(0, "c-straight")
     if handAsmSupported(host):
@@ -383,6 +385,8 @@ def main(arguments=None):
   for name in ("results.json", "results.md"):
     (options.output / name).unlink(missing_ok=True)
   inputs = [options.compiler] if needsNifty else []
+  if "wasm64" in backends:
+    inputs.append(Path(Ray.wasmtimeExecutable()))
   if options.cc and any(backend in ("c",) + StandaloneBackends for backend in backends):
     inputs.append(Path(options.cc))
   fingerprints = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
@@ -400,7 +404,7 @@ def main(arguments=None):
   report = {"schema": "nifty-json-benchmark-v1", "machine": host,
             "timing_scope": TimingScope,
             "comparison_scope": ComparisonScope if any(backend in StandaloneBackends for backend in backends) else None,
-            "toolchain": {"compiler": str(options.compiler) if needsNifty else None,
+            "toolchain": {"wasmtime": Ray.engineMetadata(backends), "compiler": str(options.compiler) if needsNifty else None,
                           "compiler_sha256": fingerprints.get(options.compiler),
                           "compiler_architectures": Ray.binaryArchitectures(options.compiler) if needsNifty else [],
                           "compiler_help": Ray.optionalCommand([str(options.compiler), "--help"]) if needsNifty else None,

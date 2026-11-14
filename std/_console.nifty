@@ -1,0 +1,32 @@
+import _io_platform
+
+const IoChunkSize = 4096
+# Leave one scratch chunk of headroom for checked offset arithmetic.
+const IoMaxBytes = 9223372036854771711
+
+proc consoleWrite(text: string): bool =
+  if text.len > IoMaxBytes:
+    return false
+  var sent: 0 .. IoMaxBytes = 0
+  while sent < text.len max IoMaxBytes:
+    var chunk: string[IoChunkSize]
+    chunk.copyRange(text, sent, text.len)
+    let written = ioWriteChunk(chunk)
+    if written <= 0 or written > IoChunkSize or written > chunk.len:
+      return false
+    let next = sent + written
+    if next > IoMaxBytes:
+      return false
+    sent = next
+  return true
+
+
+type ConsoleStream = opaque
+
+extern "libc":
+  proc consoleFlush "fflush"(stream: ConsoleStream): int32
+
+extern "nifty":
+  proc consoleStream "nifty_stdout_stream"(): ConsoleStream
+  proc consoleLock "nifty_stdout_lock"()
+  proc consoleUnlock "nifty_stdout_unlock"()

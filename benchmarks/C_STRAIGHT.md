@@ -6,8 +6,10 @@ parser, checker, C emitter, or native runtime. The existing `c` entry is
 still Nifty source compiled through the Nifty C backend. The old
 `c-straight` CLI spelling and report key remain compatible.
 
-The default order is Hand ASM, Hand C, Nifty C backend, ARM64, then AMD64.
+The default order is Hand ASM, Hand C, Nifty C backend, ARM64, AMD64, then WASM64.
 Hand ASM is available on Apple Silicon Macs; see [RAY_HAND_ASM.md](RAY_HAND_ASM.md).
+WASM64 requires Wasmtime and runs the same Nifty renderer; see
+[COMPARISON.md](COMPARISON.md) for the combined benchmark table.
 
 ```sh
 # Compare Hand ASM, Hand C, Nifty C, and available native targets.
