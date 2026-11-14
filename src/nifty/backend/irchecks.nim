@@ -429,9 +429,10 @@ proc verifyIr*(module: IrModule) {.raises: [BackendError].} =
           require(function.values[results.first].valueType ==
             operandType(arguments, 0), "unary type mismatch")
         of FloorOp, RoundOp:
-          require(function.values[results.first].valueType == Float32Type and
-            operandType(arguments, 0) == Float32Type,
-            "floating rounding requires float32 operands and results")
+          let kind = function.values[results.first].valueType
+          require(kind in {Float32Type, Float64Type} and
+            operandType(arguments, 0) == kind,
+            "floating rounding requires matching scalar float types")
         of LoadOp, StoreOp, MoveBytesOp, ClearBytesOp, OffsetAddressOp:
           require(operandType(arguments, 0) == AddressType,
             "memory operand is not an address")
