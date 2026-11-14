@@ -1,0 +1,10 @@
+proc empty(values: var seq[2, int]): bool =
+  values.clear()
+  return true
+
+thread main() =
+  var values: seq[2, int]
+  values.add(7)
+  let i = 0
+  if i < values.len and empty(values):
+    echo values[i]

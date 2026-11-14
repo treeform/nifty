@@ -1,0 +1,12 @@
+proc reset(x: var 0 .. 10): bool =
+  x = 10
+  return false
+
+thread main() =
+  var i: 0 .. 10 = 0
+  var values: array[10, int]
+  values[0] = 1
+  if i >= 10 or reset(i):
+    echo 0
+  else:
+    echo values[i]

@@ -573,6 +573,8 @@ proc applyCmpFact(c: var Ctx, name, op: string, k: int64) =
     f.notZero = true
   c.facts[name] = f
 
+proc collectAssignedExpr(c: Ctx, e: Expr, s: var HashSet[string])
+
 proc addCondFacts(c: var Ctx, e: Expr, negated = false) =
   ## Record what is proven when `e` is true (or false, if negated).
   if e.kind == NotExpr:
@@ -600,11 +602,24 @@ proc addCondFacts(c: var Ctx, e: Expr, negated = false) =
     return
   if not negated and e.sval == "and":
     c.addCondFacts(e.kids[0])
+    var touched: HashSet[string]
+    c.collectAssignedExpr(e.kids[1], touched)
+    for name in touched:
+      c.delFacts name
     c.addCondFacts(e.kids[1])
     return
   if negated and e.sval == "or":
     c.addCondFacts(e.kids[0], true)
+    var touched: HashSet[string]
+    c.collectAssignedExpr(e.kids[1], touched)
+    for name in touched:
+      c.delFacts name
     c.addCondFacts(e.kids[1], true)
+    return
+  # A comparison that mutates an operand cannot refine its current value.
+  var touched: HashSet[string]
+  c.collectAssignedExpr(e, touched)
+  if touched.len > 0:
     return
   var left = e.kids[0]
   var right = e.kids[1]
