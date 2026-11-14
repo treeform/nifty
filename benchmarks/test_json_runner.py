@@ -174,7 +174,8 @@ def testStraightC():
         assert flag in command
       snapshot = Path(result["source"])
       assert str(snapshot) in command
-      assert snapshot != source and snapshot.read_text() == sourceText
+      assert snapshot != source
+      assert snapshot.read_bytes() == sourceText.encode("utf-8")
       assert result["source_sha256"] == hashlib.sha256(sourceText.encode()).hexdigest()
       assert result["executable_sha256"] == hashlib.sha256(b"C executable").hexdigest()
       assert result["compile_wall_ns"] == 123 and result["inspection"] is None
@@ -198,12 +199,48 @@ def testStraightC():
       assert (snapshot.parent / "build.stderr").read_bytes() == b"diagnostic"
 
 
+def testSnapshotBytes():
+  """Keep generated C and Nifty snapshot bytes independent of host newlines."""
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    niftyText = ('import "../lib/json"\nconst Records = 128\n'
+                 'const Repetitions = 10\nconst ClockId = 6\n')
+    cText = "/* UTF-8 café */\nint main(void) { return 0; }\n"
+    options = SimpleNamespace(
+      output=directory, records=1, repeat=2, straight_c_text=cText,
+      source_text=niftyText, library_files={}, compiler=Path("test-nifty"),
+      cc="test-cc", opt="speed", timeout=1, emit_ir=False,
+      host={"system": "Linux", "physical_architecture": "amd64"})
+
+    def build(command, timeout, env):
+      """Provide an executable without invoking either compiler."""
+      Path(command[command.index("-o") + 1]).write_bytes(b"executable")
+      return SimpleNamespace(stdout=b"", stderr=b""), 1
+
+    def windowsWriteText(path, data, encoding=None, errors=None, newline=None):
+      """Emulate Windows newline defaults while honoring explicit newlines."""
+      with path.open("w", encoding=encoding, errors=errors,
+                     newline="\r\n" if newline is None else newline) as stream:
+        return stream.write(data)
+
+    with patch.object(run.Ray, "runCommand", side_effect=build), \
+         patch.object(run.Ray, "binaryArchitectures", return_value=["amd64"]), \
+         patch.object(run.time, "CLOCK_MONOTONIC", 1, create=True), \
+         patch.object(Path, "write_text", windowsWriteText):
+      for backend, text in (("c-straight", cText),
+                            ("c", run.configuredSource(niftyText, 1, 2))):
+        result = run.buildBackend(backend, options, {})
+        expected = text.encode("utf-8")
+        assert Path(result["source"]).read_bytes() == expected
+        assert result["source_sha256"] == hashlib.sha256(expected).hexdigest()
+
+
 def testStandaloneMain():
   """Run standalone orchestration with missing Nifty inputs and libraries."""
   with tempfile.TemporaryDirectory() as temporary:
     directory = Path(temporary)
     source = directory / "parser.c"
-    source.write_text("standalone snapshot\n", encoding="utf-8")
+    source.write_bytes(b"standalone snapshot\r\n")
     compiler = directory / "test-cc"
     compiler.write_bytes(b"compiler")
     output = directory / "output"
@@ -244,7 +281,8 @@ def testStandaloneMain():
     assert report["settings"]["hand_asm_provenance"] == {"origin": "clang"}
     assert report["settings"]["source"] is None
     assert report["settings"]["library_sha256"] == {}
-    assert report["settings"]["straight_c_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert report["settings"]["straight_c_sha256"] == hashlib.sha256(
+      b"standalone snapshot\n").hexdigest()
 
 
 def testAvailability():
@@ -330,6 +368,7 @@ testOracle()
 testProtocol()
 testConfiguration()
 testStraightC()
+testSnapshotBytes()
 testStandaloneMain()
 testAvailability()
 testSampling()

@@ -167,7 +167,7 @@ def buildBackend(backend, options, env):
   provenance = None
   if backend in StandaloneBackends:
     source = directory / "json_parser_straight.c"
-    source.write_text(options.straight_c_text, encoding="utf-8")
+    source.write_bytes(options.straight_c_text.encode("utf-8"))
     flags = Ray.StraightCFlags.copy()
     if backend == "hand-asm":
       flags += ["-arch", "arm64", "-DJSON_HAND_ASM"]
@@ -187,8 +187,8 @@ def buildBackend(backend, options, env):
     for name, data in options.library_files.items():
       (directory / "lib" / name).write_bytes(data)
     source = directory / "json_parser.nifty"
-    source.write_text(configuredSource(options.source_text, options.records,
-                                      options.repeat), encoding="utf-8")
+    source.write_bytes(configuredSource(options.source_text, options.records,
+                                       options.repeat).encode("utf-8"))
     command = [str(options.compiler), "build", str(source), f"--backend:{backend}",
                f"--opt:{options.opt}", "-o", str(executable)]
   response, elapsed = Ray.runCommand(command, options.timeout, env)
