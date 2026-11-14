@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the JSON benchmark oracle and protocol without compiler builds."""
 
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 import hashlib
 import io
@@ -116,8 +116,13 @@ def testConfiguration():
                        f'const ClockId = {run.time.CLOCK_MONOTONIC}\n')
     expectError(lambda: run.configuredSource(source + source, 4, 3))
     expectError(lambda: run.configuredSource("const Records = 128\n", 4, 3))
-  options = run.parseArguments(["--backend", "c,amd64", "--backend", "c"])
-  assert options.backend == ["c", "amd64"]
+  options = run.parseArguments(["--backend", "c-straight,c,amd64",
+                                "--backend", "c-straight"])
+  assert options.backend == ["c-straight", "c", "amd64"]
+  assert options.straight_c_source == run.Root / "benchmarks/json_parser_straight.c"
+  with patch.dict(run.os.environ, {"CC": "test-json-cc"}):
+    assert run.parseArguments([]).cc == "test-json-cc"
+    assert run.parseArguments(["--cc", "explicit-cc"]).cc == "explicit-cc"
   assert (options.records, options.repeat, options.samples, options.warmups) == (128, 10, 5, 1)
   for arguments in (["--records", "0"], ["--records", "4097"],
                     ["--repeat", "0"], ["--repeat", "1001"],
@@ -128,6 +133,93 @@ def testConfiguration():
                     ["--timeout", "0"], ["--timeout", "3601"]):
     with redirect_stderr(io.StringIO()):
       expectError(lambda: run.parseArguments(arguments), SystemExit)
+
+
+def testStraightC():
+  """Build snapshot C once without accessing Nifty compiler or sources."""
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    source = directory / "standalone.c"
+    sourceText = "int main(void) { return 0; }\n"
+    source.write_text("changed after snapshot\n", encoding="utf-8")
+    for architecture in ("arm64", "amd64"):
+      options = SimpleNamespace(
+        output=directory / architecture, records=4, repeat=3,
+        straight_c_source=source, straight_c_text=sourceText,
+        cc="test-json-cc", timeout=1, emit_ir=True,
+        host={"system": "Darwin", "physical_architecture": "arm64"})
+      commands = []
+      environment = {"JSON_TEST": "snapshot"}
+
+      def build(command, timeout, env):
+        """Capture the direct C invocation and synthesize its executable."""
+        assert timeout == 1 and env is environment
+        commands.append(command)
+        Path(command[command.index("-o") + 1]).write_bytes(b"C executable")
+        return SimpleNamespace(stdout=b"built", stderr=b"diagnostic"), 123
+
+      with patch.object(run.Ray, "runCommand", side_effect=build), \
+           patch.object(run.Ray, "binaryArchitectures", return_value=[architecture]), \
+           patch.object(run.time, "CLOCK_MONOTONIC", 1, create=True):
+        result = run.buildBackend("c-straight", options, environment)
+      assert len(commands) == 1
+      command = commands[0]
+      assert command[:1 + len(run.Ray.StraightCFlags)] == [
+        "test-json-cc"] + run.Ray.StraightCFlags
+      for flag in ("-DRECORDS=4", "-DREPETITIONS=3", "-DCLOCK_ID=1"):
+        assert flag in command
+      snapshot = Path(result["source"])
+      assert str(snapshot) in command
+      assert snapshot != source and snapshot.read_text() == sourceText
+      assert result["source_sha256"] == hashlib.sha256(sourceText.encode()).hexdigest()
+      assert result["executable_sha256"] == hashlib.sha256(b"C executable").hexdigest()
+      assert result["compile_wall_ns"] == 123 and result["inspection"] is None
+      assert result["execution_architecture"] == architecture
+      assert "C straight" in result["label"]
+      assert ("Rosetta translated" in result["label"]) == (architecture == "amd64")
+      prefix = ["/usr/bin/arch", "-x86_64"] if architecture == "amd64" else []
+      assert result["execution_command"] == prefix + [result["executable"]]
+      assert (snapshot.parent / "build.stdout").read_bytes() == b"built"
+      assert (snapshot.parent / "build.stderr").read_bytes() == b"diagnostic"
+
+
+def testStandaloneMain():
+  """Run standalone orchestration with missing Nifty inputs and libraries."""
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    source = directory / "parser.c"
+    source.write_text("standalone snapshot\n", encoding="utf-8")
+    compiler = directory / "test-cc"
+    compiler.write_bytes(b"compiler")
+    output = directory / "output"
+    host = {"system": "Linux", "physical_architecture": "amd64"}
+
+    def benchmark(options, backends, machine, env):
+      """Inspect the selected standalone inputs before report publication."""
+      assert backends == ["c-straight"] and machine == host
+      assert options.source_text is None and options.library_files == {}
+      assert options.straight_c_text == "standalone snapshot\n"
+      assert options.cc == str(compiler) and env["CC"] == str(compiler)
+      return {}
+
+    with patch.object(run, "Root", directory / "missing-repository"), \
+         patch.object(run.Ray, "hostInfo", return_value=host), \
+         patch.object(run.shutil, "which", return_value=str(compiler)), \
+         patch.object(run.Ray, "availableBackends", side_effect=AssertionError("Nifty discovery")), \
+         patch.object(run.Ray, "binaryArchitectures", side_effect=AssertionError("Nifty inspection")), \
+         patch.object(run.Ray, "optionalCommand", return_value="C version"), \
+         patch.object(run, "benchmark", side_effect=benchmark), \
+         patch.object(run, "markdownReport", return_value="standalone report"), \
+         patch.object(run.time, "CLOCK_MONOTONIC", 1, create=True), \
+         redirect_stdout(io.StringIO()):
+      assert run.main(["--backend", "c-straight", "--straight-c-source", str(source),
+                       "--output", str(output)]) == 0
+    report = run.json.loads((output / "results.json").read_text())
+    assert report["toolchain"]["compiler"] is None
+    assert report["toolchain"]["compiler_architectures"] == []
+    assert report["settings"]["source"] is None
+    assert report["settings"]["library_sha256"] == {}
+    assert report["settings"]["straight_c_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
 
 
 def testSampling():
@@ -150,14 +242,14 @@ def testSampling():
   with tempfile.TemporaryDirectory() as temporary:
     options = SimpleNamespace(records=1, repeat=2, samples=5, warmups=1,
                               timeout=1, output=Path(temporary))
-    backends = ["c", "arm64", "amd64"]
+    backends = ["c-straight", "c", "arm64", "amd64"]
     with patch.object(run, "buildBackend", side_effect=build), \
          patch.object(run.Ray, "runCommand", side_effect=execute):
       result = run.benchmark(options, backends, {}, {})
-    assert calls[:3] == [("build", backend) for backend in backends]
-    orders = [backends[index % 3:] + backends[:index % 3] for index in range(6)]
+    assert calls[:4] == [("build", backend) for backend in backends]
+    orders = [backends[index % 4:] + backends[:index % 4] for index in range(6)]
     assert result["sample_order"] == orders
-    assert calls[3:] == [("run", backend) for order in orders for backend in order]
+    assert calls[4:] == [("run", backend) for order in orders for backend in order]
     assert (options.output / "input.json").read_bytes() == expected["input"]
     for backend in result["backends"]:
       assert backend["warmup_checksums"] == [expected["checksum"] * 2]
@@ -184,5 +276,7 @@ def testSampling():
 testOracle()
 testProtocol()
 testConfiguration()
+testStraightC()
+testStandaloneMain()
 testSampling()
 print("JSON benchmark oracle, protocol, configuration, and sampling checks passed")

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import time
 
@@ -16,6 +17,7 @@ Spec = importlib.util.spec_from_file_location("ray_benchmark", Root / "benchmark
 Ray = importlib.util.module_from_spec(Spec)
 Spec.loader.exec_module(Ray)
 BenchmarkError = Ray.BenchmarkError
+Backends = ("c-straight",) + Ray.Backends
 RecordText = (r'{"name":"Nifty\nJSON","unicode":"\u00e9\uD83D\uDE03",'
               r'"nul":"a\u0000b","integer":9007199254740993,'
               r'"fraction":-12.50e+2,"enabled":true,"disabled":false,'
@@ -27,6 +29,11 @@ TimingScope = ("Each timed cycle parses the complete input, consumes the decoded
                "Throughput includes consumption and cleanup, not just tokenization. "
                "Each sample starts a fresh process; first-use execution and "
                "translation within the loop remain timed.")
+ComparisonScope = ("C straight is an independent handwritten parser that builds "
+                   "an owned tree and transfers children into their parents. "
+                   "Nifty's parser currently copies completed subtrees. Timing "
+                   "differences reflect parser implementation and ownership "
+                   "costs as well as code generation.")
 
 
 class Number(str):
@@ -152,33 +159,45 @@ def configuredSource(source, records, repeat):
 def buildBackend(backend, options, env):
   """Build a self-contained snapshot and preserve commands and diagnostics."""
   directory = options.output / "build" / f"n{options.records}-r{options.repeat}" / backend
-  (directory / "lib").mkdir(parents=True, exist_ok=True)
-  for name, data in options.library_files.items():
-    (directory / "lib" / name).write_bytes(data)
-  source = directory / "json_parser.nifty"
-  source.write_text(configuredSource(options.source_text, options.records,
-                                    options.repeat), encoding="utf-8")
+  directory.mkdir(parents=True, exist_ok=True)
   executable = directory / "json_parser"
-  command = [str(options.compiler), "build", str(source), f"--backend:{backend}",
-             f"--opt:{options.opt}", "-o", str(executable)]
+  if backend == "c-straight":
+    source = directory / "json_parser_straight.c"
+    source.write_text(options.straight_c_text, encoding="utf-8")
+    command = [options.cc] + Ray.StraightCFlags + [
+      f"-DRECORDS={options.records}", f"-DREPETITIONS={options.repeat}",
+      f"-DCLOCK_ID={time.CLOCK_MONOTONIC}", "-o", str(executable), str(source)]
+  else:
+    (directory / "lib").mkdir(parents=True, exist_ok=True)
+    for name, data in options.library_files.items():
+      (directory / "lib" / name).write_bytes(data)
+    source = directory / "json_parser.nifty"
+    source.write_text(configuredSource(options.source_text, options.records,
+                                      options.repeat), encoding="utf-8")
+    command = [str(options.compiler), "build", str(source), f"--backend:{backend}",
+               f"--opt:{options.opt}", "-o", str(executable)]
   response, elapsed = Ray.runCommand(command, options.timeout, env)
   (directory / "build.stdout").write_bytes(response.stdout)
   (directory / "build.stderr").write_bytes(response.stderr)
   architectures = Ray.binaryArchitectures(executable)
-  if len(architectures) != 1 or (backend != "c" and architectures != [backend]):
+  if len(architectures) != 1 or (
+      backend in ("arm64", "amd64") and architectures != [backend]):
     raise BenchmarkError(f"Unexpected executable architecture for {backend}: {architectures}")
   architecture = architectures[0]
   execution = [str(executable)]
   if architecture == "amd64" and options.host["physical_architecture"] == "arm64":
     execution = ["/usr/bin/arch", "-x86_64"] + execution
   inspection = None
-  if options.emit_ir and backend != "c":
+  if options.emit_ir and backend not in ("c", "c-straight"):
     ir = directory / "json_parser.ir"
     inspectCommand = [str(options.compiler), str(source), f"--backend:{backend}",
                       f"--opt:{options.opt}", "--emit-ir", "-o", str(ir)]
     _, inspectionNs = Ray.runCommand(inspectCommand, options.timeout, env)
     inspection = {"path": str(ir), "command": inspectCommand, "wall_ns": inspectionNs}
-  return {"backend": backend, "label": Ray.backendLabel(backend, options.host, architecture),
+  label = Ray.backendLabel(backend, options.host, architecture)
+  if backend == "c":
+    label = label.replace("C (", "Nifty C backend (", 1)
+  return {"backend": backend, "label": label,
           "execution_architecture": architecture, "executable": str(executable),
           "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
           "source": str(source), "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
@@ -227,7 +246,7 @@ def parseArguments(arguments=None):
   """Reject unbounded or unsupported configuration before building."""
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--backend", action="append", default=[],
-                      help="Repeat or use comma-separated c,arm64,amd64")
+                      help="Repeat or use comma-separated c-straight,c,arm64,amd64")
   parser.add_argument("--records", type=int, default=128)
   parser.add_argument("--repeat", type=int, default=10)
   parser.add_argument("--samples", type=int, default=5)
@@ -235,6 +254,10 @@ def parseArguments(arguments=None):
   parser.add_argument("--opt", choices=("none", "speed"), default="speed")
   parser.add_argument("--compiler", type=Path, default=Root / "nifty")
   parser.add_argument("--source", type=Path, default=Root / "benchmarks/json_parser.nifty")
+  parser.add_argument("--straight-c-source", type=Path,
+                      default=Root / "benchmarks/json_parser_straight.c")
+  parser.add_argument("--cc", default=os.environ.get("CC", "cc"),
+                      help="C compiler for standalone and Nifty-generated C")
   parser.add_argument("--output", type=Path, default=Root / "benchmarks/output/json")
   parser.add_argument("--timeout", type=float, default=300)
   parser.add_argument("--emit-ir", action="store_true")
@@ -249,12 +272,12 @@ def parseArguments(arguments=None):
   selected = []
   for entry in options.backend:
     for backend in entry.split(","):
-      if backend not in Ray.Backends:
+      if backend not in Backends:
         parser.error(f"unknown backend: {backend}")
       if backend not in selected:
         selected.append(backend)
   options.backend = selected
-  for name in ("compiler", "source", "output"):
+  for name in ("compiler", "source", "straight_c_source", "output"):
     setattr(options, name, getattr(options, name).expanduser().resolve())
   return options
 
@@ -263,7 +286,10 @@ def markdownReport(report, wall):
   """Show validated per-parse timings with explicit measurement boundaries."""
   result = report["benchmark"]
   lines = [f"Nifty JSON parser: {result['records']} records, {result['input_bytes']} input bytes",
-           "", TimingScope, "", f"Correctness: {result['correctness']}.", "",
+           "", TimingScope]
+  if any(backend["backend"] == "c-straight" for backend in result["backends"]):
+    lines += ["", ComparisonScope]
+  lines += ["", f"Correctness: {result['correctness']}.", "",
            f"Native optimization: {report['settings']['opt']}. C uses -O2.", "",
            "| Backend | Compile (ms) | Cycle median (ms) | Min (ms) | Max (ms) | MiB/s |",
            "| --- | ---: | ---: | ---: | ---: | ---: |"]
@@ -287,38 +313,66 @@ def main(arguments=None):
   host = Ray.hostInfo()
   if host["system"] not in ("Darwin", "Linux") or not hasattr(time, "CLOCK_MONOTONIC"):
     raise BenchmarkError("JSON timing requires POSIX clock_gettime on macOS or Linux")
-  if not options.compiler.is_file() or not os.access(options.compiler, os.X_OK):
-    raise BenchmarkError(f"Compiler is not executable: {options.compiler}")
-  options.source_text = options.source.read_text(encoding="utf-8")
-  options.library_files = {name: (Root / "lib" / name).read_bytes() for name in LibraryNames}
-  available = Ray.availableBackends(host, options.compiler)
+  needsNifty = options.backend != ["c-straight"]
+  options.source_text = None
+  options.library_files = {}
+  if needsNifty:
+    if not options.compiler.is_file() or not os.access(options.compiler, os.X_OK):
+      raise BenchmarkError(f"Compiler is not executable: {options.compiler}")
+    options.source_text = options.source.read_text(encoding="utf-8")
+    options.library_files = {name: (Root / "lib" / name).read_bytes() for name in LibraryNames}
+  options.cc = shutil.which(options.cc)
+  available = Ray.availableBackends(host, options.compiler) if needsNifty else []
+  if options.cc:
+    available.insert(0, "c-straight")
+    if needsNifty and "c" not in available:
+      available.append("c")
+  else:
+    available = [backend for backend in available if backend != "c"]
   backends = options.backend or available
   if not backends or any(backend not in available for backend in backends):
     raise BenchmarkError("Requested backend or runtime is unavailable; available: " +
                          ", ".join(available))
+  options.straight_c_text = options.straight_c_source.read_text(encoding="utf-8") \
+      if "c-straight" in backends else None
   options.output.mkdir(parents=True, exist_ok=True)
   for name in ("results.json", "results.md"):
     (options.output / name).unlink(missing_ok=True)
-  compilerHash = hashlib.sha256(options.compiler.read_bytes()).hexdigest()
+  inputs = [options.compiler] if needsNifty else []
+  if options.cc and any(backend in ("c", "c-straight") for backend in backends):
+    inputs.append(Path(options.cc))
+  fingerprints = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
   env = os.environ.copy()
+  if options.cc:
+    env["CC"] = options.cc
   for backend in ("arm64", "amd64"):
     template = options.compiler.parent / f"nifty-runtime-{backend}"
     if template.is_file():
       env.setdefault(f"NIFTY_RUNTIME_{backend.upper()}", str(template))
   result = benchmark(options, backends, host, env)
-  if hashlib.sha256(options.compiler.read_bytes()).hexdigest() != compilerHash:
+  if any(hashlib.sha256(path.read_bytes()).hexdigest() != value
+         for path, value in fingerprints.items()):
     raise BenchmarkError("Compiler changed during benchmark")
   report = {"schema": "nifty-json-benchmark-v1", "machine": host,
             "timing_scope": TimingScope,
-            "toolchain": {"compiler": str(options.compiler), "compiler_sha256": compilerHash,
-                          "compiler_architectures": Ray.binaryArchitectures(options.compiler),
-                          "compiler_help": Ray.optionalCommand([str(options.compiler), "--help"]),
-                          "cc": Ray.optionalCommand(["cc", "--version"])},
+            "comparison_scope": ComparisonScope if "c-straight" in backends else None,
+            "toolchain": {"compiler": str(options.compiler) if needsNifty else None,
+                          "compiler_sha256": fingerprints.get(options.compiler),
+                          "compiler_architectures": Ray.binaryArchitectures(options.compiler) if needsNifty else [],
+                          "compiler_help": Ray.optionalCommand([str(options.compiler), "--help"]) if needsNifty else None,
+                          "cc": Ray.optionalCommand([options.cc, "--version"]) if options.cc else None,
+                          "cc_path": options.cc,
+                          "c_flags": Ray.StraightCFlags},
+            "inputs_sha256": {str(path): value for path, value in fingerprints.items()},
             "settings": {"records": options.records, "repeat": options.repeat,
                          "samples": options.samples, "warmups": options.warmups,
                          "opt": options.opt, "backends": backends,
-                         "timeout_seconds": options.timeout, "source": str(options.source),
-                         "source_sha256": hashlib.sha256(options.source_text.encode()).hexdigest(),
+                         "timeout_seconds": options.timeout,
+                         "source": str(options.source) if needsNifty else None,
+                         "source_sha256": hashlib.sha256(options.source_text.encode()).hexdigest() if needsNifty else None,
+                         "straight_c_source": str(options.straight_c_source) if "c-straight" in backends else None,
+                         "straight_c_sha256": hashlib.sha256(options.straight_c_text.encode()).hexdigest()
+                             if options.straight_c_text is not None else None,
                          "library_sha256": {name: hashlib.sha256(data).hexdigest()
                                             for name, data in options.library_files.items()}},
             "benchmark": result}
