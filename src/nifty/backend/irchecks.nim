@@ -20,7 +20,7 @@ proc byteCount*(kind: IrType, pointerBytes: int32): int32 {.raises: [].} =
   else: 8
 
 proc verifyReturnAbi*(module: IrModule) {.raises: [BackendError].} =
-  ## Allows scalar returns or private direct bundles of two to four float32s.
+  ## Allows scalar returns or uniform private bundles of two to four floats.
   for function in module.functions:
     require(Float32x2Type notin function.signature.parameters and
       Float32x2Type notin function.signature.returns,
@@ -29,9 +29,11 @@ proc verifyReturnAbi*(module: IrModule) {.raises: [BackendError].} =
     if kinds.len <= 1:
       continue
     require(function.directOnly and kinds.len <= 4,
-      "multiple results require a private direct float32 bundle")
+      "multiple results require a private direct floating bundle")
+    require(kinds[0] in {Float32Type, Float64Type},
+      "multiple results require floating lanes")
     for kind in kinds:
-      require(kind == Float32Type, "multiple results require float32 lanes")
+      require(kind == kinds[0], "multiple results require uniform lanes")
   for signature in module.signatures:
     require(Float32x2Type notin signature.parameters and
       Float32x2Type notin signature.returns, "vector indirect ABI unsupported")

@@ -953,7 +953,8 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
             for i in 0 ..< int(item.results.count):
               let value = int(item.results.first) + i
               returned.add(IrCopy(source: FloatCopyBase + i,
-                destination: locations[value], valueType: ir.Float32Type))
+                destination: locations[value],
+                valueType: function.values[value].valueType))
             code.emitCopies(returned)
           elif item.results.count > 0:
             if resultKind.floating(): code.putFloat(resultId)
@@ -1178,7 +1179,8 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
           for i in 0 ..< int(terminator.arguments.count):
             let value = function.operands[terminator.arguments.first + int32(i)]
             returned.add(IrCopy(source: locations[int32(value)],
-              destination: FloatCopyBase + i, valueType: ir.Float32Type))
+              destination: FloatCopyBase + i,
+              valueType: function.values[int32(value)].valueType))
           code.emitCopies(returned)
         elif terminator.arguments.count > 0:
           let value = function.operands[terminator.arguments.first]
