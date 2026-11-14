@@ -20,6 +20,10 @@ thread main() =
   discard sparse.put(0, negative)
   discard sparse.put(255, 77)
   echo sparse.contains(255), " ", sparse.contains(254)
+  echo sparse.contains(256), " ", sparse.contains(-256)
+  echo sparse.get(256, 42), " ", sparse.get(-256, 43)
+  sparse.remove(256)
+  sparse.remove(-256)
   echo sparse.get(0, 0), " ", sparse.get(255, 0)
   echo sparse.get(99, negative)
   for key, value in sparse:

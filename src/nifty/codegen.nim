@@ -1159,6 +1159,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     let n = "NS_" & key
     let cap = $t.len & "LL"
     let kt = cBase(t.elem)
+    let query = if t.elem.kind == StringType: kt else: "int64_t"
     let v = cBase(t.val)
     g.put ""
     g.put "typedef struct {"
@@ -1177,12 +1178,12 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
         "_cmp(s->m_keys[mid], k); if (c == 0) return mid; " &
         "if (c < 0) lo = mid + 1; else hi = mid - 1; } return -(lo + 1); }"
     else:
-      g.put "static int64_t " & n & "_find(" & n & " *s, " & kt & " k) { " &
+      g.put "static int64_t " & n & "_find(" & n & " *s, " & query & " k) { " &
         "int64_t lo = 0, hi = s->m_len - 1; while (lo <= hi) { " &
         "int64_t mid = (lo + hi) / 2; if (s->m_keys[mid] == k) return mid; " &
         "if (s->m_keys[mid] < k) lo = mid + 1; else hi = mid - 1; } " &
         "return -(lo + 1); }"
-    g.put "static bool " & n & "_contains(" & n & " *s, " & kt &
+    g.put "static bool " & n & "_contains(" & n & " *s, " & query &
       " k) { return " & n & "_find(s, k) >= 0; }"
     g.put "static bool " & n & "_put(" & n & " *s, " & kt & " k, " & v &
       " x) { int64_t i = " & n & "_find(s, k); " &
@@ -1193,12 +1194,12 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       "memmove(&s->m_vals[p + 1], &s->m_vals[p], " &
       "(size_t)((s->m_len - p) * (int64_t)sizeof(" & v & "))); " &
       "s->m_keys[p] = k; s->m_vals[p] = x; s->m_len += 1; return true; }"
-    g.put "static " & v & " " & n & "_get(" & n & " *s, " & kt & " k, " & v &
+    g.put "static " & v & " " & n & "_get(" & n & " *s, " & query & " k, " & v &
       " fb) { int64_t i = " & n & "_find(s, k); " &
       "return i >= 0 ? s->m_vals[i] : fb; }"
-    g.put "static " & v & " " & n & "_at(" & n & " *s, " & kt &
+    g.put "static " & v & " " & n & "_at(" & n & " *s, " & query &
       " k) { return s->m_vals[" & n & "_find(s, k)]; }"
-    g.put "static void " & n & "_remove(" & n & " *s, " & kt & " k) { " &
+    g.put "static void " & n & "_remove(" & n & " *s, " & query & " k) { " &
       "int64_t i = " & n & "_find(s, k); if (i < 0) return; " &
       "memmove(&s->m_keys[i], &s->m_keys[i + 1], " &
       "(size_t)((s->m_len - i - 1) * (int64_t)sizeof(" & kt & "))); " &
