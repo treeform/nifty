@@ -337,9 +337,12 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
           let valueSize = layouts[layout.val].bytes
           zeroMem(at(receiver,
             int64(layout.valOffset) + index * valueSize), int(valueSize))
-    of "get", "at":
+    of "get", "at", "address":
       let valueSize = layouts[layout.val].bytes
-      if present:
+      if host.operation == "address":
+        cast[ptr pointer](output)[] =
+          at(receiver, int64(layout.valOffset) + index * valueSize)
+      elif present:
         copyMem(output,
           at(receiver, int64(layout.valOffset) + index * valueSize),
           int(valueSize))
@@ -360,8 +363,10 @@ proc executeContainer*(host: NativeHost, layouts: seq[NativeLayout],
     case host.operation
     of "contains":
       boolean(index >= 0)
-    of "get", "at":
-      if index >= 0:
+    of "get", "at", "address":
+      if host.operation == "address":
+        cast[ptr pointer](output)[] = valueAt(index)
+      elif index >= 0:
         copyMem(output, valueAt(index), int(valueSize))
       elif host.operation == "get":
         copyMem(output, argument(1), int(valueSize))

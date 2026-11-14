@@ -166,6 +166,8 @@ for container in [7, 8]:
   doAssert getInt(receiver) == 3
   invoke("at", container, receiver, args, output, @[0])
   doAssert getInt(output) == 500
+  invoke("address", container, receiver, args, output, @[0])
+  doAssert cast[ptr int64](cast[ptr pointer](addr output)[])[] == 500
   if container == 8:
     doAssert getInt(receiver, 8) == -1
     doAssert getInt(receiver, 16) == 0
