@@ -29,6 +29,7 @@ let stream = FragmentedStream(data: Expected, readDataImpl: readFragment)
 doAssert stream.readToEnd() == Expected
 
 proc drain(input: tuple[handle: FileHandle, output: ptr string]) {.thread.} =
+  ## Exercises the same raw-handle worker boundary as the corpus harness.
   input.output[] = input.handle.readHandleToEnd()
 
 let process = startProcess(getAppFilename(), args = @["--fragments"],
