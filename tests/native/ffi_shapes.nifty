@@ -1,0 +1,37 @@
+# The binary shape is compatible with the host ABI without using its C type.
+object Timespec =
+  seconds: int64
+  nanoseconds: int64
+
+extern "libc":
+  proc clock_gettime(clock: int32, value: var Timespec): int32
+  proc realtime "clock_gettime" (clock: int32, value: var Timespec): int32
+
+extern "m":
+  proc floor(value: float64): float64
+  proc round(value: float64): float64
+  proc sqrt(value: float64): float64
+
+var state: 0 .. 9
+var calls: seq[8, 0 .. 9]
+
+proc text(value: 0 .. 9): string[8] =
+  state = value
+  if calls.len < 8:
+    calls.add(value)
+  return "12"
+
+thread main() =
+  var instant: Timespec
+  echo clock_gettime(0, instant)
+  echo instant.seconds > 0
+  echo instant.nanoseconds >= 0 and instant.nanoseconds < 1000000000
+  echo realtime(0, instant)
+  echo floor(1.9).toInt, " ", round(-1.5).toInt
+  echo sqrt(2.25)
+  echo text(1).len, " ", state
+  let parsed = text(2).toInt
+  echo parsed.ok, " ", parsed.or(0), " ", state
+  echo text(3).toInt.ok, " ", state
+  echo text(4).len + text(5).len, " ", state
+  echo calls.len
