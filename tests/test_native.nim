@@ -169,6 +169,15 @@ proc main() =
 
   # Check the CLI artifact paths separately from build/run behavior.
   let sample = work / "scripts" / "helloworld.nifty"
+  let cArtifact = sample.changeFileExt(".c")
+  if fileExists(cArtifact):
+    removeFile(cArtifact)
+  let c = run(compiler, @[sample, "--emit-c"])
+  if c.code == 0 and fileExists(cArtifact) and readFile(cArtifact).len > 0:
+    inc passed
+  else:
+    echo "FAIL --emit-c: ", c.output
+    inc failed
   let ir = run(compiler, @[sample, "--emit-ir"])
   if ir.code == 0 and fileExists(sample.changeFileExt(".ir")) and
       readFile(sample.changeFileExt(".ir")).len > 0:
