@@ -2842,7 +2842,10 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
       var stale: seq[string]
       for k in c.facts.keys:
         let root = k.split("@")[0].split(".")[0]
-        if root in c.sharedProt and s.name in c.sharedProt[root]:
+        let dependency = if "@" in k: k.split("@")[^1] else: ""
+        if (root in c.sharedProt and s.name in c.sharedProt[root]) or
+            (dependency in c.sharedProt and
+              s.name in c.sharedProt[dependency]):
           stale.add k
       for k in stale:
         c.facts.del k

@@ -1,0 +1,1 @@
+error_extern_shared_count_stale.nifty:18: cannot prove foreign buffer 'buffer' has 0 .. 100 accessible bytes or elements (available at least 8); resize or guard first
