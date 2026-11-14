@@ -30,6 +30,7 @@ proc put(g: var Gen, s: string) =
   g.o.add '\n'
 
 proc cQuote(s: string): string =
+  ## Encodes literal bytes without absorbing following octal digits.
   result = "\""
   for ch in s:
     case ch
@@ -38,7 +39,7 @@ proc cQuote(s: string): string =
     of '\n': result.add "\\n"
     of '\r': result.add "\\r"
     of '\t': result.add "\\t"
-    of '\0': result.add "\\0"
+    of '\0': result.add "\\000"
     else: result.add ch
   result.add "\""
 
