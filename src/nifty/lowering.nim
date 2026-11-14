@@ -612,9 +612,12 @@ proc statements(g: var Lower, body: seq[Stmt])
 proc assignExpression(g: var Lower, dest: ValueId, e: Expr, t: Typ) =
   ## Forwards caller storage directly through native destination returns.
   if e.kind == CallExpr and e.sval in g.routines and not e.wrapOpt:
-    discard g.routineCall(e, dest)
-  else:
-    g.copy(dest, g.expression(e), t)
+    let ret = g.source.routines[g.routines[e.sval] - 1].ret
+    if g.size(ret) == g.size(t) and
+        (aggregate(t) or scalar(ret) == scalar(t)):
+      discard g.routineCall(e, dest)
+      return
+  g.copy(dest, g.expression(e), t)
 
 proc statement(g: var Lower, s: Stmt) =
   ## Lowers statements to explicit mutation and structured branches.
