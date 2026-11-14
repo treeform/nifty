@@ -1,0 +1,6 @@
+extern "libc":
+  proc fill "memset"(items: var array[2, string[8]] boundedBy 2, value: int32, count: int64): int64
+thread main() =
+  var items: array[2, string[8]]
+  discard fill(items, 9, 1)
+  echo items[0]

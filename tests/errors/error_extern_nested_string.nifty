@@ -1,0 +1,10 @@
+object Inner =
+  text: string[8]
+object Outer =
+  items: array[2, Inner]
+extern "libc":
+  proc fill "memset"(item: var Outer, value: int32, count: int64): int64
+thread main() =
+  var item: Outer
+  discard fill(item, 9, 1)
+  echo item.items[0].text

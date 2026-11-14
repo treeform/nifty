@@ -1,0 +1,8 @@
+object Wrap =
+  text: string[8]
+extern "libc":
+  proc fill "memset"(item: var Wrap, value: int32, count: int64): int64
+thread main() =
+  var item: Wrap
+  discard fill(item, 9, 1)
+  echo item.text

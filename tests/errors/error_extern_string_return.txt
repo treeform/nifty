@@ -1,0 +1,1 @@
+error_extern_string_return.nifty:4: extern 'make' can only return ints or floats (fill a var buffer for data)
