@@ -139,7 +139,8 @@ proc emit(g: var Lower, instruction: IrInstruction,
   var ins = instruction
   ins.arguments = g.operands(values)
   ins.location = LocationId(g.plan.module.locations.len)
-  g.plan.module.locations.add(IrSource(file: 0, line: int32(g.line)))
+  g.plan.module.locations.add(IrSource(file: int32(g.line div fileLineBase),
+    line: int32(g.line mod fileLineBase)))
   if ins.op notin {StoreOp, ClearBytesOp, MoveBytesOp, CallOp,
       HostCallOp} or ins.results.count > 0:
     result = ValueId(g.plan.module.functions[g.fn].values.len)
@@ -608,16 +609,25 @@ proc expression(g: var Lower, e: Expr): ValueId =
 
 proc statements(g: var Lower, body: seq[Stmt])
 
+proc assignExpression(g: var Lower, dest: ValueId, e: Expr, t: Typ) =
+  ## Forwards caller storage directly through native destination returns.
+  if e.kind == CallExpr and e.sval in g.routines and not e.wrapOpt:
+    discard g.routineCall(e, dest)
+  else:
+    g.copy(dest, g.expression(e), t)
+
 proc statement(g: var Lower, s: Stmt) =
   ## Lowers statements to explicit mutation and structured branches.
   g.line = s.line
   case s.kind
   of VarStmt, LetStmt:
     let p = g.allocType(s.typ)
+    let retained = g.arena
     if s.init.isNil:
       g.clear(p, g.size(s.typ))
     else:
-      g.copy(p, g.expression(s.init), s.typ)
+      g.assignExpression(p, s.init, s.typ)
+    g.arena = retained
     g.bindings[s.name] = Binding(address: p, typ: s.typ)
   of AssignStmt:
     if s.lhs.kind == IndexExpr and
@@ -629,11 +639,10 @@ proc statement(g: var Lower, s: Stmt) =
       g.hostCall(host, receiver, args, g.null)
     else:
       let p = g.path(s.lhs)
-      let value = g.expression(s.rhs)
       if s.lhs.kind == IndexExpr and s.lhs.kids[0].typ.kind == StringType:
-        g.store(p, g.convert(value, UInt8Type))
+        g.store(p, g.convert(g.expression(s.rhs), UInt8Type))
       else:
-        g.copy(p, value, s.lhs.typ)
+        g.assignExpression(p, s.rhs, s.lhs.typ)
   of IfStmt:
     let done = g.blockId
     for br in s.elifs:
@@ -700,7 +709,7 @@ proc statement(g: var Lower, s: Stmt) =
     g.current = done
   of ReturnStmt:
     if s.value != nil:
-      g.copy(ValueId(2), g.expression(s.value), g.routine.ret)
+      g.assignExpression(ValueId(2), s.value, g.routine.ret)
     g.plan.module.functions[g.fn].blocks[g.current].terminator =
       IrTerminator(kind: ReturnTerminator)
   of BreakStmt:
@@ -823,7 +832,7 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
   ## Builds native IR, fixed layouts, and executable runtime metadata.
   var g = Lower(source: source)
   g.plan.module.pointerBytes = 8
-  g.plan.module.files = @[filename]
+  g.plan.module.files = if srcFiles.len > 0: srcFiles else: @[filename]
   let signature = IrSignature(parameters:
     @[AddressType, AddressType, AddressType, AddressType])
   g.plan.module.signatures = @[signature]
