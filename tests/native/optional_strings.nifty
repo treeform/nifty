@@ -1,0 +1,33 @@
+# String literals initialize a present payload in every optional destination.
+func returned(): string[4]? =
+  return "ret"
+
+func argument(value: string[4]?): string[4] =
+  return value.or("fall")
+
+thread main() =
+  let text: string[4]? = "hi"
+  echo text.ok
+  if text.ok:
+    echo text
+  var assigned: string[4]? = none
+  echo assigned.ok
+  assigned = "set"
+  echo assigned.ok
+  if assigned.ok:
+    echo assigned
+  assigned = ""
+  echo assigned.ok
+  if assigned.ok:
+    echo assigned.len
+  echo argument("arg")
+  echo argument(none)
+  let empty = argument("")
+  echo empty.len
+  let result = returned()
+  echo result.ok
+  if result.ok:
+    echo result
+  echo text.or("fall")
+  let absent: string[4]? = none
+  echo absent.or("fall")

@@ -218,6 +218,9 @@ proc coerceStrLit(c: Ctx, e: Expr, target: Typ): bool =
     if not target.dynamic and e.sval.len > target.len:
       err(e.line, "string literal (" & $e.sval.len & " bytes) does not fit " &
         $target)
+    if target.opt:
+      e.wrapOpt = true
+      e.wrapSource = deOpt(target)
     e.typ = target
     true
   else:
