@@ -4,6 +4,8 @@ Nifty keeps one parser and proof checker. The C backend generates readable C
 directly from the checked AST. The native path lowers that AST into explicit
 control flow, storage, and typed IR, then emits ARM64, AMD64, or WASM64 instructions.
 There is no generated C step when compiling a Nifty program natively.
+The interpreter executes that same typed IR directly after optimization.
+It does not generate a separate bytecode format or executable.
 
 ## Build the toolchain
 
@@ -38,6 +40,7 @@ toolchain runtimes statically.
 ./nifty examples/sort.nifty --backend:arm64
 ./nifty examples/sort.nifty --backend:amd64
 ./nifty examples/sort.nifty --backend:c
+./nifty interpret examples/sort.nifty
 ./nifty build examples/sort.nifty --backend:arm64 -o /tmp/sort
 ./nifty build examples/growable.nifty --backend:wasm64 -o /tmp/growable.wasm
 ```
@@ -201,6 +204,39 @@ or small homogeneous floating records in registers. User arithmetic, branches,
 memory accesses, and routine calls are emitted as machine code; runtime helpers handle containers,
 I/O, synchronization, and external library interaction.
 
+## Interpretation
+
+```sh
+./nifty interpret examples/json_parser.nifty
+./nifty examples/sort.nifty --backend:interp --opt:none
+./nifty interpret examples/sort.nifty --emit-ir
+./nifty report examples/sort.nifty --backend:interp
+```
+
+`interpret` parses, checks, lowers, optimizes, and executes a source program
+in one process. `--backend:interp` selects the same mode; `interpret` and
+`interpreter` are also backend aliases. The default optimization is `speed`.
+`--opt:none` executes the IR before optional optimization passes.
+
+The instruction loop reads the existing `IrModule` instruction and block
+tables. Preparation assigns aligned local storage and execution metadata;
+it does not translate instructions into a second instruction language.
+Calls use interpreter frames, and branches transfer block arguments together.
+The checker, storage layouts, ownership rules, container operations, threads,
+channels, and external symbol resolver are shared with native execution.
+
+No C compiler, assembler, linker, executable-memory allocation, or output
+file is required to run a program. `build`, binary emission flags, and `-o`
+are rejected in interpreter mode. `--emit-ir` prints the optimized IR to
+standard output without executing it. Reports count IR functions, blocks,
+instructions, globals, workers, and arena reservations; they do not claim
+machine-code size or a native stack bound for interpreter bookkeeping.
+
+Foreign calls use a dynamically loaded libffi runtime and the same scalar
+ABI signatures as native execution. It is loaded when an interpreted program
+needs a foreign call, not for ordinary native builds or runs. See
+[foreign calls](docs/ffi.md#interpreter-foreign-calls) for runtime setup.
+
 ## Native optimization
 
 The native pipeline ports Nimkey's generic IR passes: scalar replacement,
@@ -321,6 +357,10 @@ nim r tests/test_runtimefailures.nim
 nim r tests/test_backend_engine.nim
 nim r tests/test_nativecontainers.nim
 nim r tests/test_nativeruntime.nim
+nim r tests/test_irinterpretation.nim
+nim r tests/test_interpreterffi.nim
+nim r tests/test_interpretercli.nim "$PWD/nifty"
+nim r tests/test_interpreter.nim "$PWD/nifty"
 nim r tests/test_nativelowering.nim
 nim r tests/test_nativereports.nim
 nim r tests/test_iroptimizations.nim
@@ -350,6 +390,12 @@ reference alongside the expected results.
 On Windows, use `nim r tests/test_native.nim "$PWD/nifty.exe"`.
 OS-specific FFI fixtures carry explicit platform markers and are reported
 as skipped on other systems. Windows has a DLL/CRT/math fixture of its own.
+The interpreter corpus runs both optimization modes with compiler tools
+removed from `PATH`, checks exact output and source/artifact integrity, and
+includes JSON, Snappy, threads, channels, and foreign buffers. Independent IR
+tests cover scalar and vector operations, calls, memory, and failure
+continuations. A C fixture validates libffi argument and result handling
+across register banks and stack arguments.
 Windows keeps `floor` and `round` as CRT calls: UCRT's signaling-NaN behavior
 differs from the native replacement. Guarded math tests check that Windows
 retains those calls, results, and floating exception behavior.

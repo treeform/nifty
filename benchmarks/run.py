@@ -16,7 +16,7 @@ import sys
 import time
 import zlib
 
-Backends = ("c", "arm64", "amd64", "wasm64")
+Backends = ("c", "arm64", "amd64", "wasm64", "interp")
 RayBackends = ("hand-asm", "c-straight") + Backends
 StraightCFlags = ["-O2", "-pthread", "-fno-strict-aliasing", "-ffp-contract=off"]
 Root = Path(__file__).resolve().parent.parent
@@ -153,8 +153,11 @@ def engineMetadata(backends, env=None):
           "sha256": hashlib.sha256(Path(executable).read_bytes()).hexdigest()}
 
 
-def executionCommand(backend, executable, host, env=None):
+def executionCommand(backend, executable, host, env=None, compiler=None,
+                     optimization="speed"):
   """Run WASM with Wasmtime or retain the host's native execution convention."""
+  if backend == "interp":
+    return [str(compiler), "interpret", str(executable), f"--opt:{optimization}"]
   if backend == "wasm64":
     engine = wasmtimeExecutable(env)
     if not engine:
@@ -202,7 +205,8 @@ def availableBackends(host, compiler, includeWasm=False):
   if shutil.which("cc"):
     result.append("c")
   arch = host["physical_architecture"]
-  compilerArches = binaryArchitectures(compiler)
+  compilerExists = compiler.is_file() and os.access(compiler, os.X_OK)
+  compilerArches = binaryArchitectures(compiler) if compiler.is_file() else []
   for backend in ("arm64", "amd64"):
     template = compiler.parent / f"nifty-runtime-{backend}"
     runtime = os.environ.get(f"NIFTY_RUNTIME_{backend.upper()}")
@@ -213,11 +217,15 @@ def availableBackends(host, compiler, includeWasm=False):
       result.append(backend)
   if includeWasm and wasmtimeExecutable():
     result.append("wasm64")
+  if compilerExists and "interpret" in (optionalCommand([str(compiler), "--help"]) or ""):
+    result.append("interp")
   return result
 
 
 def backendLabel(backend, host, architecture):
   """Describe native execution and translated AMD64 results explicitly."""
+  if backend == "interp":
+    return "Interpreter (IR)"
   if backend == "wasm64":
     return "WASM64 (Wasmtime WASI)"
   if backend == "hand-asm":
@@ -323,6 +331,42 @@ def summarize(values):
           "max": max(values), "samples": values}
 
 
+def interpreterResult(source, compiler, host, env, optimization="speed",
+                      emitIr=False):
+  """Describe a source snapshot executed by the Nifty host in each process."""
+  if emitIr:
+    raise BenchmarkError("--emit-ir is unsupported for interpreter benchmarks; "
+                         "invoke nifty interpret --emit-ir separately")
+  architectures = binaryArchitectures(compiler)
+  if len(architectures) != 1:
+    raise BenchmarkError(f"Expected one Nifty host architecture: {architectures}")
+  libraries = source.parent / "lib"
+  snapshots = {str(path.relative_to(source.parent)):
+               hashlib.sha256(path.read_bytes()).hexdigest()
+               for path in libraries.rglob("*") if path.is_file()} if libraries.is_dir() else {}
+  snapshots[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+  return {"backend": "interp", "label": "Interpreter (IR)",
+          "execution_architecture": architectures[0],
+          "execution_kind": "Nifty host IR interpreter",
+          "compiler": str(compiler),
+          "compiler_sha256": hashlib.sha256(compiler.read_bytes()).hexdigest(),
+          "executable": None, "executable_sha256": None,
+          "source": str(source), "source_sha256": snapshots[source.name],
+          "source_snapshots_sha256": snapshots,
+          "compile_command": None, "compile_wall_ns": None,
+          "preparation": "Source snapshot only; parsing and optimization occur in each process before guest timers",
+          "execution_command": executionCommand(
+            "interp", source, host, env, compiler, optimization),
+          "inspection": None, "render_ns_per_frame": [],
+          "cycle_ns_per_parse": [], "raw_samples": [], "warmups": [],
+          "process_wall_ns": [], "clock_fields": [], "warmup_checksums": []}
+
+
+def compileMilliseconds(value):
+  """Show absent interpreter compilation explicitly in report tables."""
+  return "N/A" if value is None else f"{value / 1e6:.3f}"
+
+
 def buildBackend(backend, size, repeat, options, env):
   """Build once per backend and configuration, preserving all artifacts."""
   directory = options.output / "build" / f"{size}x{size}-r{repeat}" / backend
@@ -356,6 +400,11 @@ def buildBackend(backend, size, repeat, options, env):
     sourcePath.write_bytes(configuredSource(
       originalPath.read_bytes().decode("utf-8").replace("\r\n", "\n"),
       size, repeat, backend).encode("utf-8"))
+    if backend == "interp":
+      result = interpreterResult(sourcePath, options.compiler, {}, env,
+                                 emitIr=options.emit_ir)
+      result["source_snapshots_sha256"].update(snapshots)
+      return result
     command = [str(options.compiler), "build", str(sourcePath),
                f"--backend:{backend}", "-o", str(executable)]
   result, compileNs = runCommand(command, options.timeout, env)
@@ -410,6 +459,8 @@ def benchmark(size, repeat, options, backends, host, env):
   results = {backend: buildBackend(backend, size, repeat, options, env)
              for backend in backends}
   for backend, result in results.items():
+    if backend == "interp":
+      continue
     architectures = binaryArchitectures(Path(result["executable"]))
     if len(architectures) != 1 or (
         backend in ("arm64", "amd64", "wasm64", "hand-asm") and
@@ -465,7 +516,7 @@ def parseArguments(arguments=None):
   parser = argparse.ArgumentParser(description=__doc__,
       epilog="Standalone C baseline details: benchmarks/C_STRAIGHT.md")
   parser.add_argument("--backend", action="append", default=[],
-                      help="Repeat or use comma-separated hand-asm,hand-c,c,arm64,amd64,wasm64 (aliases c-straight and wasm)")
+                      help="Repeat or use comma-separated hand-asm,hand-c,c,arm64,amd64,wasm64,interp (aliases c-straight and wasm)")
   parser.add_argument("--size", type=int, default=64)
   parser.add_argument("--samples", type=int, default=5)
   parser.add_argument("--warmups", type=int, default=1)
@@ -499,7 +550,7 @@ def parseArguments(arguments=None):
   selected = []
   for entry in options.backend:
     for backend in entry.split(","):
-      backend = {"hand-c": "c-straight", "wasm": "wasm64"}.get(backend, backend)
+      backend = {"hand-c": "c-straight", "wasm": "wasm64", "interpret": "interp", "interpreter": "interp"}.get(backend, backend)
       if backend not in RayBackends:
         parser.error(f"unknown backend: {backend}")
       if backend not in selected:
@@ -524,9 +575,11 @@ def markdownReport(report, wall):
            "| --- | ---: | ---: | ---: | ---: |"]
   for result in benchmarkResult["backends"]:
     times = result["render_ns_per_frame"]
-    lines.append(f"| {result['label']} | {result['compile_wall_ns'] / 1e6:.3f} | "
+    lines.append(f"| {result['label']} | {compileMilliseconds(result['compile_wall_ns'])} | "
                  f"{times['median'] / 1e6:.3f} | {times['min'] / 1e6:.3f} | "
                  f"{times['max'] / 1e6:.3f} |")
+  if any(result["backend"] == "interp" for result in benchmarkResult["backends"]):
+    lines += ["Interpreter compilation is N/A: source snapshots are prepared outside processes; parsing and optimization precede guest timers in each fresh process.", ""]
   if wall:
     lines += ["", "Whole-process wall medians include runtime loading and RGB output:"]
     for result in benchmarkResult["backends"]:

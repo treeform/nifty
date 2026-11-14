@@ -6,6 +6,9 @@ import backend/[context, memories]
 export nativefiles, nativebundles, nativecontainers
 
 type
+  RuntimeExecutor* = proc(context: pointer, functionIndex: int,
+    arena, user: pointer) {.nimcall, gcsafe.}
+  RuntimePrepare* = proc(context, user: pointer)
   NativeEntry = proc(context, args, output, arena: pointer) {.cdecl.}
   NativeChannel = object
     address: pointer
@@ -18,6 +21,9 @@ type
     channels: ptr UncheckedArray[NativeChannel]
     channelCount: int
   NativeThread = object
+    executor: RuntimeExecutor
+    user: pointer
+    functionIndex: int
     entry: NativeEntry
     context: ptr NativeContext
     arena: pointer
@@ -91,7 +97,7 @@ proc executeChannel(context: ptr NativeContext, host: NativeHost,
     discard signalCondition(addr channel.vacant)
   discard unlockMutex(addr channel.mutex)
 
-proc dispatch(context: pointer, hostId: int64,
+proc dispatchRuntime*(context: pointer, hostId: int64,
     receiver, args, output: pointer) {.cdecl.} =
   ## Dispatches fixed host descriptors without allocating program storage.
   let runtime = cast[ptr NativeContext](context)
@@ -131,7 +137,15 @@ proc enterThread(argument: pointer) =
     runtimeFailure("nifty: thread startup synchronization failed\n")
   if not run:
     return
-  thread.entry(thread.context, nil, nil, thread.arena)
+  if thread.executor != nil:
+    try:
+      thread.executor(thread.context, thread.functionIndex,
+        thread.arena, thread.user)
+    except CatchableError as error:
+      let message = "nifty: " & error.msg & "\n"
+      runtimeFailure(message.cstring)
+  else:
+    thread.entry(thread.context, nil, nil, thread.arena)
 
 when defined(windows):
   proc threadStart(argument: pointer): uint32 {.stdcall.} =
@@ -183,26 +197,15 @@ proc resolveExtern(host: NativeHost, libraries: var seq[LibHandle]): pointer =
     raise newException(NiftyError, "cannot load native library: " & host.library)
   raise newException(NiftyError, "cannot resolve native symbol: " & host.symbol)
 
-proc runNative*(program: NativeProgram, memory = NativeMemory(),
+proc runRuntime*(plan: NativePlan, functionEntries: seq[pointer] = @[],
+    executor: RuntimeExecutor = nil, user: pointer = nil,
+    prepare: RuntimePrepare = nil, memory = NativeMemory(),
     startThread: proc(handle: var ThreadHandle,
       start: NativeThreadStart, argument: pointer): cint
-      {.raises: [].} =
-      startNativeThread) =
-  ## Runs machine code with scoped allocation and thread creation hooks.
-  ## A thread hook must create a thread on success and must not raise.
-  program.validateNative()
-  if program.platform != NativeHostPlatform:
-    raise newException(NiftyError,
-      "native image operating system ABI does not match runtime")
-  when defined(arm64):
-    const HostTarget = Arm64Target
-  elif defined(amd64):
-    const HostTarget = Amd64Target
-  else:
-    raise newException(NiftyError, "native runtime unavailable on this CPU")
-  when defined(arm64) or defined(amd64):
-    if program.image.target != HostTarget:
-      raise newException(NiftyError, "native image CPU does not match runtime")
+      {.raises: [].} = startNativeThread) =
+  ## Runs shared storage and host services without requiring executable code.
+  validateNativePlan(plan, if executor == nil:
+    functionEntries.len else: plan.module.functions.len)
   when defined(windows):
     if flush(cStdout) != 0:
       outputFailure()
@@ -219,8 +222,7 @@ proc runNative*(program: NativeProgram, memory = NativeMemory(),
   defer:
     restoreBrokenPipe(previousPipeHandler)
   var
-    code = initCodeBuffer(program.image.bytes)
-    plan = program.plan
+    plan = plan
     globals = newSeq[byte](max(16, plan.globalBytes))
     hosts = newSeq[pointer](plan.hosts.len)
     mutexes = newSeq[NativeMutex](plan.lockOffsets.len)
@@ -233,7 +235,7 @@ proc runNative*(program: NativeProgram, memory = NativeMemory(),
     hosts[i] = if host.kind == ExternHost:
       resolveExtern(host, libraries)
     else:
-      cast[pointer](dispatch)
+      cast[pointer](dispatchRuntime)
   if plan.initialData.len > 0:
     copyMem(addr globals[0], addr plan.initialData[0], plan.initialData.len)
   defer:
@@ -273,6 +275,8 @@ proc runNative*(program: NativeProgram, memory = NativeMemory(),
     plan: addr plan, memory: memory, channelCount: channels.len,
     channels: if channels.len > 0:
       cast[ptr UncheckedArray[NativeChannel]](addr channels[0]) else: nil)
+  if prepare != nil:
+    prepare(addr runtime, user)
   var count = 0
   var arenaBytes = 0
   for thread in plan.threads:
@@ -285,6 +289,12 @@ proc runNative*(program: NativeProgram, memory = NativeMemory(),
     index = 0
     arenaOffset = 0
     gate: NativeStartup
+  if executor != nil and count == 1:
+    for thread in plan.threads:
+      executor(addr runtime, thread.functionIndex, addr arenas[0], user)
+    if flush(cStdout) != 0:
+      outputFailure()
+    return
   if initMutex(addr gate.mutex) != 0:
     raise newException(NiftyError, "cannot initialize native startup mutex")
   if initCondition(addr gate.condition) != 0:
@@ -296,8 +306,9 @@ proc runNative*(program: NativeProgram, memory = NativeMemory(),
   for thread in plan.threads:
     for instance in 0 ..< thread.count:
       entries[index] = NativeThread(
-        entry: cast[NativeEntry](code.entry.offset(
-          program.image.offsets[thread.functionIndex])),
+        executor: executor, user: user, functionIndex: thread.functionIndex,
+        entry: if executor == nil:
+          cast[NativeEntry](functionEntries[thread.functionIndex]) else: nil,
         context: addr runtime, arena: addr arenas[arenaOffset],
         gate: addr gate)
       arenaOffset += (thread.arenaBytes + 15) div 16 * 16
@@ -329,6 +340,32 @@ proc runNative*(program: NativeProgram, memory = NativeMemory(),
       runtimeFailure("nifty: cannot join native thread\n")
   if flush(cStdout) != 0:
     outputFailure()
+
+proc runNative*(program: NativeProgram, memory = NativeMemory(),
+    startThread: proc(handle: var ThreadHandle,
+      start: NativeThreadStart, argument: pointer): cint
+      {.raises: [].} =
+      startNativeThread) =
+  ## Runs machine code with scoped allocation and thread creation hooks.
+  ## A thread hook must create a thread on success and must not raise.
+  program.validateNative()
+  if program.platform != NativeHostPlatform:
+    raise newException(NiftyError,
+      "native image operating system ABI does not match runtime")
+  when defined(arm64):
+    const HostTarget = Arm64Target
+  elif defined(amd64):
+    const HostTarget = Amd64Target
+  else:
+    raise newException(NiftyError, "native runtime unavailable on this CPU")
+  when defined(arm64) or defined(amd64):
+    if program.image.target != HostTarget:
+      raise newException(NiftyError, "native image CPU does not match runtime")
+  var code = initCodeBuffer(program.image.bytes)
+  var entries = newSeq[pointer](program.image.offsets.len)
+  for i, offset in program.image.offsets:
+    entries[i] = code.entry.offset(offset)
+  runRuntime(program.plan, entries, memory = memory, startThread = startThread)
 
 proc tryRunEmbedded*(): bool =
   ## Runs an embedded native image before processing compiler arguments.

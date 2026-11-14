@@ -73,8 +73,8 @@ def testConfiguration():
   assert options.backend == ["c-straight", "c"]
   assert "c-straight" not in run.Backends
   options = run.parseArguments(["--backend", "amd64,hand-c,hand-asm,c-straight,c,arm64,wasm"])
-  assert options.backend == list(run.RayBackends)
-  assert run.Backends == ("c", "arm64", "amd64", "wasm64")
+  assert options.backend == list(run.RayBackends[:-1])
+  assert run.Backends == ("c", "arm64", "amd64", "wasm64", "interp")
   for arguments in (["--size", "0"], ["--size", "513"], ["--samples", "4"],
                     ["--warmups", "0"], ["--repeat", "1001"],
                     ["--backend", "unknown"], ["--timeout", "nan"]):
@@ -347,3 +347,43 @@ testStraightC()
 print("Benchmark protocol, configuration, PNG, reference, architecture, and standalone C checks passed")
 testWasm()
 print("Benchmark runner protocol, configuration, PNG, reference, architecture, and WASM checks passed")
+
+
+def testInterpreter():
+  """Snapshot source without compiling and execute through the Nifty host."""
+  assert run.parseArguments(["--backend", "interp,interpret,interpreter"]).backend == ["interp"]
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    compiler = directory / "nifty"
+    compiler.write_bytes(b"host compiler")
+    options = SimpleNamespace(output=directory / "output", compiler=compiler,
+      timeout=1, emit_ir=False, opt="speed", records=4, size=4, repeat=2,
+      host={"physical_architecture": "arm64"}, library_files={"fixture.nifty": b"library snapshot"})
+    options.source = run.Root / "benchmarks/raytracer.nifty"
+    with patch.object(run, "runCommand", side_effect=AssertionError("No compilation or execution during preparation")), \
+         patch.object(run, "binaryArchitectures", return_value=["amd64"]) as architecture, \
+         patch.object(run.time, "CLOCK_MONOTONIC", 6, create=True):
+      result = run.buildBackend("interp", 4, 2, options, {})
+      options.emit_ir = True
+      expectError(lambda: run.buildBackend("interp", 4, 2, options, {}))
+      options.emit_ir = False
+    architecture.assert_called_once_with(compiler)
+    source = Path(result["source"])
+    assert "const ClockId = 6\n" in source.read_text()
+    assert result["execution_command"] == [str(compiler), "interpret", str(source), "--opt:speed"]
+    assert result["executable"] is None and result["compile_command"] is None
+    assert result["compile_wall_ns"] is None and result["inspection"] is None
+    assert result["execution_architecture"] == "amd64"
+    assert result["label"] == "Interpreter (IR)"
+    assert result["source_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert result["compiler_sha256"] == hashlib.sha256(compiler.read_bytes()).hexdigest()
+    assert not (source.parent / "build.stdout").exists()
+    host = {"physical_architecture": "amd64", "rosetta_available": False}
+    with patch.object(run, "optionalCommand", return_value="Nifty interpret"), \
+         patch.object(run.shutil, "which", return_value=None):
+      assert "interp" not in run.availableBackends(host, directory / "missing")
+      compiler.chmod(0o755)
+      with patch.object(run, "binaryArchitectures", return_value=["amd64"]):
+        assert run.availableBackends(host, compiler)[-1] == "interp"
+
+testInterpreter()

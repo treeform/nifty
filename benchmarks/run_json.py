@@ -190,6 +190,9 @@ def buildBackend(backend, options, env):
     source = directory / "json_parser.nifty"
     source.write_bytes(configuredSource(options.source_text, options.records,
                                        options.repeat, backend).encode("utf-8"))
+    if backend == "interp":
+      return Ray.interpreterResult(source, options.compiler, options.host, env,
+                                   options.opt, emitIr=options.emit_ir)
     command = [str(options.compiler), "build", str(source), f"--backend:{backend}",
                f"--opt:{options.opt}", "-o", str(executable)]
   response, elapsed = Ray.runCommand(command, options.timeout, env)
@@ -265,7 +268,7 @@ def parseArguments(arguments=None):
   """Reject unbounded or unsupported configuration before building."""
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--backend", action="append", default=[],
-                      help="Repeat or use comma-separated hand-asm,hand-c,c,arm64,amd64; c-straight remains an alias")
+                      help="Repeat or use comma-separated hand-asm,hand-c,c,arm64,amd64,wasm64,interp; c-straight remains an alias")
   parser.add_argument("--records", type=int, default=128)
   parser.add_argument("--repeat", type=int, default=10)
   parser.add_argument("--samples", type=int, default=5)
@@ -295,7 +298,7 @@ def parseArguments(arguments=None):
     for backend in entry.split(","):
       if backend == "hand-c":
         backend = "c-straight"
-      backend = "wasm64" if backend == "wasm" else backend
+      backend = {"wasm": "wasm64", "interpret": "interp", "interpreter": "interp"}.get(backend, backend)
       if backend not in Backends:
         parser.error(f"unknown backend: {backend}")
       if backend not in selected:
@@ -319,7 +322,7 @@ def markdownReport(report, wall):
            "| --- | ---: | ---: | ---: | ---: | ---: |"]
   for backend in result["backends"]:
     timing = backend["cycle_ns_per_parse"]
-    lines.append(f"| {backend['label']} | {backend['compile_wall_ns'] / 1e6:.3f} | "
+    lines.append(f"| {backend['label']} | {Ray.compileMilliseconds(backend['compile_wall_ns'])} | "
                  f"{timing['median'] / 1e6:.3f} | {timing['min'] / 1e6:.3f} | "
                  f"{timing['max'] / 1e6:.3f} | {backend['mib_per_second']:.3f} |")
   if wall:
@@ -328,6 +331,8 @@ def markdownReport(report, wall):
       lines.append(f"- {backend['label']}: {backend['process_wall_ns']['median'] / 1e6:.3f} ms")
   lines += ["", f"Input SHA-256: `{result['input_sha256']}`",
             f"Tree checksum: `{result['checksum']}`", ""]
+  if any(backend["backend"] == "interp" for backend in report["benchmark"]["backends"]):
+    lines += ["", "Interpreter compilation is N/A: source snapshots are prepared outside processes; parsing and optimization precede guest timers in each fresh process."]
   return "\n".join(lines)
 
 

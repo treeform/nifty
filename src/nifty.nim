@@ -5,7 +5,7 @@
 ## Pipeline: parser -> checker + semantics -> C, or lowering -> IR -> native.
 
 import nifty/[common, parser, checker, codegen, report, loader, types]
-import nifty/[lowering, nativeunroll, wasmfiles]
+import nifty/[lowering, nativeunroll, wasmfiles, interpreterruntime]
 
 export common
 
@@ -40,6 +40,14 @@ proc compileToWasm*(src: string, moduleName = "input", dir = "",
   buildWasmProgram(lowerNative(checked, moduleName, portableIo = true),
     optimization).bytes
 
+proc interpretSource*(src: string, moduleName = "input", dir = "",
+    optimization = SpeedOptimization) =
+  ## Checks and interprets source using the optimized native IR pipeline.
+  var checked = checkedModule(src, moduleName, dir)
+  if optimization == SpeedOptimization:
+    checked = unrollNative(checked)
+  runInterpreted(lowerNative(checked, moduleName), optimization)
+
 when isMainModule:
   import std/[os, osproc, strutils]
   import nifty/[nativeruntime, nativereports, ctoolchains]
@@ -56,12 +64,13 @@ nifty - a checked language with C, ARM64, AMD64, and WASM64 backends
 usage:
   nifty [run] file.nifty [options]   build and, if there are no errors, run (default)
   nifty build file.nifty [options]   build only
+  nifty interpret file.nifty [options]  interpret optimized IR directly
   nifty report file.nifty          backend report (static RAM, heap, ops)
 
 options:
   --offline                       use cached URL imports without network access
   --update-imports                refresh URL imports and update nifty.lock
-  --backend:c|arm64|amd64|wasm64   backend (wasm aliases wasm64)
+  --backend:c|arm64|amd64|wasm64|interp  backend (interpreter aliases interp)
   --opt:none|speed                IR optimization (default: speed)
   -o path                         output path
   --emit-c                        write reference C from the checked AST
@@ -81,7 +90,7 @@ options:
   while i < params.len:
     let a = params[i]
     case a
-    of "run", "build", "report":
+    of "run", "build", "report", "interpret":
       if sawCmd or srcPath.len > 0: quit(usage, 1)
       cmd = a
       sawCmd = true
@@ -122,7 +131,13 @@ options:
     quit(usage, 1)
   if backend == "wasm":
     backend = "wasm64"
-  if backend notin ["c", "arm64", "amd64", "wasm64"]:
+  if cmd == "interpret" or backend in ["interpret", "interpreter"]:
+    backend = "interp"
+  if backend == "interp":
+    if cmd == "build" or outPath.len > 0 or
+        emission in ["--emit-c", "--emit-native", "--emit-wasm"]:
+      quit("nifty: interpreter runs IR directly; use interpret without build, -o, or binary emission", 1)
+  if backend notin ["c", "arm64", "amd64", "wasm64", "interp"]:
     quit("nifty: unknown backend " & backend, 1)
   if emission == "--emit-c":
     backend = "c"
@@ -144,7 +159,9 @@ options:
         if optimization == SpeedOptimization:
           checked = unrollNative(checked)
         let plan = lowerNative(checked, modName, portableIo = backend == "wasm64")
-        if backend == "wasm64":
+        if backend == "interp":
+          stdout.write interpreterReport(plan, modName, optimization)
+        elif backend == "wasm64":
           stdout.write wasmReport(buildWasmProgram(plan, optimization), modName)
         else:
           let target = if backend == "arm64": Arm64Target else: Amd64Target
@@ -184,6 +201,12 @@ options:
       if optimization == SpeedOptimization:
         checked = unrollNative(checked)
       let plan = lowerNative(checked, modName, portableIo = backend == "wasm64")
+      if backend == "interp":
+        if emission == "--emit-ir":
+          stdout.write optimizeNative(plan, optimization).module.dumpModule()
+        else:
+          runInterpreted(plan, optimization)
+        quit(0)
       if emission == "--emit-ir":
         let path = if outPath.len > 0: outPath else: base & ".ir"
         if backend == "wasm64":

@@ -51,18 +51,8 @@ proc fingerprint(data: string): uint64 =
   for value in data:
     result = (result xor uint64(byte(value))) * 1099511628211'u64
 
-proc validateNative*(program: NativeProgram) =
-  ## Rejects invalid sizes, offsets, and unsupported runtime descriptors.
-  let plan = program.plan
-  if program.image.bytes.len == 0 or
-      program.image.bytes.len > 64 * 1024 * 1024 or
-      program.image.offsets.len == 0:
-    raise newException(NiftyError, "invalid native instruction image")
-  for offset in program.image.offsets:
-    if offset < 0 or offset >= program.image.bytes.len:
-      raise newException(NiftyError, "native function outside image")
-    if program.image.target == Arm64Target and offset mod 4 != 0:
-      raise newException(NiftyError, "unaligned ARM64 function")
+proc validateNativePlan*(plan: NativePlan, functionCount: int) =
+  ## Validates startup storage and descriptors independently of machine code.
   if plan.globalBytes < 0 or plan.globalBytes > MaxNativeStorage or
       plan.initialData.len > plan.globalBytes:
     raise newException(NiftyError, "invalid native global allocation")
@@ -70,7 +60,7 @@ proc validateNative*(program: NativeProgram) =
   var totalThreads = 0
   for thread in plan.threads:
     if thread.functionIndex <= 0 or
-        thread.functionIndex >= program.image.offsets.len or
+        thread.functionIndex >= functionCount or
         thread.count <= 0 or thread.count > 65536 or
         thread.arenaBytes < 0 or thread.arenaBytes > MaxNativeStorage:
       raise newException(NiftyError, "invalid native thread descriptor")
@@ -164,6 +154,20 @@ proc validateNative*(program: NativeProgram) =
     for i, typ in host.paramTypes:
       if typ < 0 or typ >= plan.layouts.len or host.paramOffsets[i] < 0:
         raise newException(NiftyError, "invalid native host argument")
+
+proc validateNative*(program: NativeProgram) =
+  ## Rejects invalid sizes, offsets, and unsupported runtime descriptors.
+  let plan = program.plan
+  if program.image.bytes.len == 0 or
+      program.image.bytes.len > 64 * 1024 * 1024 or
+      program.image.offsets.len == 0:
+    raise newException(NiftyError, "invalid native instruction image")
+  for offset in program.image.offsets:
+    if offset < 0 or offset >= program.image.bytes.len:
+      raise newException(NiftyError, "native function outside image")
+    if program.image.target == Arm64Target and offset mod 4 != 0:
+      raise newException(NiftyError, "unaligned ARM64 function")
+  validateNativePlan(plan, program.image.offsets.len)
 
 proc buildNativeProgram*(plan: NativePlan,
     target: NativeTarget,

@@ -150,9 +150,9 @@ def testSampling():
                               samples=5, warmups=1, timeout=1)
     with patch.object(run, "buildBackend", side_effect=build), \
          patch.object(run.Ray, "runCommand", side_effect=execute):
-      result = run.benchmark(options, ["c", "arm64", "amd64"], {}, {})
-    assert calls[:3] == [("build", backend) for backend in ("c", "arm64", "amd64")]
-    assert result["sample_order"][:3] == [["c", "arm64", "amd64"], ["arm64", "amd64", "c"], ["amd64", "c", "arm64"]]
+      result = run.benchmark(options, ["c", "arm64", "interp"], {}, {})
+    assert calls[:3] == [("build", backend) for backend in ("c", "arm64", "interp")]
+    assert result["sample_order"][:3] == [["c", "arm64", "interp"], ["arm64", "interp", "c"], ["interp", "c", "arm64"]]
     assert len(calls) == 21
     for backend in result["backends"]:
       assert len(backend["raw_samples"]) == 5 and len(backend["warmups"]) == 1
@@ -194,7 +194,7 @@ def testUnavailableAndStaleReports():
 def testStandalone():
   """Snapshot standalone inputs and reject mismatched assembly binaries."""
   darwin = {"system": "Darwin", "physical_architecture": "arm64"}
-  assert run.parseArguments(["--backend", "amd64,hand-c,c,hand-asm,arm64,wasm"]).backend == list(run.Backends)
+  assert run.parseArguments(["--backend", "amd64,hand-c,c,hand-asm,arm64,wasm"]).backend == list(run.Backends[:-1])
   with patch.object(run.Ray, "availableBackends", side_effect=AssertionError("No Nifty discovery")):
     assert run.availableBackends(darwin, None, "cc", False) == ["hand-asm", "c-straight"]
     assert run.availableBackends({"system": "Linux", "physical_architecture": "arm64"}, None, "cc", False) == ["c-straight"]
@@ -299,7 +299,7 @@ def testWasmBuild():
   assert run.parseArguments(["--backend", "wasm,wasm64"]).backend == ["wasm64"]
   host = {"system": "Darwin", "physical_architecture": "arm64", "rosetta_available": True}
   with patch.object(run.Ray, "availableBackends", return_value=["c", "arm64", "amd64", "wasm64"]):
-    assert run.availableBackends(host, Path("nifty"), "cc") == list(run.Backends)
+    assert run.availableBackends(host, Path("nifty"), "cc") == list(run.Backends[:-1])
   with tempfile.TemporaryDirectory() as temporary:
     directory = Path(temporary)
     options = SimpleNamespace(output=directory, compiler=directory / "nifty", timeout=1,
@@ -333,3 +333,38 @@ def testWasmBuild():
         raise AssertionError("Native executable accepted for WASM")
 
 testWasmBuild()
+
+
+def testInterpreter():
+  """Snapshot source without compiling and execute through the Nifty host."""
+  assert run.parseArguments(["--backend", "interp,interpret,interpreter"]).backend == ["interp"]
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    compiler = directory / "nifty"
+    compiler.write_bytes(b"host compiler")
+    options = SimpleNamespace(output=directory / "output", compiler=compiler,
+      timeout=1, emit_ir=False, opt="speed", records=4, size=4, repeat=2,
+      host={"physical_architecture": "arm64"}, library_files={"fixture.nifty": b"library snapshot"})
+    options.source_text = (run.Root / "benchmarks/snappy.nifty").read_text()
+    with patch.object(run.Ray, "runCommand", side_effect=AssertionError("No compilation or execution during preparation")), \
+         patch.object(run.Ray, "binaryArchitectures", return_value=["amd64"]) as architecture, \
+         patch.object(run.time, "CLOCK_MONOTONIC", 6, create=True):
+      result = run.buildBackend("interp", options, {})
+      options.opt = "none"
+      unoptimized = run.buildBackend("interp", options, {})
+      assert unoptimized["execution_command"][-1] == "--opt:none"
+      options.opt = "speed"
+    assert architecture.call_args_list == [((compiler,), {}), ((compiler,), {})]
+    source = Path(result["source"])
+    assert "const ClockId = 6\n" in source.read_text()
+    assert result["execution_command"] == [str(compiler), "interpret", str(source), "--opt:speed"]
+    assert result["executable"] is None and result["compile_command"] is None
+    assert result["compile_wall_ns"] is None and result["inspection"] is None
+    assert result["execution_architecture"] == "amd64"
+    assert result["label"] == "Interpreter (IR)"
+    assert result["source_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert result["compiler_sha256"] == hashlib.sha256(compiler.read_bytes()).hexdigest()
+    assert not (source.parent / "build.stdout").exists()
+    assert (source.parent / "lib/fixture.nifty").read_bytes() == b"library snapshot"
+
+testInterpreter()

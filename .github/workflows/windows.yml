@@ -11,10 +11,17 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: treeform/setup-nim-action@v6
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-libffi
+      - name: Provide interpreter foreign-call runtime
+        shell: msys2 {0}
+        run: cp /ucrt64/bin/libffi-8.dll .
       - name: Check and build the compiler
         run: |
           nim check src/nifty.nim
@@ -23,11 +30,17 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Run language and memory golden tests
         run: nim r tests/tests.nim
+      - name: Verify direct IR interpretation and foreign calls
+        run: |
+          nim r tests/test_interpretercli.nim "$PWD/nifty.exe"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          nim r tests/test_interpreter.nim "$PWD/nifty.exe"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Run native component tests
         run: |
           # The WASM corpus harness takes a compiler argument and requires Node
           # and Wasmtime; its selector/metadata component tests run below.
-          $checks = Get-ChildItem tests/test_*.nim | Where-Object { $_.BaseName -notin @('test_native', 'test_windowscli', 'test_memory', 'test_wasm') }
+          $checks = Get-ChildItem tests/test_*.nim | Where-Object { $_.BaseName -notin @('test_native', 'test_windowscli', 'test_memory', 'test_wasm', 'test_interpreter', 'test_interpretercli') }
           foreach ($check in $checks) {
             nim r $check.FullName
             if ($LASTEXITCODE) { exit $LASTEXITCODE }

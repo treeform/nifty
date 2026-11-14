@@ -121,7 +121,7 @@ def testConfiguration():
   assert options.backend == ["hand-asm", "c-straight", "c", "amd64"]
   assert options.hand_asm_source == run.Root / "benchmarks/arm64/json_parser_hand.S"
   assert options.straight_c_source == run.Root / "benchmarks/json_parser_straight.c"
-  assert run.parseArguments(["--backend", "amd64,hand-c,hand-asm,c,arm64,wasm"]).backend == list(run.Backends)
+  assert run.parseArguments(["--backend", "amd64,hand-c,hand-asm,c,arm64,wasm"]).backend == list(run.Backends[:-1])
   with patch.dict(run.os.environ, {"CC": "test-json-cc"}):
     assert run.parseArguments([]).cc == "test-json-cc"
     assert run.parseArguments(["--cc", "explicit-cc"]).cc == "explicit-cc"
@@ -334,14 +334,14 @@ def testSampling():
   with tempfile.TemporaryDirectory() as temporary:
     options = SimpleNamespace(records=1, repeat=2, samples=5, warmups=1,
                               timeout=1, output=Path(temporary))
-    backends = ["hand-asm", "c-straight", "c", "arm64", "amd64"]
+    backends = ["hand-asm", "c-straight", "c", "arm64", "amd64", "interp"]
     with patch.object(run, "buildBackend", side_effect=build), \
          patch.object(run.Ray, "runCommand", side_effect=execute):
       result = run.benchmark(options, backends, {}, {})
-    assert calls[:5] == [("build", backend) for backend in backends]
-    orders = [backends[index % 5:] + backends[:index % 5] for index in range(6)]
+    assert calls[:6] == [("build", backend) for backend in backends]
+    orders = [backends[index % 6:] + backends[:index % 6] for index in range(6)]
     assert result["sample_order"] == orders
-    assert calls[5:] == [("run", backend) for order in orders for backend in order]
+    assert calls[6:] == [("run", backend) for order in orders for backend in order]
     assert (options.output / "input.json").read_bytes() == expected["input"]
     for backend in result["backends"]:
       assert backend["warmup_checksums"] == [expected["checksum"] * 2]
@@ -381,7 +381,7 @@ def testWasmBuild():
   assert run.parseArguments(["--backend", "wasm,wasm64"]).backend == ["wasm64"]
   host = {"system": "Darwin", "physical_architecture": "arm64", "rosetta_available": True}
   with patch.object(run.Ray, "availableBackends", return_value=["c", "arm64", "amd64", "wasm64"]):
-    assert run.availableBackends(host, Path("nifty"), "cc") == list(run.Backends)
+    assert run.availableBackends(host, Path("nifty"), "cc") == list(run.Backends[:-1])
   with tempfile.TemporaryDirectory() as temporary:
     directory = Path(temporary)
     options = SimpleNamespace(output=directory, compiler=directory / "nifty", timeout=1,
@@ -415,3 +415,41 @@ def testWasmBuild():
         raise AssertionError("Native executable accepted for WASM")
 
 testWasmBuild()
+
+
+def testInterpreter():
+  """Snapshot source without compiling and execute through the Nifty host."""
+  assert run.parseArguments(["--backend", "interp,interpret,interpreter"]).backend == ["interp"]
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    compiler = directory / "nifty"
+    compiler.write_bytes(b"host compiler")
+    options = SimpleNamespace(output=directory / "output", compiler=compiler,
+      timeout=1, emit_ir=False, opt="speed", records=4, size=4, repeat=2,
+      host={"physical_architecture": "arm64"}, library_files={"fixture.nifty": b"library snapshot"})
+    options.source_text = (run.Root / "benchmarks/json_parser.nifty").read_text()
+    with patch.object(run.Ray, "runCommand", side_effect=AssertionError("No compilation or execution during preparation")), \
+         patch.object(run.Ray, "binaryArchitectures", return_value=["amd64"]) as architecture, \
+         patch.object(run.time, "CLOCK_MONOTONIC", 6, create=True):
+      result = run.buildBackend("interp", options, {})
+      options.opt = "none"
+      unoptimized = run.buildBackend("interp", options, {})
+      assert unoptimized["execution_command"][-1] == "--opt:none"
+      options.opt = "speed"
+      options.emit_ir = True
+      expectError(lambda: run.buildBackend("interp", options, {}))
+      options.emit_ir = False
+    assert architecture.call_args_list == [((compiler,), {}), ((compiler,), {})]
+    source = Path(result["source"])
+    assert "const ClockId = 6\n" in source.read_text()
+    assert result["execution_command"] == [str(compiler), "interpret", str(source), "--opt:speed"]
+    assert result["executable"] is None and result["compile_command"] is None
+    assert result["compile_wall_ns"] is None and result["inspection"] is None
+    assert result["execution_architecture"] == "amd64"
+    assert result["label"] == "Interpreter (IR)"
+    assert result["source_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert result["compiler_sha256"] == hashlib.sha256(compiler.read_bytes()).hexdigest()
+    assert not (source.parent / "build.stdout").exists()
+    assert (source.parent / "lib/fixture.nifty").read_bytes() == b"library snapshot"
+
+testInterpreter()

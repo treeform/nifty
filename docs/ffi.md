@@ -52,6 +52,27 @@ can return ABI integers, floats, and opaque handles, but no container or
 object layouts.
 
 
+## Interpreter foreign calls
+
+`nifty interpret` uses the same checked `extern` declarations and external
+symbol resolver as the native backends. A dynamically loaded libffi 3.x
+runtime performs the platform C call. Arguments can be ABI integers,
+float32, float64, or pointers, with zero or one scalar result. Mixed integer
+and floating arguments and arguments passed on the C stack are supported.
+Aggregate values by value and C variadic calls remain outside Nifty's FFI.
+
+The interpreter searches for the system libffi on macOS, `libffi.so.8`,
+`libffi.so.7`, or `libffi.so` on Linux, and `libffi-8.dll`, `libffi-7.dll`,
+or `libffi.dll` on Windows. Set `NIFTY_LIBFFI` to an explicit library path
+to override discovery. The library must match the interpreter's architecture.
+On Windows, place the DLL beside `nifty.exe` or on `PATH`; CI uses the
+[MSYS2 UCRT64 libffi package](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-libffi).
+
+No libffi headers, C compiler, linker, or generated call stub is needed to
+interpret a program. Ordinary native execution does not load libffi.
+Console output is itself implemented through ordinary foreign calls, so
+interpreted programs using `echo` also need this runtime library.
+
 ## Opaque handles
 
 Declare each foreign pointer family as a nominal type:

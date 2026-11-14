@@ -48,3 +48,9 @@ metadata, shared container runtime, typed foreign-call exports, ownership
 cleanup, and source/ABI fingerprint. These adaptations are covered by the same
 preserved MIT license. Runtime page allocation and memory-growth notification
 use the standalone memory64 Emscripten ABI.
+
+The direct IR interpreter follows Nimkey's instruction-dispatch approach,
+but executes Nifty's existing `IrModule` rather than porting Nimkey's separate
+high-level bytecode format. Its frames, storage, and instruction execution
+are implemented for the shared typed IR contract. It does not emit machine
+code or introduce another serialized instruction representation.

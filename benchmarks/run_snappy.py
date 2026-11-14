@@ -156,6 +156,9 @@ def buildBackend(backend, options, env):
       (directory / "lib" / name).write_bytes(data)
     source = directory / "snappy.nifty"
     source.write_bytes(configuredSource(options.source_text, options.size, options.repeat, backend).encode("utf-8"))
+    if backend == "interp":
+      return Ray.interpreterResult(source, options.compiler, options.host, env,
+                                   options.opt)
     command = [str(options.compiler), "build", str(source), f"--backend:{backend}", f"--opt:{options.opt}", "-o", str(executable)]
   response, elapsed = Ray.runCommand(command, options.timeout, env)
   (directory / "build.stdout").write_bytes(response.stdout)
@@ -244,7 +247,7 @@ def parseArguments(arguments=None):
   for entry in options.backend:
     for backend in entry.split(","):
       backend = "c-straight" if backend == "hand-c" else backend
-      backend = "wasm64" if backend == "wasm" else backend
+      backend = {"wasm": "wasm64", "interpret": "interp", "interpreter": "interp"}.get(backend, backend)
       if backend not in Backends:
         parser.error(f"Unknown backend: {backend}")
       if backend not in selected:
@@ -263,11 +266,13 @@ def markdownReport(report, wall=False):
            "| --- | ---: | --- | ---: | ---: | ---: |"]
   for backend in report["benchmark"]["backends"]:
     for workload in backend["workloads"]:
-      lines.append(f"| {backend['label']} | {backend['compile_wall_ns']/1e6:.3f} | {workload['kind']} | {workload['compressed_bytes']} | {workload['roundtrip_ns']['median']/1e6:.3f} | {workload['roundtrip_mib_per_second']:.3f} |")
+      lines.append(f"| {backend['label']} | {Ray.compileMilliseconds(backend['compile_wall_ns'])} | {workload['kind']} | {workload['compressed_bytes']} | {workload['roundtrip_ns']['median']/1e6:.3f} | {workload['roundtrip_mib_per_second']:.3f} |")
   if wall:
     lines += ["", "Whole-process wall medians include input generation, validation and output:"]
     for backend in report["benchmark"]["backends"]:
       lines += [f"- {backend['label']}: {backend['process_wall_ns']['median']/1e6:.3f} ms."]
+  if any(backend["backend"] == "interp" for backend in report["benchmark"]["backends"]):
+    lines += ["", "Interpreter compilation is N/A: source snapshots are prepared outside processes; parsing and optimization precede guest timers in each fresh process."]
   return "\n".join(lines) + "\n"
 
 
