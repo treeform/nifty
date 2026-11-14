@@ -1,5 +1,5 @@
 ## Resource reports separate static storage from runtime heap payloads.
-## Static programs retain exact arena sizes and bounded operation counts.
+## Static programs retain exact arena sizes and representable operation bounds.
 ## Dynamic work is propagated through calls instead of given a false bound.
 
 import std/[strutils, tables, sets]
@@ -426,6 +426,10 @@ proc buildReport*(m: Module, src: string): string =
         passes.add bodyOps(s.body, costs)
       else:
         outside = sadd(outside, stmtOps(s, costs))
+    if outside == high(int64) or high(int64) in passes:
+      lines.add "  " & threadLabel(r) &
+        ": not representable (abstract ops exceed int64)"
+      continue
     if passes.len == 0:
       lines.add "  " & threadLabel(r) & ": " & $outside & " ops total"
     else:
