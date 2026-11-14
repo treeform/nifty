@@ -635,6 +635,10 @@ proc expression(g: var Lower, e: Expr): ValueId =
       result = g.convert(g.load(p, UInt8Type), Int64Type)
     else:
       result = g.read(p, e.typ)
+      if aggregate(e.typ) and e.typ.kind != ArrayType:
+        let captured = g.allocType(e.typ)
+        g.copy(captured, result, e.typ)
+        result = captured
   of NegExpr:
     let value = g.expression(e.kids[0])
     result = g.emit(IrInstruction(op: NegateOp), [value], g.kind(value))

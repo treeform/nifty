@@ -1,0 +1,28 @@
+# Indexed optional values are read before the fallback expression runs.
+var values: array[1, int?]
+var items: seq[int?]
+
+proc replace(): int =
+  values[0] = 42
+  return -1
+
+proc remove(): int =
+  values[0] = none
+  return -1
+
+proc replaceItem(): int =
+  if items.len > 0:
+    items[0] = 42
+  return -1
+
+thread main() =
+  values[0] = 7
+  echo values[0].or(replace())
+  values[0] = none
+  echo values[0].or(replace())
+  values[0] = 7
+  echo values[0].or(remove())
+  if items.resize(1):
+    if items.len > 0:
+      items[0] = 7
+      echo items[0].or(replaceItem())
