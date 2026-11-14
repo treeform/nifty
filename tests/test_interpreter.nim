@@ -1,16 +1,16 @@
 ## End-to-end direct IR interpreter conformance, without a compiler in PATH.
 ## Run: nim r tests/test_interpreter.nim /absolute/path/to/nifty [--opt:none|speed]
 import
-  std/[algorithm, os, osproc, sha1, streams, strtabs, strutils, times]
+  std/[algorithm, os, osproc, sha1, strtabs, strutils, times]
 import fixtures, processstreams
 
 type
   Result = tuple[output: string, code: int]
   Snapshot = seq[tuple[path, hash: string]]
 
-proc drain(input: tuple[stream: Stream, output: ptr string]) {.thread.} =
+proc drain(input: tuple[handle: FileHandle, output: ptr string]) {.thread.} =
   ## Drains output concurrently while the parent enforces a deadline.
-  input.output[] = input.stream.readToEnd()
+  input.output[] = input.handle.readHandleToEnd()
 
 proc run(compiler, source, optimization, work: string): Result =
   ## Executes a source file without compiler tools on the executable path.
@@ -24,8 +24,10 @@ proc run(compiler, source, optimization, work: string): Result =
     options = {poStdErrToStdOut})
   defer: process.close()
   # Drain concurrently so output larger than a pipe buffer cannot deadlock.
-  var reader: Thread[tuple[stream: Stream, output: ptr string]]
-  createThread(reader, drain, (process.outputStream, addr result.output))
+  # The worker uses only a raw handle; Stream's Windows reader copies refs
+  # internally and would touch another thread's ORC cycle-collector state.
+  var reader: Thread[tuple[handle: FileHandle, output: ptr string]]
+  createThread(reader, drain, (process.outputHandle, addr result.output))
   result.code = process.waitForExit(60_000)
   if result.code == -1:
     process.kill()
