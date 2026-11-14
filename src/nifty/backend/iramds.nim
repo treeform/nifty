@@ -1,7 +1,7 @@
 ## Emits AMD64 exclusively from verified scalar and memory IR.
 import
   common, context, memories, amds,
-  irs as ir, irchecks, irallocations, ircopies, ircontexts, irbranches,
+  irs as ir, irchecks, irallocations, irlifetimes, ircopies, ircontexts, irbranches,
   irprocedures
 
 const
@@ -520,7 +520,8 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
     else:
       allocation = allocateRegisters(function, IntegerRegisters.len,
         FloatRegisters, preservedIntegers = PreservedIntegers,
-        preservedFloats = PreservedFloats, fixedValues = fixed,
+        preservedFloats = (when defined(nimkeyNoAmdCallSaves): PreservedFloats
+          else: (1'u64 shl FloatRegisters) - 1), fixedValues = fixed,
         floatColors = floatColors)
     var savedIntegers: seq[XRegister]
     for register in SavedRegisters:
@@ -581,6 +582,25 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
       callArea = frameBytes
       targetArea = callArea + maxArguments * 8
     frameBytes = aligned(targetArea + 8, 16)
+    var callMasks = newSeq[uint64](function.instructions.len)
+    var callSlots: array[FloatRegisters, int]
+    when not defined(nimkeyNoAmdCallSaves):
+      let live = liveThroughCalls(function, analyzeLiveness(function))
+      var used = 0'u64
+      for instruction, values in live:
+        for value in values:
+          let register = places[int32(value)].register
+          if function.values[int32(value)].valueType.floating() and
+              register >= 0 and
+              (PreservedFloats and (1'u64 shl register)) == 0:
+            callMasks[instruction] = callMasks[instruction] or
+              (1'u64 shl register)
+        used = used or callMasks[instruction]
+      for register in 0 ..< FloatRegisters:
+        if (used and (1'u64 shl register)) != 0:
+          callSlots[register] = frameBytes
+          frameBytes += 8
+      frameBytes = aligned(frameBytes, 16)
     let floatSaveArea = frameBytes
     var savedFloats: seq[int]
     when defined(windows):
@@ -923,6 +943,11 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
               code.putInteger(resultId, target)
             continue
         of ir.CallOp, ir.HostCallOp, ir.IndirectCallOp:
+          let callMask = callMasks[instructionIndex]
+          for register in 0 ..< FloatRegisters:
+            if (callMask and (1'u64 shl register)) != 0:
+              code.scalarMemory(register + 2, Rsp, callSlots[register],
+                false, true)
           let first = if item.op == ir.IndirectCallOp: 1 else: 0
           if item.op == ir.IndirectCallOp:
             code.integer(operand(0))
@@ -959,6 +984,10 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
           elif item.results.count > 0:
             if resultKind.floating(): code.putFloat(resultId)
             else: code.putInteger(resultId)
+          for register in 0 ..< FloatRegisters:
+            if (callMask and (1'u64 shl register)) != 0:
+              code.scalarMemory(register + 2, Rsp, callSlots[register],
+                false, false)
           continue
         of ir.PackOp, ir.VectorAddOp, ir.VectorSubtractOp,
             ir.VectorMultiplyOp, ir.VectorDivideOp:

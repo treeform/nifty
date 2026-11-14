@@ -172,6 +172,41 @@ proc liveAcrossCalls*(function: IrFunction, analysis: IrLiveness): seq[bool] =
       reads(item.arguments)
   result = move(crossing)
 
+proc liveThroughCalls*(function: IrFunction,
+    analysis: IrLiveness): seq[seq[ValueId]] =
+  ## Lists exact live-through payloads at each ordinary call instruction.
+  result = newSeq[seq[ValueId]](function.instructions.len)
+  for owner, data in function.blocks:
+    var live = newSeq[uint64](analysis.words)
+    for word in 0 ..< analysis.words:
+      live[word] = analysis.liveOut[owner * analysis.words + word]
+    proc reads(span: Span) =
+      ## Adds local reads to the backwards control-flow live set.
+      for i in span.indices:
+        let value = int32(function.operands[i])
+        live[value div 64] = live[value div 64] or
+          (1'u64 shl (value mod 64))
+    proc kills(span: Span) =
+      ## Excludes results which do not exist before the current instruction.
+      for value in span.indices:
+        live[value div 64] = live[value div 64] and
+          not (1'u64 shl (value mod 64))
+    for i in data.terminator.edges.indices:
+      reads(function.edges[i].arguments)
+    kills(data.terminator.results)
+    reads(data.terminator.arguments)
+    for i in countdown(int(data.instructions.first + data.instructions.count) - 1,
+        int(data.instructions.first)):
+      let item = function.instructions[i]
+      kills(item.results)
+      if item.op in {CallOp, HostCallOp, IndirectCallOp}:
+        for word, active in live:
+          var bits = active
+          while bits != 0:
+            result[i].add(ValueId(word * 64 + countTrailingZeroBits(bits)))
+            bits = bits and (bits - 1)
+      reads(item.arguments)
+
 proc interference*(function: IrFunction, analysis: IrLiveness): seq[uint64] =
   ## Builds exact SSA conflicts from backwards instruction-level live sets.
   let
