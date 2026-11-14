@@ -100,6 +100,8 @@ type
     conversion*: IrConversion
     location*: LocationId
     volatile*: bool
+    cold*: bool
+    ## A profiling hint only; executed calls retain their complete ABI effects.
 
   IrEdge* = object
     target*: BlockId

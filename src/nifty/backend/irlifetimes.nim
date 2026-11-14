@@ -133,7 +133,8 @@ proc dumpLiveness*(function: IrFunction): string =
       result.add("r" & $value & ": " & $interval.first & " .. " &
         $interval.last & "\n")
 
-proc liveAcrossCalls*(function: IrFunction, analysis: IrLiveness): seq[bool] =
+proc liveAcrossCalls*(function: IrFunction, analysis: IrLiveness,
+    ignoreColdFloatCalls = false): seq[bool] =
   ## Finds payloads needed after a call on an actual control-flow path.
   var crossing = newSeq[bool](function.values.len)
   for owner, data in function.blocks:
@@ -150,12 +151,16 @@ proc liveAcrossCalls*(function: IrFunction, analysis: IrLiveness): seq[bool] =
       for value in span.indices:
         live[value div 64] = live[value div 64] and
           not (1'u64 shl (value mod 64))
-    proc record() =
+    proc record(cold = false) =
       ## Accumulates live-through values across all calls in this function.
       for word, active in live:
         var bits = active
         while bits != 0:
-          crossing[word * 64 + countTrailingZeroBits(bits)] = true
+          let value = word * 64 + countTrailingZeroBits(bits)
+          if not (cold and ignoreColdFloatCalls and
+              function.values[value].valueType in
+                {Float32Type, Float64Type, Float32x2Type}):
+            crossing[value] = true
           bits = bits and (bits - 1)
     for i in data.terminator.edges.indices:
       reads(function.edges[i].arguments)
@@ -168,7 +173,7 @@ proc liveAcrossCalls*(function: IrFunction, analysis: IrLiveness): seq[bool] =
       let item = function.instructions[i]
       kills(item.results)
       if item.op in {CallOp, HostCallOp, IndirectCallOp}:
-        record()
+        record(item.cold)
       reads(item.arguments)
   result = move(crossing)
 

@@ -117,14 +117,15 @@ proc allocateRegisters*(function: IrFunction, integers = 6,
     affinity = not defined(nimkeyNoIrOperandAffinity),
     floatColors = DefaultIrFloatColors,
     preferredRegisters: openArray[int32] = [],
-    preferredPreservedFloats = 0'u64): IrAllocation =
+    preferredPreservedFloats = 0'u64,
+    ignoreColdFloatCalls = false): IrAllocation =
   ## Scans integer definitions and colors floating conflicts within the bound.
   doAssert fixedValues.len == 0 or fixedValues.len == function.values.len
   doAssert preferredRegisters.len == 0 or
     preferredRegisters.len == function.values.len
   let
     analysis = analyzeLiveness(function)
-    crossing = liveAcrossCalls(function, analysis)
+    crossing = liveAcrossCalls(function, analysis, ignoreColdFloatCalls)
   var
     allocation = IrAllocation(ranges: analysis.ranges)
     order: seq[int]
