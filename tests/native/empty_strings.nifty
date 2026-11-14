@@ -1,0 +1,16 @@
+# Empty growable strings can have no allocated byte storage.
+thread main() =
+  var empty: string
+  empty.clear()
+  var fixed: string[8]
+  fixed.add(empty)
+  echo fixed.len
+  echo fixed.startsWith(empty), " ", fixed.endsWith(empty)
+  fixed.add("abc")
+  fixed.add(empty)
+  echo fixed
+  echo fixed.startsWith(empty), " ", fixed.endsWith(empty)
+  fixed.add("defgh")
+  fixed.add(empty)
+  echo fixed
+  echo fixed.startsWith(empty), " ", fixed.endsWith(empty)

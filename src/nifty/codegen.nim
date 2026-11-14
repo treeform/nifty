@@ -1203,7 +1203,8 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     g.put "} " & n & ";"
     g.put "static void " & n & "_adds(" & n &
       " *s, const uint8_t *d, int64_t k) { " &
-      "memcpy(&s->m_data[s->m_len], d, (size_t)k); s->m_len += k; }"
+      "if (k > 0) memcpy(&s->m_data[s->m_len], d, (size_t)k); " &
+      "s->m_len += k; }"
     g.put "static void " & n & "_clear(" & n & " *s) { s->m_len = 0; }"
     g.put "static void " & n & "_setLen(" & n &
       " *s, int64_t k) { s->m_len = k; }"
@@ -1217,12 +1218,13 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     g.put "static bool " & n & "_startsWith(const " & n &
       " *s, const uint8_t *d, int64_t k) {"
     g.put "  if (k > s->m_len) return false;"
-    g.put "  return memcmp(s->m_data, d, (size_t)k) == 0;"
+    g.put "  return k == 0 || memcmp(s->m_data, d, (size_t)k) == 0;"
     g.put "}"
     g.put "static bool " & n & "_endsWith(const " & n &
       " *s, const uint8_t *d, int64_t k) {"
     g.put "  if (k > s->m_len) return false;"
-    g.put "  return memcmp(&s->m_data[s->m_len - k], d, (size_t)k) == 0;"
+    g.put "  return k == 0 || " &
+      "memcmp(&s->m_data[s->m_len - k], d, (size_t)k) == 0;"
     g.put "}"
     g.put "static int64_t " & n & "_findRaw(const " & n &
       " *s, const uint8_t *d, int64_t k) {"
