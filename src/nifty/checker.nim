@@ -952,7 +952,8 @@ proc accumWiden(c: Ctx, s: Stmt, assigned: HashSet[string],
   ## its entry value plus trips * the per-iteration delta. Inside the
   ## body at most trips - 1 additions have run, so callers pass a
   ## smaller bound for the in-body fact than for the after-loop fact.
-  for v in assigned:
+  for candidate in assigned:
+    let v = candidate
     var declTyp: Typ = nil
     for i in countdown(c.scopes.len - 1, 0):
       if v in c.scopes[i]:
