@@ -25,6 +25,10 @@ proc multiplyBytes(bytes: int64, count: int): int64
     invalid("resource byte count exceeds the report range")
   bytes * int64(count)
 
+proc arenaStride(bytes: int): int64 {.raises: [NiftyError].} =
+  ## Matches the runtime's 16-byte reservation stride for each instance.
+  (addBytes(int64(bytes), 15) div 16) * 16
+
 proc stackBounds(plan: NativePlan, image: NativeImage): StackBounds
     {.raises: [NiftyError].} =
   ## Resolves direct-call stack bounds in callee-first order.
@@ -139,6 +143,7 @@ proc nativeReport*(plan: NativePlan, image: NativeImage,
   var
     instances = 0'i64
     stackTotal = 0'i64
+    arenaNeedTotal = 0'i64
     arenaTotal = 0'i64
   for thread in plan.threads:
     if thread.functionIndex < 0 or
@@ -154,21 +159,25 @@ proc nativeReport*(plan: NativePlan, image: NativeImage,
       label = thread.name & " x" & $thread.count
     instances = addBytes(instances, int64(thread.count))
     stackTotal = addBytes(stackTotal, total)
-    arenaTotal = addBytes(arenaTotal,
+    arenaNeedTotal = addBytes(arenaNeedTotal,
       multiplyBytes(int64(thread.arenaBytes), thread.count))
+    arenaTotal = addBytes(arenaTotal,
+      multiplyBytes(arenaStride(thread.arenaBytes), thread.count))
     lines.add("  " & label & ": " & $bytes & " bytes each, " & $total &
       " bytes all instances (" & chain(plan, bounds, thread.functionIndex) &
       ")")
   lines.add("  total: " & $stackTotal & " bytes across " & $instances &
     " thread instances")
   lines.add("")
-  lines.add("arena storage per thread (allocated up front):")
+  lines.add("arena storage per thread (allocated up front; 16-byte stride):")
   for thread in plan.threads:
-    lines.add("  " & thread.name & " x" & $thread.count & ": " &
-      $thread.arenaBytes & " bytes each, " &
-      $multiplyBytes(int64(thread.arenaBytes), thread.count) &
-      " bytes all instances")
-  lines.add("  total: " & $arenaTotal & " bytes")
+    let stride = arenaStride(thread.arenaBytes)
+    lines.add("  " & thread.name & " x" & $thread.count & ": need " &
+      $thread.arenaBytes & " bytes each, reserved stride " & $stride &
+      " bytes, " & $multiplyBytes(stride, thread.count) &
+      " bytes reserved for all instances")
+  lines.add("  logical need total: " & $arenaNeedTotal & " bytes")
+  lines.add("  reserved total: " & $arenaTotal & " bytes")
   lines.add("")
   lines.add("accounted storage (globals + stack bounds + arenas): " &
     $addBytes(int64(plan.globalBytes), addBytes(stackTotal, arenaTotal)) &
@@ -176,6 +185,7 @@ proc nativeReport*(plan: NativePlan, image: NativeImage,
   lines.add("Host calls, runtime/PThread synchronization bookkeeping, startup " &
     "metadata, OS stack reservations, and allocator overhead are excluded; " &
     "their memory and stack use are unknown here.")
+  lines.add("Arena startup base-alignment slack of up to 16 bytes is excluded.")
   lines.add("Stack bounds sum generated frames along the deepest direct-call " &
     "chain, including AMD64 host-call return addresses; external host " &
     "stack is excluded.")

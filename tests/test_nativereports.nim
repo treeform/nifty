@@ -52,14 +52,30 @@ doAssert "worker x3: 96 bytes each, 288 bytes all instances " &
 doAssert "other x2: 80 bytes each, 160 bytes all instances " &
   "(other -> leaf)" in report
 doAssert "total: 448 bytes across 5 thread instances" in report
-doAssert "worker x3: 128 bytes each, 384 bytes all instances" in report
-doAssert "other x2: 16 bytes each, 32 bytes all instances" in report
-doAssert "total: 416 bytes" in report
+doAssert "worker x3: need 128 bytes each, reserved stride 128 bytes, " &
+  "384 bytes reserved for all instances" in report
+doAssert "other x2: need 16 bytes each, reserved stride 16 bytes, " &
+  "32 bytes reserved for all instances" in report
+doAssert "logical need total: 416 bytes" in report
+doAssert "reserved total: 416 bytes" in report
 doAssert "accounted storage (globals + stack bounds + arenas): " &
   "944 bytes" in report
 doAssert "entry wrapper: 32 bytes (unused by thread entries)" in report
 doAssert "external host stack is excluded" in report
 doAssert "not native instruction counts or wall-time promises" in report
+
+block:
+  var changed = plan
+  changed.threads = @[
+    ThreadPlan(name: "other", count: 2, functionIndex: 4, arenaBytes: 8)]
+  let padded = nativeReport(changed, image, "padded.nifty")
+  doAssert "other x2: need 8 bytes each, reserved stride 16 bytes, " &
+    "32 bytes reserved for all instances" in padded
+  doAssert "logical need total: 16 bytes" in padded
+  doAssert "reserved total: 32 bytes" in padded
+  doAssert "accounted storage (globals + stack bounds + arenas): " &
+    "272 bytes" in padded
+  doAssert "base-alignment slack of up to 16 bytes is excluded" in padded
 
 block:
   var changed = image
