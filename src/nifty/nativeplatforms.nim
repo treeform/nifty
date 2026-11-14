@@ -8,6 +8,7 @@ when defined(windows):
     ThreadHandle* = object
       value: pointer
     NativeThreadStart* = proc(argument: pointer): uint32 {.stdcall.}
+    BrokenPipeHandler* = pointer
 
   proc beginThread(security: pointer, stackBytes: cuint,
       start: NativeThreadStart, argument: pointer, flags: cuint,
@@ -53,6 +54,11 @@ when defined(windows):
     signal(condition[])
     0
 
+  proc broadcastCondition*(condition: ptr NativeCondition): cint =
+    ## Wakes every worker waiting for the startup decision.
+    broadcast(condition[])
+    0
+
   proc waitCondition*(condition: ptr NativeCondition,
       mutex: ptr NativeMutex): cint =
     ## Atomically releases the mutex and waits for a channel notification.
@@ -70,6 +76,18 @@ when defined(windows):
     let status = waitForThread(handle.value, high(uint32))
     let closed = closeThread(handle.value)
     if status == 0 and closed != 0: 0 else: 1
+
+  proc ignoreBrokenPipe*(): BrokenPipeHandler =
+    ## Windows reports closed stdout through C stream errors.
+    nil
+
+  proc restoreBrokenPipe*(handler: BrokenPipeHandler) =
+    ## Windows has no SIGPIPE handler to restore.
+    discard
+
+  proc brokenPipeSetupFailed*(handler: BrokenPipeHandler): bool =
+    ## Windows needs no signal disposition change.
+    false
 else:
   import std/posix
 
@@ -81,6 +99,7 @@ else:
     ThreadHandle* = object
       value: Pthread
     NativeThreadStart* = proc(argument: pointer): pointer {.noconv.}
+    BrokenPipeHandler* = proc(signal: cint) {.noconv.}
 
   proc mutexInit(mutex: ptr NativeMutex, attributes: pointer): cint
       {.importc: "pthread_mutex_init", header: "<pthread.h>".}
@@ -96,6 +115,8 @@ else:
       {.importc: "pthread_cond_destroy", header: "<pthread.h>".}
   proc signalCondition*(condition: ptr NativeCondition): cint
       {.importc: "pthread_cond_signal", header: "<pthread.h>".}
+  proc broadcastCondition*(condition: ptr NativeCondition): cint
+      {.importc: "pthread_cond_broadcast", header: "<pthread.h>".}
   proc waitCondition*(condition: ptr NativeCondition,
       mutex: ptr NativeMutex): cint
       {.importc: "pthread_cond_wait", header: "<pthread.h>".}
@@ -116,3 +137,15 @@ else:
   proc joinNativeThread*(handle: ThreadHandle): cint =
     ## Waits for a POSIX thread and releases its thread resources.
     pthread_join(handle.value, nil)
+
+  proc ignoreBrokenPipe*(): BrokenPipeHandler =
+    ## Makes a closed stdout pipe report a write error instead of a signal.
+    signal(SIGPIPE, SIG_IGN)
+
+  proc restoreBrokenPipe*(handler: BrokenPipeHandler) =
+    ## Restores the caller's SIGPIPE disposition after program execution.
+    discard signal(SIGPIPE, handler)
+
+  proc brokenPipeSetupFailed*(handler: BrokenPipeHandler): bool =
+    ## Detects a failed POSIX signal disposition change.
+    handler == SIG_ERR

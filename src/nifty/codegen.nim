@@ -865,24 +865,30 @@ proc genStmt(g: var Gen, s: Stmt) =
         case a.typ.kind
         of StringLitType:
           if a.sval.len > 0:
-            g.put "fwrite(" & cQuote(a.sval) & ", 1, " & $a.sval.len &
-              ", stdout);"
+            g.put "if (fwrite(" & cQuote(a.sval) & ", 1, " &
+              $a.sval.len & ", stdout) != " & $a.sval.len &
+              ") ni_output_failure();"
         of StringType:
           let v = temps[i]
-          g.put "if (" & v & ".m_len > 0) fwrite(" & v &
-            ".m_data, 1, (size_t)" & v & ".m_len, stdout);"
+          g.put "if (" & v & ".m_len > 0 && fwrite(" & v &
+            ".m_data, 1, (size_t)" & v & ".m_len, stdout) != " &
+            "(size_t)" & v & ".m_len) ni_output_failure();"
         of IntType:
           if a.typ.dname == "char":
-            g.put "printf(\"%c\", (int)" & temps[i] & ");"
+            g.put "if (printf(\"%c\", (int)" & temps[i] &
+              ") < 0) ni_output_failure();"
           else:
-            g.put "printf(\"%lld\", (long long)" & temps[i] & ");"
+            g.put "if (printf(\"%lld\", (long long)" & temps[i] &
+              ") < 0) ni_output_failure();"
         of BoolType:
-          g.put "fputs(" & temps[i] & " ? \"true\" : \"false\", stdout);"
+          g.put "if (fputs(" & temps[i] &
+            " ? \"true\" : \"false\", stdout) < 0) ni_output_failure();"
         of FloatType:
-          g.put "printf(\"%g\", " & temps[i] & ");"
+          g.put "if (printf(\"%g\", " & temps[i] &
+            ") < 0) ni_output_failure();"
         else:
           discard
-      g.put "fputc(10, stdout);"
+      g.put "if (fputc(10, stdout) == EOF) ni_output_failure();"
       g.put "funlockfile(stdout);"
       if temps.len > 0:
         dec g.ind
@@ -921,8 +927,8 @@ proc genStmt(g: var Gen, s: Stmt) =
     var call = "printf(" & cQuote(fmt)
     for x in cargs:
       call.add ", " & x
-    call.add ");"
-    g.put call
+    call.add ")"
+    g.put "if (" & call & " < 0) ni_output_failure();"
     if temps.len > 0:
       dec g.ind
       g.put "}"
@@ -1008,14 +1014,55 @@ const cPrelude = """
 #include <stdbool.h>
 #include <string.h>
 #include <pthread.h>
+#include <stdlib.h>
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
 #define flockfile _lock_file
 #define funlockfile _unlock_file
 #else
+#include <signal.h>
 extern void flockfile(FILE *);
 extern void funlockfile(FILE *);
+#endif
+
+// An echo failure terminates the program with an explicit status. Buffered
+// output is checked once more after every program thread has finished.
+static void ni_output_failure(void) {
+  fputs("nifty: stdout write failed\n", stderr);
+  fflush(stderr);
+  _Exit(1);
+}
+
+// No program thread enters user code before every thread has been created.
+// A failed creation aborts every waiting worker before joining them.
+static pthread_mutex_t ni_start_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ni_start_condition = PTHREAD_COND_INITIALIZER;
+static int ni_start_decision = 0;
+typedef struct {
+  void *(*entry)(void *);
+  void *argument;
+} ni_start_argument;
+static void *ni_start_worker(void *address) {
+  ni_start_argument *worker = (ni_start_argument *)address;
+  pthread_mutex_lock(&ni_start_mutex);
+  while (ni_start_decision == 0)
+    pthread_cond_wait(&ni_start_condition, &ni_start_mutex);
+  int run = ni_start_decision > 0;
+  pthread_mutex_unlock(&ni_start_mutex);
+  return run ? worker->entry(worker->argument) : NULL;
+}
+static void ni_start_release(int decision) {
+  pthread_mutex_lock(&ni_start_mutex);
+  ni_start_decision = decision;
+  pthread_cond_broadcast(&ni_start_condition);
+  pthread_mutex_unlock(&ni_start_mutex);
+}
+// Compile-time fault injection is available only in explicit test builds.
+#ifdef NIFTY_TEST_THREAD_FAIL_AT
+#define NI_START_FAIL(index) ((index) == NIFTY_TEST_THREAD_FAIL_AT)
+#else
+#define NI_START_FAIL(index) 0
 #endif
 
 // The one float -> int conversion: saturating, NaN-safe (NaN -> 0).
@@ -1593,31 +1640,55 @@ proc generate*(m: Module, src: string): string =
   g.put "int main(void) {"
   inc g.ind
   g.put "#ifdef _WIN32"
-  g.put "_setmode(_fileno(stdout), _O_BINARY);"
+  g.put "if (_setmode(_fileno(stdout), _O_BINARY) < 0) ni_output_failure();"
+  g.put "#else"
+  g.put "if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {"
+  g.put "  fputs(\"nifty: cannot ignore SIGPIPE\\n\", stderr);"
+  g.put "  return 1;"
+  g.put "}"
   g.put "#endif"
   g.put "pthread_t ni_threads[" & $total & "];"
+  g.put "ni_start_argument ni_start_args[" & $total & "];"
+  g.put "int ni_started = 0;"
   var base = 0
   for t in threads:
-    let fail = " { fprintf(stderr, \"nifty: failed to start thread " &
-      t.name & "\\n\"); return 1; }"
     if t.instances > 1:
       let arg = if g.needOf[t.name] > 0: "ni_arena_" & t.name & "[ni_i]"
         else: "NULL"
-      g.put "for (int ni_i = 0; ni_i < " & $t.instances & "; ++ni_i)"
-      g.put "  if (pthread_create(&ni_threads[" & $base & " + ni_i], " &
-        "NULL, t_" & t.name & ", " & arg & ") != 0)" & fail
+      g.put "for (int ni_i = 0; ni_i < " & $t.instances & "; ++ni_i) {"
+      g.put "  ni_start_args[" & $base & " + ni_i] = " &
+        "(ni_start_argument){t_" & t.name & ", " & arg & "};"
+      g.put "  if (NI_START_FAIL(ni_started) || " &
+        "pthread_create(&ni_threads[" & $base & " + ni_i], NULL, " &
+        "ni_start_worker, &ni_start_args[" & $base &
+        " + ni_i]) != 0) goto ni_start_failed;"
+      g.put "  ++ni_started;"
+      g.put "}"
     else:
       let arg = if g.needOf[t.name] > 0: "ni_arena_" & t.name else: "NULL"
-      g.put "if (pthread_create(&ni_threads[" & $base & "], NULL, t_" &
-        t.name & ", " & arg & ") != 0)" & fail
+      g.put "ni_start_args[" & $base & "] = " &
+        "(ni_start_argument){t_" & t.name & ", " & arg & "};"
+      g.put "if (NI_START_FAIL(ni_started) || " &
+        "pthread_create(&ni_threads[" & $base & "], NULL, " &
+        "ni_start_worker, &ni_start_args[" & $base &
+        "]) != 0) goto ni_start_failed;"
+      g.put "++ni_started;"
     base += t.instances
+  g.put "ni_start_release(1);"
   g.put "for (int ni_i = 0; ni_i < " & $total & "; ++ni_i)"
   g.put "  pthread_join(ni_threads[ni_i], NULL);"
   for binding in m.semantics.globalDrops:
     let owner = m.semantics.bindings[binding]
     g.ownerPaths[binding] = "g_" & owner.name
   g.cleanup(m.semantics.globalDrops)
+  g.put "if (fflush(stdout) != 0) ni_output_failure();"
   g.put "return 0;"
+  g.put "ni_start_failed:"
+  g.put "ni_start_release(-1);"
+  g.put "for (int ni_i = 0; ni_i < ni_started; ++ni_i)"
+  g.put "  pthread_join(ni_threads[ni_i], NULL);"
+  g.put "fputs(\"nifty: failed to start thread\\n\", stderr);"
+  g.put "return 1;"
   dec g.ind
   g.put "}"
   g.o

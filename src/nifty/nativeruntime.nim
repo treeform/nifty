@@ -21,8 +21,14 @@ type
     entry: NativeEntry
     context: ptr NativeContext
     arena: pointer
+    gate: ptr NativeStartup
+  NativeStartup = object
+    mutex: NativeMutex
+    condition: NativeCondition
+    decision: int
 
 var cStdout {.importc: "stdout", header: "<stdio.h>".}: File
+var cStderr {.importc: "stderr", header: "<stdio.h>".}: File
 
 when defined(windows):
   proc flockfile(file: File)
@@ -33,13 +39,23 @@ when defined(windows):
       {.importc: "_fileno", header: "<stdio.h>".}
   proc setMode(descriptor, mode: cint): cint
       {.importc: "_setmode", header: "<io.h>".}
-  proc flush(file: File): cint {.importc: "fflush", header: "<stdio.h>".}
 else:
   proc flockfile(file: File) {.importc, header: "<stdio.h>".}
   proc funlockfile(file: File) {.importc, header: "<stdio.h>".}
 proc printf(format: cstring): cint {.importc, varargs, header: "<stdio.h>".}
+proc flush(file: File): cint {.importc: "fflush", header: "<stdio.h>".}
+proc fputs(data: cstring, file: File): cint
+    {.importc, header: "<stdio.h>".}
+proc exitProcess(status: cint) {.importc: "_Exit", header: "<stdlib.h>",
+    noreturn.}
 proc fwrite(data: pointer, size, count: csize_t, file: File): csize_t
     {.importc, header: "<stdio.h>".}
+
+proc outputFailure() {.noreturn.} =
+  ## Reports an unrecoverable stdout error without flushing it again.
+  discard fputs("nifty: stdout write failed\n", cStderr)
+  discard flush(cStderr)
+  exitProcess(1)
 
 proc offset(address: pointer, bytes: int): pointer {.inline.} =
   ## Returns a byte offset within a validated runtime allocation.
@@ -64,24 +80,26 @@ proc executeEcho(host: NativeHost, layouts: seq[NativeLayout],
     args: pointer) =
   ## Writes one echo statement under the same libc stream lock as printf.
   flockfile(cStdout)
+  var failed = false
   for i, typ in host.paramTypes:
     template layout: untyped = layouts[typ]
     let argument = args.offset(host.paramOffsets[i])
     case layout.kind
     of IntType:
       if layout.display == "char":
-        discard printf("%c", cint(loadInt(argument, layout)))
+        failed = printf("%c", cint(loadInt(argument, layout))) < 0 or failed
       else:
-        discard printf("%lld", clonglong(loadInt(argument, layout)))
+        failed = printf("%lld",
+          clonglong(loadInt(argument, layout))) < 0 or failed
     of BoolType:
-      discard printf("%s", if cast[ptr byte](argument)[] != 0:
-        "true".cstring else: "false".cstring)
+      failed = printf("%s", if cast[ptr byte](argument)[] != 0:
+        "true".cstring else: "false".cstring) < 0 or failed
     of FloatType:
       let value = if layout.bytes == 4:
         float64(cast[ptr float32](argument)[])
       else:
         cast[ptr float64](argument)[]
-      discard printf("%g", value)
+      failed = printf("%g", value) < 0 or failed
     of StringType, StringLitType:
       let data = if layout.dynamic:
           cast[ptr pointer](argument.offset(16))[]
@@ -89,11 +107,14 @@ proc executeEcho(host: NativeHost, layouts: seq[NativeLayout],
           argument.offset(layout.dataOffset)
       let count = cast[ptr int64](argument)[]
       if count > 0:
-        discard fwrite(data, 1, csize_t(count), cStdout)
+        failed = fwrite(data, 1, csize_t(count), cStdout) !=
+          csize_t(count) or failed
     else:
       discard
-  discard printf("\n")
+  failed = printf("\n") < 0 or failed
   funlockfile(cStdout)
+  if failed:
+    outputFailure()
 
 proc executeChannel(context: ptr NativeContext, host: NativeHost,
     receiver, args, output: pointer) =
@@ -157,6 +178,14 @@ proc dispatch(context: pointer, hostId: int64,
 proc enterThread(argument: pointer) =
   ## Enters one native thread with its own preallocated arena.
   let thread = cast[ptr NativeThread](argument)
+  discard lockMutex(addr thread.gate.mutex)
+  while thread.gate.decision == 0:
+    discard waitCondition(addr thread.gate.condition,
+      addr thread.gate.mutex)
+  let run = thread.gate.decision > 0
+  discard unlockMutex(addr thread.gate.mutex)
+  if not run:
+    return
   thread.entry(thread.context, nil, nil, thread.arena)
 
 when defined(windows):
@@ -204,9 +233,13 @@ proc resolveExtern(host: NativeHost, libraries: var seq[LibHandle]): pointer =
     raise newException(NiftyError, "cannot load native library: " & host.library)
   raise newException(NiftyError, "cannot resolve native symbol: " & host.symbol)
 
-proc runNative*(program: NativeProgram,
-    memory = NativeMemory()) =
-  ## Runs machine code with scoped allocation hooks for owned storage.
+proc runNative*(program: NativeProgram, memory = NativeMemory(),
+    startThread: proc(handle: var ThreadHandle,
+      start: NativeThreadStart, argument: pointer): cint
+      {.raises: [].} =
+      startNativeThread) =
+  ## Runs machine code with scoped allocation and thread creation hooks.
+  ## A thread hook must create a thread on success and must not raise.
   program.validateNative()
   if program.platform != NativeHostPlatform:
     raise newException(NiftyError,
@@ -221,13 +254,20 @@ proc runNative*(program: NativeProgram,
     if program.image.target != HostTarget:
       raise newException(NiftyError, "native image CPU does not match runtime")
   when defined(windows):
-    discard flush(cStdout)
+    if flush(cStdout) != 0:
+      outputFailure()
     let previousMode = setMode(fileNumber(cStdout), 0x8000) # _O_BINARY.
     if previousMode < 0:
       raise newException(NiftyError, "cannot select binary native output")
     defer:
-      discard flush(cStdout)
+      if flush(cStdout) != 0:
+        outputFailure()
       discard setMode(fileNumber(cStdout), previousMode)
+  let previousPipeHandler = ignoreBrokenPipe()
+  if brokenPipeSetupFailed(previousPipeHandler):
+    raise newException(NiftyError, "cannot ignore SIGPIPE for native output")
+  defer:
+    restoreBrokenPipe(previousPipeHandler)
   var
     code = initCodeBuffer(program.image.bytes)
     plan = program.plan
@@ -294,26 +334,46 @@ proc runNative*(program: NativeProgram,
     threads = newSeq[ThreadHandle](count)
     index = 0
     arenaOffset = 0
+    gate: NativeStartup
+  if initMutex(addr gate.mutex) != 0:
+    raise newException(NiftyError, "cannot initialize native startup mutex")
+  if initCondition(addr gate.condition) != 0:
+    discard destroyMutex(addr gate.mutex)
+    raise newException(NiftyError, "cannot initialize native startup condition")
+  defer:
+    discard destroyCondition(addr gate.condition)
+    discard destroyMutex(addr gate.mutex)
   for thread in plan.threads:
     for instance in 0 ..< thread.count:
       entries[index] = NativeThread(
         entry: cast[NativeEntry](code.entry.offset(
           program.image.offsets[thread.functionIndex])),
-        context: addr runtime, arena: addr arenas[arenaOffset])
+        context: addr runtime, arena: addr arenas[arenaOffset],
+        gate: addr gate)
       arenaOffset += (thread.arenaBytes + 15) div 16 * 16
       inc index
   var started = 0
   for i in 0 ..< count:
-    let status = startNativeThread(threads[i],
+    let status = startThread(threads[i],
       threadStart, addr entries[i])
     if status != 0:
+      discard lockMutex(addr gate.mutex)
+      gate.decision = -1
+      discard broadcastCondition(addr gate.condition)
+      discard unlockMutex(addr gate.mutex)
       for j in 0 ..< started:
         discard joinNativeThread(threads[j])
       raise newException(NiftyError, "cannot start native thread: " & $status)
     inc started
+  discard lockMutex(addr gate.mutex)
+  gate.decision = 1
+  discard broadcastCondition(addr gate.condition)
+  discard unlockMutex(addr gate.mutex)
   for i in 0 ..< started:
     if joinNativeThread(threads[i]) != 0:
       raise newException(NiftyError, "cannot join native thread")
+  if flush(cStdout) != 0:
+    outputFailure()
 
 proc tryRunEmbedded*(): bool =
   ## Runs an embedded native image before processing compiler arguments.
