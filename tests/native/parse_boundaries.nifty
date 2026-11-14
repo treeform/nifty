@@ -1,0 +1,31 @@
+# Signed decimal parsing spans every int64 value and rejects bad text.
+func parsed(text: string[24]): int? =
+  return text.toInt
+
+thread main() =
+  let minimum = parsed("-9223372036854775808")
+  echo minimum.ok, " ", minimum.or(0)
+  let maximum = parsed("9223372036854775807")
+  echo maximum.ok, " ", maximum.or(0)
+  let tooHigh = parsed("9223372036854775808")
+  echo tooHigh.ok, " ", tooHigh.or(0)
+  let tooLow = parsed("-9223372036854775809")
+  echo tooLow.ok, " ", tooLow.or(0)
+  let unsignedOverflow = parsed("18446744073709551616")
+  echo unsignedOverflow.ok, " ", unsignedOverflow.or(0)
+  let empty = parsed("")
+  echo empty.ok, " ", empty.or(0)
+  let signOnly = parsed("-")
+  echo signOnly.ok, " ", signOnly.or(0)
+  let plus = parsed("+1")
+  echo plus.ok, " ", plus.or(0)
+  let nondigit = parsed("123x")
+  echo nondigit.ok, " ", nondigit.or(0)
+  let whitespace = parsed(" 1")
+  echo whitespace.ok, " ", whitespace.or(0)
+  let embeddedZero = parsed("1\0")
+  echo embeddedZero.ok, " ", embeddedZero.or(0)
+  let negativeZero = parsed("-0")
+  echo negativeZero.ok, " ", negativeZero.or(99)
+  let leadingZeros = parsed("000123")
+  echo leadingZeros.ok, " ", leadingZeros.or(0)

@@ -1,0 +1,24 @@
+var state: 0 .. 9
+var history: seq[8, 0 .. 9]
+
+proc change(value: 0 .. 9): 0 .. 9 =
+  state = value
+  if history.len < 8:
+    history.add(value)
+  return value
+
+func pair(first: 0 .. 9, second: 0 .. 9): 0 .. 99 =
+  return first * 10 + second
+
+thread main() =
+  state = 2
+  echo pair(state, change(7))
+  state = 3
+  echo state + change(8)
+  echo pair(change(1), change(4))
+  for entry in history:
+    echo entry
+  let never = false
+  if never and change(9) == 9:
+    echo "unreachable"
+  echo state, " ", history.len

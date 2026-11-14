@@ -98,6 +98,11 @@ proc passByPtr(t: Typ): bool =
 include codegen_memory
 
 proc externSym(r: Routine): string =
+  ## Keep binary FFI prototypes separate from names in runtime headers.
+  "ni_extern_" & r.name
+
+proc externName(r: Routine): string =
+  ## Resolve the original linker symbol, including explicit aliases.
   if r.cname != "": r.cname else: r.name
 
 proc genStrMethod(g: var Gen, e: Expr, ordered: bool): string
@@ -312,7 +317,7 @@ proc genPathOrdered(g: var Gen, e: Expr): string =
     else:
       base & "[" & idx & "]"
   else:
-    g.genExpr(e)
+    if g.hasEffects(e): g.genOrdered(e) else: g.genExpr(e)
 
 proc tempFor(g: var Gen, e: Expr, val: string): string =
   let t = "ni_t" & $g.tmpN
@@ -320,6 +325,7 @@ proc tempFor(g: var Gen, e: Expr, val: string): string =
   let ctype =
     if e.typ == nil: "int64_t"
     elif e.typ.opt: cBase(e.typ)
+    elif e.typ.kind == FloatType: cBase(e.typ)
     elif e.typ.kind == BoolType: "bool"
     elif e.typ.kind in {ObjectType, SeqType, StringType, SetType, QueueType,
       DenseMapType, SparseMapType}: cBase(e.typ)
@@ -351,8 +357,17 @@ proc genOrdered(g: var Gen, e: Expr): string =
   of FieldExpr:
     if e.typ != nil and e.typ.kind == ArrayType:
       g.genPathOrdered(e)
+    elif e.isOptOk:
+      g.tempFor(e, g.genOrdered(e.kids[0]) & ".m_ok")
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
+      g.tempFor(e, "ni_ftoi(" & g.genOrdered(e.kids[0]) & ")")
+    elif e.sval == "toInt" and e.kids[0].typ != nil and
+        e.kids[0].typ.kind == StringType:
+      let base = g.tempFor(e.kids[0], g.genOrdered(e.kids[0]))
+      g.tempFor(e, cBase(e.kids[0].typ) & "_toInt(&" & base & ")")
     elif e.kids[0].typ != nil and
-        e.kids[0].typ.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
+        not e.kids[0].typ.opt and e.kids[0].typ.kind in
+          {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
       g.tempFor(e, g.genPathOrdered(e.kids[0]) &
         (if e.sval == "cap": ".m_cap" else: ".m_len"))
     else:
@@ -854,8 +869,8 @@ proc genStmt(g: var Gen, s: Stmt) =
           let v =
             if g.hasEffects(a): g.genOrdered(a) else: g.genExpr(a)
           g.put ctype & " " & temps[i] & " = " & v & ";"
-    if s.args.anyIt(it.typ.kind == StringType and it.typ.dynamic):
-      # Dynamic strings may exceed printf's int precision and contain NULs.
+    if s.args.anyIt(it.typ.kind in {StringType, StringLitType}):
+      # Strings are length-exact and may contain embedded NUL bytes.
       # Evaluate every argument above, then keep the complete echo atomic.
       g.put "flockfile(stdout);"
       for i, a in s.args:
@@ -1183,18 +1198,20 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     g.put "}"
     g.put "static bool " & n & "_toIntRaw(const " & n &
       " *s, int64_t *out) {"
-    g.put "  int64_t i = 0, sign = 1, v = 0;"
+    g.put "  int64_t i = 0, sign = 1; uint64_t v = 0;"
     g.put "  if (s->m_len == 0) return false;"
     g.put "  if (s->m_data[0] == (uint8_t)45) { sign = -1; i = 1; }"
     g.put "  if (i >= s->m_len) return false;"
+    g.put "  uint64_t limit = sign < 0 ? (1ULL << 63) : INT64_MAX;"
     g.put "  for (; i < s->m_len; ++i) {"
     g.put "    uint8_t c = s->m_data[i];"
     g.put "    if (c < 48 || c > 57) return false;"
-    g.put "    if (v > 922337203685477580LL) return false;"
-    g.put "    v = v * 10 + (c - 48);"
-    g.put "    if (v < 0) return false;"
+    g.put "    uint64_t digit = c - 48;"
+    g.put "    if (v > (limit - digit) / 10) return false;"
+    g.put "    v = v * 10 + digit;"
     g.put "  }"
-    g.put "  *out = sign * v; return true;"
+    g.put "  *out = sign < 0 ? (v == (1ULL << 63) ? INT64_MIN : -(int64_t)v) : (int64_t)v;"
+    g.put "  return true;"
     g.put "}"
     # find/toInt hand back optionals: absence is a value the caller must
     # consult, not a sentinel index to forget about.
@@ -1333,6 +1350,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     let n = "NS_" & key
     let cap = $t.len & "LL"
     let kt = cBase(t.elem)
+    let query = if t.elem.kind == StringType: kt else: "int64_t"
     let v = cBase(t.val)
     g.put ""
     g.put "typedef struct {"
@@ -1351,12 +1369,12 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
         "_cmp(s->m_keys[mid], k); if (c == 0) return mid; " &
         "if (c < 0) lo = mid + 1; else hi = mid - 1; } return -(lo + 1); }"
     else:
-      g.put "static int64_t " & n & "_find(" & n & " *s, " & kt & " k) { " &
+      g.put "static int64_t " & n & "_find(" & n & " *s, " & query & " k) { " &
         "int64_t lo = 0, hi = s->m_len - 1; while (lo <= hi) { " &
         "int64_t mid = (lo + hi) / 2; if (s->m_keys[mid] == k) return mid; " &
         "if (s->m_keys[mid] < k) lo = mid + 1; else hi = mid - 1; } " &
         "return -(lo + 1); }"
-    g.put "static bool " & n & "_contains(" & n & " *s, " & kt &
+    g.put "static bool " & n & "_contains(" & n & " *s, " & query &
       " k) { return " & n & "_find(s, k) >= 0; }"
     g.put "static bool " & n & "_put(" & n & " *s, " & kt & " k, " & v &
       " x) { int64_t i = " & n & "_find(s, k); " &
@@ -1367,12 +1385,12 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
       "memmove(&s->m_vals[p + 1], &s->m_vals[p], " &
       "(size_t)((s->m_len - p) * (int64_t)sizeof(" & v & "))); " &
       "s->m_keys[p] = k; s->m_vals[p] = x; s->m_len += 1; return true; }"
-    g.put "static " & v & " " & n & "_get(" & n & " *s, " & kt & " k, " & v &
+    g.put "static " & v & " " & n & "_get(" & n & " *s, " & query & " k, " & v &
       " fb) { int64_t i = " & n & "_find(s, k); " &
       "return i >= 0 ? s->m_vals[i] : fb; }"
-    g.put "static " & v & " " & n & "_at(" & n & " *s, " & kt &
+    g.put "static " & v & " " & n & "_at(" & n & " *s, " & query &
       " k) { return s->m_vals[" & n & "_find(s, k)]; }"
-    g.put "static void " & n & "_remove(" & n & " *s, " & kt & " k) { " &
+    g.put "static void " & n & "_remove(" & n & " *s, " & query & " k) { " &
       "int64_t i = " & n & "_find(s, k); if (i < 0) return; " &
       "memmove(&s->m_keys[i], &s->m_keys[i + 1], " &
       "(size_t)((s->m_len - i - 1) * (int64_t)sizeof(" & kt & "))); " &
@@ -1461,6 +1479,16 @@ proc generate*(m: Module, src: string): string =
       memory = memory or hasOwned(pm.typ)
   if memory:
     g.o.add cMemoryPrelude
+  if m.routines.anyIt(it.externLib != ""):
+    # GCC and Clang accept asm labels in C99 mode and expose the target's
+    # linker prefix, such as Mach-O's underscore or ELF's empty prefix.
+    g.put "#ifndef __USER_LABEL_PREFIX__"
+    g.put "#error Binary FFI requires GCC/Clang compatible asm labels"
+    g.put "#endif"
+    g.put "#define NI_EXTERN_STRINGIFY_INNER(value) #value"
+    g.put "#define NI_EXTERN_STRINGIFY(value) NI_EXTERN_STRINGIFY_INNER(value)"
+    g.put "#define NI_EXTERN_SYMBOL(name) " &
+        "__asm__(NI_EXTERN_STRINGIFY(__USER_LABEL_PREFIX__) name)"
   if anyArena:
     g.put "static _Thread_local uint8_t *ni_sp;"
   for td in m.types:
@@ -1504,8 +1532,8 @@ proc generate*(m: Module, src: string): string =
             $g.needOf[r.name] & "];"
   for r in m.routines:
     if r.externLib != "":
-      # Binary FFI: our own prototype in our own plain types; the
-      # linker resolves the symbol. No headers are ever read.
+      # Private identifiers avoid conflicts with incidental runtime header
+      # prototypes. The linker still resolves the declared binary symbol.
       var ps: seq[string]
       for pm in r.params:
         if pm.typ.kind == StringType:
@@ -1518,7 +1546,8 @@ proc generate*(m: Module, src: string): string =
           ps.add cBase(pm.typ)
       let ret = if r.ret.isNil: "void" else: cBase(r.ret)
       g.put "extern " & ret & " " & externSym(r) & "(" &
-        (if ps.len == 0: "void" else: ps.join(", ")) & ");"
+        (if ps.len == 0: "void" else: ps.join(", ")) &
+        ") NI_EXTERN_SYMBOL(" & cQuote(externName(r)) & ");"
       continue
     g.curOffsets = g.bigOffs[r.name]
     g.curArena.clear()

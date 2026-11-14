@@ -4,7 +4,8 @@ Nifty is nimmy's super-static brother. nimmy is a dynamic scripting language;
 nifty is a small systems language with statically checked memory access,
 threads, stack depth, control flow, and evaluation order. Fixed-capacity
 storage remains the default; growable strings and sequences add explicit,
-fallible heap allocation with scoped ownership. Nifty compiles to portable C.
+fallible heap allocation with scoped ownership. Nifty compiles to portable C
+or native ARM64 and AMD64 code; see [BACKENDS.md](BACKENDS.md).
 
 The design goal is *provability through simplicity*: the compiler proves
 access safety and reports static storage, stack depth, and operation bounds
@@ -895,7 +896,10 @@ reused.
 
 ## Compilation model
 
-Nifty compiles one module to one portable C file (C99 + pthreads):
+The C backend compiles one module to one portable C file (C99 + pthreads).
+Native backends lower the same checked module into typed IR and machine code,
+with the same ownership, borrowing, and allocation-failure rules.
+The C mapping is:
 
 | nifty                  | C                                          |
 | ---------------------- | ------------------------------------------ |

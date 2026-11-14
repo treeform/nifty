@@ -1,0 +1,9 @@
+# Every string representation preserves embedded zero bytes in output.
+
+thread main() =
+  var dynamic: string
+  discard dynamic.add("a\0b")
+  let fixed: string[4] = "c\0d"
+  echo dynamic
+  echo fixed
+  echo "e\0f"
