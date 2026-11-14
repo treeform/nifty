@@ -1,0 +1,3 @@
+error_generic_with_end_global.nifty:14: generic 'inner' calls 'end', which touches globals; generic routines cannot access globals - pass values through parameters
+  while instantiating 'inner' with $T = int at error_generic_with_end_global.nifty:17
+  while instantiating 'outer' with $T = int at error_generic_with_end_global.nifty:22

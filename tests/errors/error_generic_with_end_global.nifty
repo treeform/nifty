@@ -1,0 +1,23 @@
+object Resource =
+  value: int
+var index: 0 .. 1
+proc changeIndex() =
+  index = 1
+proc start(item: var Resource) =
+  item.value = 1
+proc end(item: var Resource) =
+  changeIndex()
+  item.value = 0
+proc inner(value: $T) =
+  var item: Resource
+  item.value = value
+  with item:
+    echo item.value
+proc outer(value: $T) =
+  inner(value)
+thread main() =
+  var values: array[1, int]
+  values[0] = 42
+  index = 0
+  outer(1)
+  echo values[index]

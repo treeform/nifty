@@ -1,0 +1,2 @@
+error_generic_with_start_global.nifty:12: generic 'work' calls 'start', which touches globals; generic routines cannot access globals - pass values through parameters
+  while instantiating 'work' with $T = int at error_generic_with_start_global.nifty:18

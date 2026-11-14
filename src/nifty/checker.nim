@@ -3322,7 +3322,19 @@ proc scanNoGlobals(c: Ctx, gname: string, body: seq[Stmt]) =
   ## Generic bodies may not reach globals: the thread-ownership and lock
   ## proofs run before any instantiation exists, so a generic's global
   ## footprint must be empty for them to stay sound.
+  proc scanCall(c: Ctx, name: string, line: int) =
+    ## Checks explicit calls and implicit resource hooks alike.
+    for callee in c.overloads.getOrDefault(name, @[name]):
+      if callee in c.routineAccess and c.routineAccess[callee].len > 0:
+        err(line, "generic '" & gname & "' calls '" & name &
+          "', which touches globals; generic routines cannot access " &
+          "globals - pass values through parameters")
+      if callee in c.routineLocks and c.routineLocks[callee].len > 0:
+        err(line, "generic '" & gname & "' calls '" & name &
+          "', which acquires global locks; generic routines cannot " &
+          "access globals")
   proc scanE(c: Ctx, e: Expr) =
+    ## Rejects global references and effects in an expression.
     if e.isNil:
       return
     if e.kind == IdentExpr and e.sval in c.globals:
@@ -3331,17 +3343,17 @@ proc scanNoGlobals(c: Ctx, gname: string, body: seq[Stmt]) =
         "through parameters")
     if e.kind in {CallExpr, MethodExpr} and
         (e.kind == CallExpr or e.sval notin builtinMethods):
-      for callee in c.overloads.getOrDefault(e.sval, @[e.sval]):
-        if callee in c.routineAccess and c.routineAccess[callee].len > 0:
-          err(e.line, "generic '" & gname & "' calls '" & e.sval &
-            "', which touches globals; generic routines cannot access " &
-            "globals - pass values through parameters")
+      c.scanCall(e.sval, e.line)
     for k in e.kids:
       scanE(c, k)
   proc scanS(c: Ctx, s: Stmt) =
-    if s.kind == WithStmt and s.name in c.globals:
-      err(s.line, "generic '" & gname & "' locks global '" & s.name &
-        "'; generic routines cannot access globals")
+    ## Includes the calls introduced by a resource block.
+    if s.kind == WithStmt:
+      if s.name in c.globals:
+        err(s.line, "generic '" & gname & "' locks global '" & s.name &
+          "'; generic routines cannot access globals")
+      for name in ["start", "end"]:
+        c.scanCall(name, s.line)
     for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
       scanE(c, e)
     for a in s.args:
