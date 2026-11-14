@@ -1,0 +1,176 @@
+# Ported from Supersnappy; see SNAPPY_LICENSE.
+import snappytypes
+
+proc snappyReadLittle(input: string, position: var int, count: 0 .. 4): int? =
+  # Reads a little-endian unsigned integer without speculative reads.
+  var cursor = position
+  var value: 0 .. 4294967295 = 0
+  var multiplier: 1 .. 16777216 = 1
+  for i in 0 ..< count:
+    if cursor < 0:
+      return none
+    if cursor >= input.len:
+      return none
+    let byte = input[cursor]
+    if value > 4294967295 - byte * multiplier:
+      return none
+    let nextValue = value + byte * multiplier
+    if nextValue > 4294967295:
+      return none
+    value = nextValue
+    if cursor >= 9223372036854775807:
+      return none
+    cursor = cursor + 1
+    if i < 3:
+      if multiplier <= 65536:
+        multiplier = multiplier * 256
+  position = cursor
+  return value
+
+proc snappyUncompressBody(input: string, output: var string, maxOutput: int, error: var SnappyError): bool =
+  # Validates and expands one raw Snappy block with overlapping copies.
+  var position = 0
+  var expected: 0 .. 4294967295 = 0
+  var multiplier: 1 .. 268435456 = 1
+  var complete = false
+  for i in 0 ..< 5:
+    if position < 0:
+      return snappyFail(error, position, SnappyFormatError, "Truncated length varint")
+    if position >= input.len:
+      return snappyFail(error, position, SnappyFormatError, "Truncated length varint")
+    let byte = input[position]
+    position = position + 1
+    if i == 4 and byte > 15:
+      return snappyFail(error, position - 1, SnappyFormatError, "Length varint overflow")
+    let digit = byte % 128
+    if expected > 4294967295 - digit * multiplier:
+      return snappyFail(error, position - 1, SnappyFormatError, "Length varint overflow")
+    let nextExpected = expected + digit * multiplier
+    if nextExpected > 4294967295:
+      return snappyFail(error, position - 1, SnappyFormatError, "Length varint overflow")
+    expected = nextExpected
+    if byte < 128:
+      complete = true
+      break
+    if i < 4:
+      if multiplier <= 2097152:
+        multiplier = multiplier * 128
+  if not complete:
+    return snappyFail(error, position, SnappyFormatError, "Length varint overflow")
+  if maxOutput < 0 or expected > maxOutput:
+    return snappyFail(error, 0, SnappyLimitError, "Output exceeds limit")
+  if not output.resize(expected):
+    return snappyFail(error, 0, SnappyAllocationError, "Output allocation failed")
+  var produced: 0 .. 4294967295 = 0
+  for step in 0 ..< input.len:
+    if position == input.len:
+      break
+    if position < 0:
+      return snappyFail(error, position, SnappyFormatError, "Invalid input position")
+    if position >= input.len:
+      return snappyFail(error, position, SnappyFormatError, "Invalid input position")
+    let tagOffset = position
+    let tag = input[position]
+    if position >= 9223372036854775807:
+      return snappyFail(error, position, SnappyFormatError, "Input position overflow")
+    position = position + 1
+    let kind = tag % 4
+    var length: 1 .. 4294967296 = 1
+    var distance: 0 .. 4294967295 = 0
+    if kind == 0:
+      let encoded = tag / 4
+      if encoded < 60:
+        length = encoded + 1
+      else:
+        let count = encoded - 59
+        if count < 1:
+          return snappyFail(error, tagOffset, SnappyFormatError, "Invalid literal length")
+        if count > 4:
+          return snappyFail(error, tagOffset, SnappyFormatError, "Invalid literal length")
+        let literal = snappyReadLittle(input, position, count)
+        if not literal.ok:
+          return snappyFail(error, position, SnappyFormatError, "Truncated literal length")
+        let literalValue = literal.or(0)
+        if literalValue < 0:
+          return snappyFail(error, tagOffset, SnappyFormatError, "Invalid literal length")
+        if literalValue > 4294967295:
+          return snappyFail(error, tagOffset, SnappyFormatError, "Invalid literal length")
+        length = literalValue + 1
+    else:
+      var count: 1 .. 4 = 1
+      if kind == 1:
+        length = tag / 4 % 8 + 4
+      elif kind == 2:
+        length = tag / 4 + 1
+        count = 2
+      else:
+        length = tag / 4 + 1
+        count = 4
+      let offset = snappyReadLittle(input, position, count)
+      if not offset.ok:
+        return snappyFail(error, position, SnappyFormatError, "Truncated copy offset")
+      let offsetValue = offset.or(0)
+      if offsetValue < 0:
+        return snappyFail(error, tagOffset, SnappyFormatError, "Invalid copy offset")
+      if offsetValue > 4294967295:
+        return snappyFail(error, tagOffset, SnappyFormatError, "Invalid copy offset")
+      distance = offsetValue
+      if kind == 1:
+        if distance > 255:
+          return snappyFail(error, tagOffset, SnappyFormatError, "Invalid short copy offset")
+        distance = distance + tag / 32 * 256
+      if distance == 0:
+        return snappyFail(error, tagOffset, SnappyFormatError, "Invalid copy distance")
+      if distance > produced:
+        return snappyFail(error, tagOffset, SnappyFormatError, "Invalid copy distance")
+    if produced > expected:
+      return snappyFail(error, tagOffset, SnappyFormatError, "Output exceeds declared length")
+    if length > expected - produced:
+      return snappyFail(error, tagOffset, SnappyFormatError, "Output exceeds declared length")
+    if kind == 0:
+      if position < 0:
+        return snappyFail(error, position, SnappyFormatError, "Truncated literal")
+      if position > input.len:
+        return snappyFail(error, position, SnappyFormatError, "Truncated literal")
+      if length > input.len - position:
+        return snappyFail(error, position, SnappyFormatError, "Truncated literal")
+    for i in 0 ..< length:
+      if produced < 0:
+        return snappyFail(error, tagOffset, SnappyFormatError, "Output exceeds declared length")
+      if produced >= output.len:
+        return snappyFail(error, tagOffset, SnappyFormatError, "Output exceeds declared length")
+      if kind == 0:
+        if position < 0:
+          return snappyFail(error, position, SnappyFormatError, "Truncated literal")
+        if position >= input.len:
+          return snappyFail(error, position, SnappyFormatError, "Truncated literal")
+        output[produced] = input[position]
+        if position >= 9223372036854775807:
+          return snappyFail(error, position, SnappyFormatError, "Input position overflow")
+        position = position + 1
+      else:
+        let source = produced - distance
+        if source < 0:
+          return snappyFail(error, tagOffset, SnappyFormatError, "Invalid copy source")
+        if source >= output.len:
+          return snappyFail(error, tagOffset, SnappyFormatError, "Invalid copy source")
+        output[produced] = output[source]
+      if produced >= 4294967295:
+        return snappyFail(error, tagOffset, SnappyFormatError, "Output length overflow")
+      produced = produced + 1
+  if produced != expected:
+    return snappyFail(error, position, SnappyFormatError, "Output length mismatch")
+  if position != input.len:
+    return snappyFail(error, position, SnappyFormatError, "Trailing input")
+  return true
+
+proc uncompressSnappy(input: string, output: var string, maxOutput: int, error: var SnappyError): bool =
+  # Expands a raw block, resetting the error and clearing output on failure.
+  error.offset = 0
+  error.code = 0
+  error.message = ""
+  output.clear()
+  let success = snappyUncompressBody(input, output, maxOutput, error)
+  if not success:
+    output.clear()
+  return success

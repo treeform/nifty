@@ -1,0 +1,16 @@
+# Ported from Supersnappy. See SNAPPY_LICENSE for its MIT license.
+const SnappyFormatError = 1
+const SnappyAllocationError = 2
+const SnappyLimitError = 3
+
+object SnappyError =
+  offset: int
+  code: int
+  message: string[128]
+
+proc snappyFail(error: var SnappyError, offset: int, code: int, message: string[128]): bool =
+  # Records an error without allocating memory.
+  error.offset = offset
+  error.code = code
+  error.message = message
+  return false
