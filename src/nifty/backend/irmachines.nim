@@ -11,6 +11,8 @@ const
   DefaultArmFloatBits* = not defined(nimkeyNoArmFloatBits)
   DefaultArmFloatZeros* = not defined(nimkeyNoArmFloatZeros)
   DefaultArmFloatLoads* = not defined(nimkeyNoArmFloatLoads)
+  DefaultArmCallSaves* = not defined(nimkeyNoArmCallSaves) and
+    not defined(nimkeyNoIrAllocation)
   DefaultArmGlobalBindings* = defined(nimkeyArmGlobalBindings) and
     not defined(nimkeyNoArmGlobalBindings)
   DefaultArmUnsignedWords* = defined(nimkeyArmUnsignedWords) and
@@ -217,7 +219,8 @@ proc emitArm64Ir*(module: ir.IrModule,
     leafFrames = DefaultArmLeafFrames,
     abiFloats = DefaultArmAbiFloats,
     unusedCopies = DefaultIrUnusedCopies,
-    branchPairs = DefaultArmBranchPairs): IrMachineImage
+    branchPairs = DefaultArmBranchPairs,
+    callSaves = DefaultArmCallSaves): IrMachineImage
     {.raises: [BackendError].} =
   ## Assigns physical locations only after the complete IR module is verified.
   let
@@ -270,6 +273,11 @@ proc emitArm64Ir*(module: ir.IrModule,
       leaf = leafFrames and not defined(nimkeyNoArmLeafFrames) and
         leafFrame(function)
       contextRegister = if leaf: X0 else: X19
+    var useCallSaves = callSaves and DefaultArmCallSaves
+    for data in function.blocks:
+      if data.terminator.kind in
+          {ir.InvokeTerminator, ir.InvokeHostTerminator}:
+        useCallSaves = false
     var needsGlobals = not globalBindings and not leaf
     if not leaf:
       for item in function.instructions:
@@ -313,11 +321,14 @@ proc emitArm64Ir*(module: ir.IrModule,
               integerMask = 0x3fc0'u64
       let preferences = if useAbiFloats: floatAbiPreferences(function)
         else: @[]
+      let offeredFloats = volatileFloats +
+        (if preservedFloats != 0: 8 else: 0)
       allocation = allocateRegisters(
         function,
         integers = (if integerMask != 0: 14 else: 6),
-        floats = volatileFloats + (if preservedFloats != 0: 8 else: 0),
-        preservedFloats = preservedFloats,
+        floats = offeredFloats,
+        preservedFloats = if useCallSaves:
+            (1'u64 shl offeredFloats) - 1 else: preservedFloats,
         preservedIntegers = integerMask,
         fixedValues = fixed,
         floatColors = floatColors,
@@ -389,6 +400,20 @@ proc emitArm64Ir*(module: ir.IrModule,
       locations.add(copyLocation(function.values[value].valueType,
         if places[value].register > 0: places[value].register - 1 else: -1,
         places[value].offset))
+    var
+      savedCalls = newSeq[seq[int]](function.instructions.len)
+      maxSavedFloats = 0
+    if useCallSaves:
+      let live = liveThroughCalls(function, analyzeLiveness(function))
+      for instruction, values in live:
+        for value in values:
+          let register = allocation.registers[int32(value)]
+          if function.values[int32(value)].valueType.floating() and
+              register >= 0 and register < int32(volatileFloats):
+            savedCalls[instruction].add(places[int32(value)].register - 1)
+        maxSavedFloats = max(maxSavedFloats, savedCalls[instruction].len)
+    let callerSaveArea = frameBytes
+    frameBytes += maxSavedFloats * 8
     let callArea = frameBytes
     var maxArguments = 8
     for data in function.blocks:
@@ -463,6 +488,34 @@ proc emitArm64Ir*(module: ir.IrModule,
       else:
         let memory = code.floatFrameOperand(place.offset, X15, kind)
         code.loadFloat(destination, memory.base, memory.offset, single)
+    proc callFloats(code: var machine.Assembler, registers: openArray[int],
+        restore: bool) =
+      ## Preserves exact live volatile payloads only along the executed call.
+      if registers.len == 0:
+        return
+      var
+        base = StackPointer
+        offset = callerSaveArea
+      if offset + registers.len * 8 > 512:
+        code.address(X13, offset)
+        base = X13
+        offset = 0
+      var i = 0
+      while i < registers.len:
+        if i + 1 < registers.len:
+          if restore:
+            code.loadFloatPair(registers[i], registers[i + 1], base,
+              offset + i * 8)
+          else:
+            code.storeFloatPair(registers[i], registers[i + 1], base,
+              offset + i * 8)
+          i += 2
+        else:
+          if restore:
+            code.loadFloat(registers[i], base, offset + i * 8)
+          else:
+            code.storeFloat(registers[i], base, offset + i * 8)
+          inc i
     proc integerOperand(code: var machine.Assembler, value: ir.ValueId,
         scratch: machine.Register): machine.Register =
       ## Uses an allocated general register directly and loads only spills.
@@ -909,6 +962,7 @@ proc emitArm64Ir*(module: ir.IrModule,
               code.integer(operand(0), integerResult)
               code.normalize(resultKind, integerResult)
         of ir.CallOp, ir.HostCallOp, ir.IndirectCallOp:
+          code.callFloats(savedCalls[instructionIndex], false)
           let first = if item.op == ir.IndirectCallOp: 1 else: 0
           if item.op == ir.IndirectCallOp:
             code.integer(operand(0), X16)
@@ -957,6 +1011,7 @@ proc emitArm64Ir*(module: ir.IrModule,
           elif item.results.count > 0:
             if resultKind.floating(): code.putFloat(resultId, 0)
             else: code.putInteger(resultId, X0)
+          code.callFloats(savedCalls[instructionIndex], true)
           continue
         of ir.PackOp, ir.VectorAddOp, ir.VectorSubtractOp,
             ir.VectorMultiplyOp, ir.VectorDivideOp:
