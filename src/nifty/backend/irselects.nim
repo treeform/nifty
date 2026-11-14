@@ -1,9 +1,21 @@
 import irs
 
-proc speculatable(item: IrInstruction): bool =
-  ## Allows only bounded scalar work without memory effects or checked traps.
-  not item.volatile and item.op in {ConstantOp, AddOp, SubtractOp,
-    MultiplyOp, NegateOp, AndOp, OrOp, XorOp, NotOp, CompareOp, SelectOp}
+proc speculatable(function: IrFunction, item: IrInstruction): bool =
+  ## Retains conditional floating work that can change exception flags.
+  if item.volatile:
+    return false
+  case item.op
+  of ConstantOp, SelectOp, NegateOp:
+    # Floating negation changes only the sign bit, including NaN payloads.
+    true
+  of AddOp, SubtractOp, MultiplyOp, AndOp, OrOp, XorOp, NotOp, CompareOp:
+    for position in item.arguments.indices:
+      if function.values[int32(function.operands[position])].valueType in
+          {Float32Type, Float64Type, Float32x2Type}:
+        return false
+    true
+  else:
+    false
 
 proc resolve(aliases: seq[ValueId], value: ValueId): ValueId =
   ## Resolves forwarded arm parameters before creating a redundant choice.
@@ -52,7 +64,7 @@ proc selectValues*(function: var IrFunction): seq[ValueId] =
             allowed = int32(left.target) == int32(right.target)
             for arm in [int(int32(yes.target)), int(int32(no.target))]:
               for index in old.blocks[arm].instructions.indices:
-                if not speculatable(old.instructions[index]):
+                if not old.speculatable(old.instructions[index]):
                   allowed = false
             if allowed:
               arms = @[int(int32(yes.target)), int(int32(no.target))]

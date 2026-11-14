@@ -1,5 +1,22 @@
 import nifty/backend/[context, engine, irchecks, iroptimizations, memories]
 
+when defined(linux):
+  {.passL: "-lm".}
+
+proc clearExceptions(excepts: cint): cint
+  {.importc: "feclearexcept", header: "<fenv.h>".}
+  ## Clears the native thread's floating exception flags.
+
+proc testExceptions(excepts: cint): cint
+  {.importc: "fetestexcept", header: "<fenv.h>".}
+  ## Reads the native thread's floating exception flags.
+
+var
+  AllExceptions {.importc: "FE_ALL_EXCEPT", header: "<fenv.h>".}: cint
+  InvalidException {.importc: "FE_INVALID", header: "<fenv.h>".}: cint
+  OverflowException {.importc: "FE_OVERFLOW", header: "<fenv.h>".}: cint
+
+
 proc arguments(function: var IrFunction,
     values: openArray[ValueId]): Span =
   ## Appends an ordered test operand list.
@@ -144,6 +161,25 @@ proc guarded(op: IrOpcode): IrFunction =
   let joined = result.newBlock([Int64Type])[0]
   result.finish(joined)
 
+proc guardedFloating(op: IrOpcode): IrFunction =
+  ## Keeps signaling comparisons and overflowing arithmetic in untaken arms.
+  result = function("guardedFloating" & $op)
+  let
+    condition = result.instruction(LoadOp, [ValueId(1)], BoolType)
+    left = result.instruction(LoadOp, [ValueId(1)], Float64Type, offset = 8)
+    right = result.instruction(LoadOp, [ValueId(1)], Float64Type, offset = 16)
+    kind = if op == CompareOp: BoolType else: Float64Type
+  result.branch(condition, 1, 2)
+  discard result.newBlock()
+  let safe = result.instruction(ConstantOp, [], kind,
+    bits = if op == CompareOp: 1'u64 else: cast[uint64](7.0))
+  result.jump(3, [safe])
+  discard result.newBlock()
+  let value = result.instruction(op, [left, right], kind)
+  result.jump(3, [value])
+  let joined = result.newBlock([kind])[0]
+  result.finish(joined)
+
 proc execute(module: IrModule, optimized: bool) =
   ## Emits both targets and executes exact payload and speculation checks.
   verifyIr(module)
@@ -184,18 +220,40 @@ proc execute(module: IrModule, optimized: bool) =
         doAssert calls == 7
         for index in 6 .. 8:
           doAssert run(index, 1, 0, 0) == 7
+        for index in 9 .. 12:
+          let
+            left = if index == 9: 0x7ff0000000001234'u64
+              else: 0x7fefffffffffffff'u64
+            right = if index == 9: 0'u64
+              elif index == 10: 0x7fefffffffffffff'u64
+              elif index == 11: 0xffefffffffffffff'u64
+              else: cast[uint64](2.0)
+            expected = if index == 9: 1'u64 else: cast[uint64](7.0)
+          doAssert clearExceptions(AllExceptions) == 0
+          doAssert run(index, 1, left, right) == expected
+          doAssert testExceptions(AllExceptions) == 0
+          doAssert clearExceptions(AllExceptions) == 0
+          discard run(index, 0, left, right)
+          let observed = testExceptions(AllExceptions)
+          if index == 9:
+            doAssert (observed and InvalidException) != 0
+          else:
+            doAssert (observed and OverflowException) != 0
+        doAssert clearExceptions(AllExceptions) == 0
         buffer.release()
   if optimized:
     doAssert module.functions[0].selected() > 0
     for index in 1 .. 4:
       doAssert module.functions[index].selected() > 0
-    for index in 5 .. 8:
+    for index in 5 .. 12:
       doAssert module.functions[index].selected() == 0
 
 var module = IrModule(pointerBytes: 8, functions: @[
   integer, payloads(Float32Type, false), payloads(Float32Type, true),
   payloads(Float64Type, false), payloads(Float64Type, true),
-  guarded(HostCallOp), guarded(LoadOp), guarded(DivideOp), guarded(ConvertOp)],
+  guarded(HostCallOp), guarded(LoadOp), guarded(DivideOp), guarded(ConvertOp),
+  guardedFloating(CompareOp), guardedFloating(AddOp),
+  guardedFloating(SubtractOp), guardedFloating(MultiplyOp)],
   hosts: @[IrHost(name: "observe", failureMode: NoFailCall,
     signature: IrSignature(parameters: @[Int64Type], returns: @[Int64Type]))])
 module.execute(false)
