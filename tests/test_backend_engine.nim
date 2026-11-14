@@ -218,6 +218,22 @@ discard wide.instruction(StoreOp, [ValueId(2), wideSquare],
 wide.finish()
 module.functions.add(wide)
 
+var bitcasts = newFunction("float64Bitcasts")
+let
+  floatInput = bitcasts.instruction(LoadOp, [ValueId(1)], Float64Type)
+  unsignedBits = bitcasts.instruction(ConvertOp, [floatInput], UInt64Type)
+  unsignedFloat = bitcasts.instruction(ConvertOp, [unsignedBits], Float64Type)
+  signedBits = bitcasts.instruction(ConvertOp, [unsignedFloat], Int64Type)
+  signedFloat = bitcasts.instruction(ConvertOp, [signedBits], Float64Type)
+for value in [unsignedBits, unsignedFloat, signedBits, signedFloat]:
+  discard bitcasts.instruction(StoreOp, [ValueId(2), value],
+    offset = int64((int32(value) - int32(unsignedBits)) * 8), resultCount = 0)
+for item in bitcasts.instructions.mitems:
+  if item.op == ConvertOp:
+    item.conversion = BitcastConversion
+bitcasts.finish()
+module.functions.add(bitcasts)
+
 var builder = IrBuilder(module: IrModule(pointerBytes: 8))
 let builderLabel = builder.label()
 builder.declareFunctions(["builder"], [builderLabel])
@@ -310,6 +326,17 @@ for target in NativeTarget:
       for i in 0 ..< wideInput.len:
         doAssert cast[uint64](wideOutput[i]) == cast[uint64](wideInput[i])
       doAssert wideOutput[36] == 2.25
+      for bits in [0'u64, 0x8000000000000000'u64, 1'u64,
+          0x8000000000000001'u64, 0x3ff0000000000000'u64,
+          0x7ff0000000000000'u64, 0xfff0000000000000'u64,
+          0x7ff8000000001234'u64, 0xfff8000000005678'u64,
+          0x7ff0000000000001'u64, 0xffffffffffffffff'u64]:
+        var
+          bitInput = bits
+          bitOutput: array[4, uint64]
+        entry(11)(ctx.addr, bitInput.addr, bitOutput.addr, nil)
+        for value in bitOutput:
+          doAssert value == bits
       buffer.release()
       doAssert buffer.entry() == nil
 

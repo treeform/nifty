@@ -856,19 +856,25 @@ proc emitArm64Ir*(module: ir.IrModule,
             code.floatConvert(scratchFloat, scratchFloat, single)
           else:
             if floatBits and item.conversion == ir.BitcastConversion and
-              sourceKind == ir.Float32Type and
-              resultKind in {ir.Int32Type, ir.UInt32Type}:
+              ((sourceKind == ir.Float32Type and
+                resultKind in {ir.Int32Type, ir.UInt32Type}) or
+               (sourceKind == ir.Float64Type and
+                resultKind in {ir.Int64Type, ir.UInt64Type})):
                 integerResult = integerDestination(resultId)
                 let source = code.floatOperand(operand(0), scratchFloat)
-                code.floatToBits(integerResult, source, single = true)
+                code.floatToBits(integerResult, source,
+                  single = sourceKind == ir.Float32Type)
                 if resultKind == ir.Int32Type:
                   code.signExtendWord(integerResult, integerResult)
             elif floatBits and item.conversion == ir.BitcastConversion and
-              sourceKind in {ir.Int32Type, ir.UInt32Type} and
-              resultKind == ir.Float32Type:
+              ((sourceKind in {ir.Int32Type, ir.UInt32Type} and
+                resultKind == ir.Float32Type) or
+               (sourceKind in {ir.Int64Type, ir.UInt64Type} and
+                resultKind == ir.Float64Type)):
                 floatResult = floatDestination(resultId)
                 let source = code.integerOperand(operand(0), X12)
-                code.bitsToFloat(floatResult, source, single = true)
+                code.bitsToFloat(floatResult, source,
+                  single = resultKind == ir.Float32Type)
             elif sourceKind.floating() or resultKind.floating():
               code.address(X13, callArea)
               if sourceKind.floating():
