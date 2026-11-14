@@ -11,7 +11,8 @@
 
 import
   std/[algorithm, os, osproc, strutils],
-  ../src/nifty
+  ../src/nifty,
+  test_memory
 
 var testsPassed* = 0
 var testsFailed* = 0
@@ -148,6 +149,9 @@ proc runGoldMasterTests*(): tuple[passed: int, failed: int] =
   runTestsInDir(baseDir / "syntax", "syntax", tmCompileError, workDir)
   runTestsInDir(baseDir / "runtime", "runtime", tmRuntimeTrap, workDir)
   runReportTests(baseDir / "reports", "reports")
+  let memory = runMemoryTests()
+  testsPassed += memory.passed
+  testsFailed += memory.failed
 
   (testsPassed, testsFailed)
 

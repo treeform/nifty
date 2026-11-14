@@ -16,9 +16,14 @@ type
     frameOf: Table[string, int64]  # routine -> its own arena frame bytes
     needOf: Table[string, int64]   # routine -> worst-case arena incl callees
     bigOffs: Table[string, Table[string, int64]] # routine -> local -> offset
+    curOffsets: Table[string, int64]
     curArena: Table[string, int64] # current routine's big locals
+    borrowedLocals: HashSet[string]
     curRet: Typ                    # return type of the routine being emitted
     curFrame: int64                # current routine's arena frame bytes
+    curThread: bool
+    owners: seq[seq[tuple[path: string, typ: Typ]]]
+    loopScopes: seq[int]
 
 proc put(g: var Gen, s: string) =
   g.o.add spaces(g.ind * 2)
@@ -52,8 +57,9 @@ proc mangle(t: Typ): string =
   of FloatType: "f" & $(t.width * 8)
   of BoolType: "b"
   of ArrayType: "a" & $t.len & "_" & mangle(t.elem)
-  of SeqType: "q" & $t.len & "_" & mangle(t.elem)
-  of StringType: "s" & $t.len
+  of SeqType:
+    (if t.dynamic: "dq" else: "q" & $t.len) & "_" & mangle(t.elem)
+  of StringType: (if t.dynamic: "ds" else: "s" & $t.len)
   of SetType: "t" & mangleNum(t.elem.rlo) & "_" & mangleNum(t.elem.rhi)
   of QueueType: "u" & $t.len & "_" & mangle(t.elem)
   of ChannelType: "c" & $t.len & "_" & mangle(t.elem)
@@ -89,12 +95,15 @@ proc passByPtr(t: Typ): bool =
   ## var parameters pass by pointer, except arrays which already decay.
   t.kind != ArrayType
 
+include codegen_memory
+
 proc externSym(r: Routine): string =
   if r.cname != "": r.cname else: r.name
 
 proc genStrMethod(g: var Gen, e: Expr, ordered: bool): string
 proc genOrdered(g: var Gen, e: Expr): string
 proc genPathOrdered(g: var Gen, e: Expr): string
+proc borrowArg(g: var Gen, e: Expr, target: Typ, ordered: bool): string
 
 proc genExpr(g: var Gen, e: Expr): string =
   if e.wrapOpt:
@@ -117,8 +126,13 @@ proc genExpr(g: var Gen, e: Expr): string =
     if e.bval: "true" else: "false"
   of StrExpr:
     if e.typ != nil and e.typ.kind == StringType:
-      "(" & cBase(e.typ) & "){ .m_len = " & $e.sval.len & "LL, .m_data = " &
-        cQuote(e.sval) & " }"
+      if e.typ.dynamic:
+        "(" & cBase(e.typ) & "){ .m_len = " & $e.sval.len &
+          "LL, .m_cap = " & $e.sval.len &
+          "LL, .m_data = (uint8_t *)" & cQuote(e.sval) & " }"
+      else:
+        "(" & cBase(e.typ) & "){ .m_len = " & $e.sval.len & "LL, .m_data = " &
+          cQuote(e.sval) & " }"
     else:
       cQuote(e.sval)
   of IdentExpr:
@@ -127,12 +141,14 @@ proc genExpr(g: var Gen, e: Expr): string =
       of ConstSym: "C_" & e.sval
       of GlobalSym: "g_" & e.sval
       of LocalSym:
-        if e.sval in g.curArena:
+        if e.sval in g.borrowedLocals:
+          "(*v_" & e.sval & ")"
+        elif e.sval in g.curArena:
           "(*v_" & e.sval & ")" # big local: lives on the thread's arena
         else:
           "v_" & e.sval
       of ParamSym:
-        if e.isVarParam and e.typ.passByPtr:
+        if (e.isVarParam or hasOwned(e.typ)) and e.typ.passByPtr:
           "(*p_" & e.sval & ")"
         else:
           "p_" & e.sval
@@ -176,8 +192,9 @@ proc genExpr(g: var Gen, e: Expr): string =
     for i, a in e.kids:
       if r.externLib != "" and r.params[i].typ.kind == StringType:
         parts.add g.genExpr(a) & ".m_data"
-      elif r.params[i].isVar and r.params[i].typ.passByPtr:
-        parts.add "&" & g.genExpr(a)
+      elif (r.params[i].isVar or hasOwned(r.params[i].typ)) and
+          r.params[i].typ.passByPtr:
+        parts.add g.borrowArg(a, r.params[i].typ, false)
       else:
         parts.add g.genExpr(a)
     if r.externLib != "":
@@ -194,7 +211,7 @@ proc genExpr(g: var Gen, e: Expr): string =
       cBase(e.kids[0].typ) & "_toInt(&" & g.genExpr(e.kids[0]) & ")"
     elif e.kids[0].typ != nil and not e.kids[0].typ.opt and
         e.kids[0].typ.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
-      g.genExpr(e.kids[0]) & ".m_len"
+      g.genExpr(e.kids[0]) & (if e.sval == "cap": ".m_cap" else: ".m_len")
     elif e.unwrapOpt:
       g.genExpr(e.kids[0]) & ".m_" & e.sval & ".m_val"
     else:
@@ -210,6 +227,13 @@ proc genExpr(g: var Gen, e: Expr): string =
       return g.genStrMethod(e, false)
     let fn = cBase(bt) & "_" & e.sval
     let basePtr = "&" & g.genExpr(e.kids[0])
+    if bt.dynamic and bt.kind == SeqType and e.kids.len == 2 and
+        (e.sval == "copyFrom" or
+          (e.sval in ["add", "push"] and hasOwned(bt.elem))):
+      let arg =
+        if e.sval == "copyFrom": g.borrowArg(e.kids[1], bt, false)
+        else: "&" & g.genExpr(e.kids[1])
+      return fn & "(" & basePtr & ", " & arg & ")"
     if e.kids.len > 2:
       fn & "(" & basePtr & ", " & g.genExpr(e.kids[1]) & ", " &
         g.genExpr(e.kids[2]) & ")"
@@ -217,6 +241,16 @@ proc genExpr(g: var Gen, e: Expr): string =
       fn & "(" & basePtr & ", " & g.genExpr(e.kids[1]) & ")"
     else:
       fn & "(" & basePtr & ")"
+
+proc borrowArg(g: var Gen, e: Expr, target: Typ, ordered: bool): string =
+  ## Adapt fixed storage to a nonowning dynamic descriptor when needed.
+  let path = if ordered: g.genPathOrdered(e) else: g.genExpr(e)
+  if target.dynamic and e.typ != nil and not e.typ.dynamic and
+      e.typ.kind in {StringType, SeqType}:
+    return "&(" & cBase(target) & "){ .m_len = " & path &
+      ".m_len, .m_cap = " & $e.typ.len & "LL, .m_data = " &
+      path & ".m_data }"
+  "&" & path
 
 proc strNeedle(g: var Gen, a: Expr, ordered: bool): string =
   ## A string argument as the C pair (data, length).
@@ -233,8 +267,10 @@ proc genStrMethod(g: var Gen, e: Expr, ordered: bool): string =
   let basePtr = "&" &
     (if ordered: g.genPathOrdered(e.kids[0]) else: g.genExpr(e.kids[0]))
   case e.sval
-  of "add":
-    n & "_adds(" & basePtr & ", " & g.strNeedle(e.kids[1], ordered) & ")"
+  of "add", "copyFrom":
+    let suffix = if e.sval == "add": "adds" else: "copyFrom"
+    n & "_" & suffix & "(" & basePtr & ", " &
+      g.strNeedle(e.kids[1], ordered) & ")"
   of "startsWith", "endsWith", "contains", "find":
     n & "_" & e.sval & "(" & basePtr & ", " &
       g.strNeedle(e.kids[1], ordered) & ")"
@@ -317,7 +353,8 @@ proc genOrdered(g: var Gen, e: Expr): string =
       g.genPathOrdered(e)
     elif e.kids[0].typ != nil and
         e.kids[0].typ.kind in {SeqType, StringType, SetType, QueueType, DenseMapType, SparseMapType}:
-      g.tempFor(e, g.genPathOrdered(e.kids[0]) & ".m_len")
+      g.tempFor(e, g.genPathOrdered(e.kids[0]) &
+        (if e.sval == "cap": ".m_cap" else: ".m_len"))
     else:
       g.tempFor(e, g.genPathOrdered(e))
   of IndexExpr:
@@ -369,8 +406,9 @@ proc genOrdered(g: var Gen, e: Expr): string =
     for i, a in e.kids:
       if r.externLib != "" and r.params[i].typ.kind == StringType:
         parts.add g.genPathOrdered(a) & ".m_data"
-      elif r.params[i].isVar and r.params[i].typ.passByPtr:
-        parts.add "&" & g.genPathOrdered(a)
+      elif (r.params[i].isVar or hasOwned(r.params[i].typ)) and
+          r.params[i].typ.passByPtr:
+        parts.add g.borrowArg(a, r.params[i].typ, true)
       elif a.typ != nil and a.typ.kind == ArrayType:
         parts.add g.genPathOrdered(a)
       else:
@@ -402,7 +440,14 @@ proc genOrdered(g: var Gen, e: Expr): string =
       return g.tempFor(e, call)
     let base = g.genPathOrdered(e.kids[0])
     let fn = cBase(bt) & "_" & e.sval
-    if e.kids.len > 2:
+    if bt.dynamic and bt.kind == SeqType and e.kids.len == 2 and
+        (e.sval == "copyFrom" or
+          (e.sval in ["add", "push"] and hasOwned(bt.elem))):
+      let arg =
+        if e.sval == "copyFrom": g.borrowArg(e.kids[1], bt, true)
+        else: "&" & g.genPathOrdered(e.kids[1])
+      call = fn & "(&" & base & ", " & arg & ")"
+    elif e.kids.len > 2:
       let a1 = g.genOrdered(e.kids[1])
       let a2 = g.genOrdered(e.kids[2])
       call = fn & "(&" & base & ", " & a1 & ", " & a2 & ")"
@@ -416,15 +461,28 @@ proc genOrdered(g: var Gen, e: Expr): string =
     else:
       g.tempFor(e, call)
 
+proc destinationCall(e: Expr): bool =
+  ## Large user calls and dynamic gets can write directly to a destination.
+  e != nil and bigRet(e.typ) and (e.kind == CallExpr or
+    (e.kind == MethodExpr and e.sval == "get" and
+      e.kids[0].typ.dynamic))
+
 proc genCallInto(g: var Gen, e: Expr, dest: string) =
   ## A big-return call: C cannot return arrays (and big values would land
   ## on the C stack), so the caller passes where the result goes and the
   ## callee fills it in place.
+  if e.kind == MethodExpr:
+    let base = g.genPathOrdered(e.kids[0])
+    let index = g.genOrdered(e.kids[1])
+    g.put cBase(e.kids[0].typ) & "_getInto(&" & base & ", " &
+      index & ", " & dest & ");"
+    return
   let r = g.routines[e.sval]
   var parts: seq[string]
   for i, a in e.kids:
-    if r.params[i].isVar and r.params[i].typ.passByPtr:
-      parts.add "&" & g.genPathOrdered(a)
+    if (r.params[i].isVar or hasOwned(r.params[i].typ)) and
+        r.params[i].typ.passByPtr:
+      parts.add g.borrowArg(a, r.params[i].typ, true)
     elif a.typ != nil and a.typ.kind == ArrayType:
       parts.add g.genPathOrdered(a)
     else:
@@ -443,7 +501,7 @@ proc collectBig(body: seq[Stmt], offs: var Table[string, int64],
     if s.kind in {VarStmt, LetStmt} and s.typ != nil and
         typeSize(s.typ) > arenaThreshold:
       off = (off + 7) div 8 * 8
-      offs[s.name] = off
+      offs[$s.line & ":" & s.name] = off
       off = off + typeSize(s.typ)
       if off > hi:
         hi = off
@@ -488,15 +546,42 @@ proc genCond(g: var Gen, e: Expr): string =
 
 proc genStmt(g: var Gen, s: Stmt)
 
-proc genBlock(g: var Gen, body: seq[Stmt]) =
-  inc g.ind
+proc cleanup(g: var Gen, first: int) =
+  ## Release only owners whose scopes are exited by this control edge.
+  if g.owners.len > first:
+    for i in countdown(g.owners.high, first):
+      for j in countdown(g.owners[i].high, 0):
+        let owner = g.owners[i][j]
+        g.put "ni_drop_" & mangle(owner.typ) & "(&" & owner.path & ");"
+
+proc genBody(g: var Gen, body: seq[Stmt]) =
+  ## Track lexical ownership independently of generated C temporaries.
+  let scope = g.owners.len
+  g.owners.add @[]
   for s in body:
     g.genStmt(s)
+  g.cleanup(scope)
+  g.owners.setLen(scope)
+  for s in body:
+    if s.kind in {VarStmt, LetStmt}:
+      g.curArena.del s.name
+
+proc genBlock(g: var Gen, body: seq[Stmt]) =
+  inc g.ind
+  g.genBody(body)
   dec g.ind
 
 proc genStmt(g: var Gen, s: Stmt) =
   case s.kind
   of VarStmt, LetStmt:
+    let declaration = $s.line & ":" & s.name
+    if declaration in g.curOffsets:
+      g.curArena[s.name] = g.curOffsets[declaration]
+    if hasOwned(s.typ):
+      let path =
+        if s.name in g.curArena: "(*v_" & s.name & ")"
+        else: "v_" & s.name
+      g.owners[^1].add (path, s.typ)
     if s.name in g.curArena:
       # A big local: a typed pointer into this thread's arena.
       let off = $g.curArena[s.name] & "LL"
@@ -511,7 +596,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       else:
         g.put cBase(s.typ) & " *v_" & s.name & " = (" & cBase(s.typ) &
           " *)(ni_base + " & off & ");"
-      if s.init != nil and s.init.kind == CallExpr and bigRet(s.init.typ):
+      if destinationCall(s.init):
         g.genCallInto(s.init, "v_" & s.name)
       elif s.init != nil and s.typ.kind == ArrayType:
         let v =
@@ -527,7 +612,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       else:
         g.put "memset(v_" & s.name & ", 0, " & $typeSize(s.typ) & "LL);"
       return
-    if s.init != nil and s.init.kind == CallExpr and bigRet(s.init.typ):
+    if destinationCall(s.init):
       g.put cDecl("v_" & s.name, s.typ) & ";"
       g.genCallInto(s.init, "&v_" & s.name)
       return
@@ -549,8 +634,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       else: "0"
     g.put cDecl("v_" & s.name, s.typ) & " = " & init & ";"
   of AssignStmt:
-    if s.rhs.kind == CallExpr and s.rhs.sval in g.routines and
-        bigRet(g.routines[s.rhs.sval].ret):
+    if destinationCall(s.rhs):
       let lhs =
         if g.hasEffects(s.lhs): g.genPathOrdered(s.lhs)
         else: g.genExpr(s.lhs)
@@ -620,12 +704,12 @@ proc genStmt(g: var Gen, s: Stmt) =
         else:
           g.put "}"
       if s.elseBody.len > 0:
-        for st in s.elseBody:
-          g.genStmt(st)
+        g.genBody(s.elseBody)
       for _ in 0 ..< closes:
         dec g.ind
         g.put "}"
   of WhileStmt:
+    g.loopScopes.add g.owners.len
     if g.hasEffects(s.cond):
       # The condition re-runs every iteration with defined order:
       # evaluate it inside the loop, then decide.
@@ -642,8 +726,7 @@ proc genStmt(g: var Gen, s: Stmt) =
         g.put "if (" & ctr & " >= " & $s.maxTrips & "LL) break;"
       let cnd = g.genOrdered(s.cond)
       g.put "if (!(" & cnd & ")) break;"
-      for st in s.body:
-        g.genStmt(st)
+      g.genBody(s.body)
       if s.maxTrips > 0:
         g.put "++" & ctr & ";"
       dec g.ind
@@ -671,7 +754,9 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "while " & g.genCond(s.cond) & " {"
       g.genBlock(s.body)
       g.put "}"
+    g.loopScopes.setLen(g.loopScopes.len - 1)
   of ForStmt:
+    g.loopScopes.add g.owners.len
     let tmp = "ni_end" & $g.tmpN
     inc g.tmpN
     g.put "{"
@@ -688,10 +773,13 @@ proc genStmt(g: var Gen, s: Stmt) =
     g.put "}"
     dec g.ind
     g.put "}"
+    g.loopScopes.setLen(g.loopScopes.len - 1)
   of LoopStmt:
+    g.loopScopes.add g.owners.len
     g.put "for (;;) {"
     g.genBlock(s.body)
     g.put "}"
+    g.loopScopes.setLen(g.loopScopes.len - 1)
   of WithStmt:
     if s.typ.kind == LockType:
       g.put "pthread_mutex_lock(&g_" & s.name & ");"
@@ -708,11 +796,12 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "f_end(" & arg & ");"
   of ReturnStmt:
     if s.value.isNil:
+      g.cleanup(0)
       if g.curFrame > 0:
         g.put "ni_sp = ni_base;"
-      g.put "return;"
+      g.put (if g.curThread: "return NULL;" else: "return;")
     elif bigRet(g.curRet):
-      if s.value.kind == CallExpr:
+      if destinationCall(s.value):
         # A same-type call: forward our destination straight through.
         g.genCallInto(s.value, "ni_ret")
       elif g.curRet.kind == ArrayType:
@@ -725,20 +814,23 @@ proc genStmt(g: var Gen, s: Stmt) =
           if g.hasEffects(s.value): g.genOrdered(s.value)
           else: g.genExpr(s.value)
         g.put "*ni_ret = " & v & ";"
+      g.cleanup(0)
       if g.curFrame > 0:
         g.put "ni_sp = ni_base;"
       g.put "return;"
-    elif g.hasEffects(s.value):
-      let v = g.genOrdered(s.value)
-      if g.curFrame > 0:
-        g.put "ni_sp = ni_base;" # arena memory stays intact until the call ends
-      g.put "return " & v & ";"
     else:
-      let v = g.genExpr(s.value)
+      let v =
+        if g.hasEffects(s.value): g.genOrdered(s.value)
+        else: g.genExpr(s.value)
+      let captured = "ni_return" & $g.tmpN
+      inc g.tmpN
+      g.put cDecl(captured, g.curRet) & " = " & v & ";"
+      g.cleanup(0)
       if g.curFrame > 0:
         g.put "ni_sp = ni_base;"
-      g.put "return " & v & ";"
+      g.put "return " & captured & ";"
   of BreakStmt:
+    g.cleanup(g.loopScopes[^1])
     g.put "break;"
   of EchoStmt:
     # Every value argument is hoisted to a temp, in order: C leaves printf
@@ -762,6 +854,37 @@ proc genStmt(g: var Gen, s: Stmt) =
           let v =
             if g.hasEffects(a): g.genOrdered(a) else: g.genExpr(a)
           g.put ctype & " " & temps[i] & " = " & v & ";"
+    if s.args.anyIt(it.typ.kind == StringType and it.typ.dynamic):
+      # Dynamic strings may exceed printf's int precision and contain NULs.
+      # Evaluate every argument above, then keep the complete echo atomic.
+      g.put "flockfile(stdout);"
+      for i, a in s.args:
+        case a.typ.kind
+        of StringLitType:
+          if a.sval.len > 0:
+            g.put "fwrite(" & cQuote(a.sval) & ", 1, " & $a.sval.len &
+              ", stdout);"
+        of StringType:
+          let v = temps[i]
+          g.put "if (" & v & ".m_len > 0) fwrite(" & v &
+            ".m_data, 1, (size_t)" & v & ".m_len, stdout);"
+        of IntType:
+          if a.typ.dname == "char":
+            g.put "printf(\"%c\", (int)" & temps[i] & ");"
+          else:
+            g.put "printf(\"%lld\", (long long)" & temps[i] & ");"
+        of BoolType:
+          g.put "fputs(" & temps[i] & " ? \"true\" : \"false\", stdout);"
+        of FloatType:
+          g.put "printf(\"%g\", " & temps[i] & ");"
+        else:
+          discard
+      g.put "fputc(10, stdout);"
+      g.put "funlockfile(stdout);"
+      if temps.len > 0:
+        dec g.ind
+        g.put "}"
+      return
     var fmt = ""
     var cargs: seq[string]
     for i, a in s.args:
@@ -771,7 +894,10 @@ proc genStmt(g: var Gen, s: Stmt) =
       of StringType:
         fmt.add "%.*s"
         cargs.add "(int)(" & temps[i] & ".m_len)"
-        cargs.add "(const char *)" & temps[i] & ".m_data"
+        cargs.add (if a.typ.dynamic:
+          "(" & temps[i] & ".m_len ? (const char *)" &
+            temps[i] & ".m_data : \"\")"
+          else: "(const char *)" & temps[i] & ".m_data")
       of IntType:
         if a.typ.dname == "char":
           # char exists to say "this byte is text": print it as text.
@@ -802,6 +928,7 @@ proc genStmt(g: var Gen, s: Stmt) =
     g.genBlock(s.body)
     g.put "}"
   of ForEachStmt:
+    g.loopScopes.add g.owners.len
     let it = "ni_it" & $g.tmpN
     let ix = "ni_ix" & $g.tmpN
     let nn = "ni_n" & $g.tmpN
@@ -811,7 +938,10 @@ proc genStmt(g: var Gen, s: Stmt) =
     let basePath =
       if g.hasEffects(s.value): g.genPathOrdered(s.value)
       else: g.genExpr(s.value)
-    g.put cBase(s.value.typ) & " *" & it & " = &" & basePath & ";"
+    let qualifier =
+      if s.value.typ.dynamic: "const "
+      else: ""
+    g.put qualifier & cBase(s.value.typ) & " *" & it & " = &" & basePath & ";"
     if s.value.typ.kind in {SetType, DenseMapType}:
       let lo = $s.value.typ.elem.rlo & "LL"
       let hi = $s.value.typ.elem.rhi & "LL"
@@ -845,11 +975,17 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put "for (int64_t " & ix & " = 0; " & ix & " < " & nn & "; ++" & ix &
         ") {"
       inc g.ind
-      g.put cBase(s.typ) & " v_" & s.name & " = " & it & "->m_data[" & ix & "];"
-    for st in s.body:
-      g.genStmt(st)
+      if hasOwned(s.typ):
+        g.put "const " & cBase(s.typ) & " *v_" & s.name & " = &" &
+          it & "->m_data[" & ix & "];"
+        g.borrowedLocals.incl s.name
+      else:
+        g.put cBase(s.typ) & " v_" & s.name & " = " & it & "->m_data[" & ix & "];"
+    g.genBody(s.body)
+    g.borrowedLocals.excl s.name
     dec g.ind
     g.put "}"
+    g.loopScopes.setLen(g.loopScopes.len - 1)
     dec g.ind
     g.put "}"
   of DiscardStmt:
@@ -885,11 +1021,42 @@ static inline int64_t ni_ftoi(double f) {
 }
 """
 
+const cMemoryPrelude = """
+#include <stdlib.h>
+extern void flockfile(FILE *);
+extern void funlockfile(FILE *);
+#ifndef NIFTY_REALLOC
+#define NIFTY_REALLOC realloc
+#endif
+#ifndef NIFTY_FREE
+#define NIFTY_FREE free
+#endif
+static void *ni_realloc(void *p, size_t n) {
+  return NIFTY_REALLOC(p, n);
+}
+static void ni_free(void *p) {
+  NIFTY_FREE(p);
+}
+"""
+
+proc bodyHasOwners(body: seq[Stmt]): bool =
+  ## Include allocator support only for programs that define owners.
+  for s in body:
+    if hasOwned(s.typ) or bodyHasOwners(s.body) or
+        bodyHasOwners(s.elseBody):
+      return true
+    for br in s.elifs:
+      if bodyHasOwners(br.body):
+        return true
+
 proc emitTypeDefs(g: var Gen, t: Typ) =
   ## Emit typedefs (and the inline ops for seq/string) exactly once each,
   ## dependencies first. Declare-before-use makes this a simple post-order.
   if t.isNil:
     return
+  defer:
+    if hasOwned(t) and (not t.dynamic or t.opt):
+      g.emitOwnedHelpers(t)
   if t.opt:
     let base = deOpt(t)
     g.emitTypeDefs(base)
@@ -906,6 +1073,15 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
     g.put "} " & n & ";"
     g.put "static " & b & " " & n & "_or(" & n & " r, " & b &
       " fb) { return r.m_ok ? r.m_val : fb; }"
+    return
+  if t.dynamic:
+    if t.kind == SeqType:
+      g.emitTypeDefs(t.elem)
+      if not hasOwned(t.elem):
+        g.emitTypeDefs(optOf(t.elem))
+    else:
+      g.emitTypeDefs(optOf(intType()))
+    g.emitDynamicType(t)
     return
   case t.kind
   of ArrayType:
@@ -1274,6 +1450,17 @@ proc generate*(m: Module, src: string): string =
       anyArena = true
   g.put "// Generated by nifty from " & src & ". Do not edit."
   g.o.add cPrelude
+  var memory = false
+  for td in m.types:
+    memory = memory or hasOwned(td.typ)
+  for gd in m.globals:
+    memory = memory or hasOwned(gd.typ)
+  for r in m.routines:
+    memory = memory or hasOwned(r.ret) or bodyHasOwners(r.body)
+    for pm in r.params:
+      memory = memory or hasOwned(pm.typ)
+  if memory:
+    g.o.add cMemoryPrelude
   if anyArena:
     g.put "static _Thread_local uint8_t *ni_sp;"
   for td in m.types:
@@ -1333,9 +1520,11 @@ proc generate*(m: Module, src: string): string =
       g.put "extern " & ret & " " & externSym(r) & "(" &
         (if ps.len == 0: "void" else: ps.join(", ")) & ");"
       continue
-    g.curArena = g.bigOffs[r.name]
+    g.curOffsets = g.bigOffs[r.name]
+    g.curArena.clear()
     g.curFrame = g.frameOf[r.name]
     g.curRet = (if r.kind == ThreadRoutine: nil else: r.ret)
+    g.curThread = r.kind == ThreadRoutine
     g.put ""
     if r.kind == ThreadRoutine:
       g.put "static void *t_" & r.name & "(void *ni_arg) {"
@@ -1347,8 +1536,7 @@ proc generate*(m: Module, src: string): string =
       if g.curFrame > 0:
         g.put "uint8_t *ni_base = ni_sp;"
         g.put "ni_sp += " & $g.curFrame & "LL;"
-      for s in r.body:
-        g.genStmt(s)
+      g.genBody(r.body)
       if g.curFrame > 0:
         g.put "ni_sp = ni_base;"
       g.put "return NULL;"
@@ -1359,6 +1547,8 @@ proc generate*(m: Module, src: string): string =
       for pm in r.params:
         if pm.isVar and pm.typ.passByPtr:
           ps.add cBase(pm.typ) & " *p_" & pm.name
+        elif hasOwned(pm.typ) and pm.typ.passByPtr:
+          ps.add "const " & cBase(pm.typ) & " *p_" & pm.name
         elif pm.typ.kind == ArrayType:
           # Arrays decay to pointers in C either way; const makes the C
           # compiler enforce read-only non-var params as a second line
@@ -1386,8 +1576,7 @@ proc generate*(m: Module, src: string): string =
       if g.curFrame > 0:
         g.put "uint8_t *ni_base = ni_sp;"
         g.put "ni_sp += " & $g.curFrame & "LL;"
-      for s in r.body:
-        g.genStmt(s)
+      g.genBody(r.body)
       if g.curFrame > 0 and r.ret.isNil:
         g.put "ni_sp = ni_base;" # fall-off-the-end exit for void procs
       dec g.ind
@@ -1417,6 +1606,10 @@ proc generate*(m: Module, src: string): string =
     base += t.instances
   g.put "for (int ni_i = 0; ni_i < " & $total & "; ++ni_i)"
   g.put "  pthread_join(ni_threads[ni_i], NULL);"
+  for i in countdown(m.globals.high, 0):
+    let gd = m.globals[i]
+    if hasOwned(gd.typ):
+      g.put "ni_drop_" & mangle(gd.typ) & "(&g_" & gd.name & ");"
   g.put "return 0;"
   dec g.ind
   g.put "}"

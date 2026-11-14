@@ -1,0 +1,12 @@
+proc shrink(values: var seq[int]): int =
+  values.clear()
+  return 7
+
+proc write(item: var int, value: int) =
+  item = value
+
+thread main() =
+  var values: seq[int]
+  if values.resize(1):
+    write(values[0], shrink(values))
+  echo values.len

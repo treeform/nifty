@@ -1,0 +1,13 @@
+object Batch =
+  texts: array[20, string]
+
+proc fill(value: var string) =
+  discard value.add("sample")
+
+func length(value: string): int =
+  return value.len
+
+thread main() =
+  var batch: Batch
+  fill(batch.texts[0])
+  echo length(batch.texts[0])

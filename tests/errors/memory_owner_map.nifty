@@ -1,0 +1,4 @@
+thread main() =
+  var entries: map[2, int, string]
+  entries.clear()
+  echo entries.len

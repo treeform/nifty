@@ -1,0 +1,1 @@
+memory_alias_global_read.nifty:10: borrowed global 'shared' is also accessed through another path by 'inspect'

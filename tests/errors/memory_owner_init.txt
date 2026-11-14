@@ -1,0 +1,1 @@
+memory_owner_init.nifty:4: owning strings and seqs cannot be copied or initialized from a value; declare empty storage and use copyFrom

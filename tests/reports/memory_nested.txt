@@ -1,0 +1,21 @@
+nifty report: memory_nested.nifty
+
+globals:
+  total: 0 bytes
+
+heap (runtime-sized; separate from static storage):
+  local main.batch: Batch (declaration scope)
+  owner descriptors are included in globals/stack/arena
+  payload and spare capacity: no static bound inferred
+  allocator overhead and temporary growth/copy peaks are additional
+  cleanup may take runtime-dependent work; global cleanup runs after threads
+  stack estimates exclude allocator/runtime helper frames
+
+stack, worst case per thread (estimate: locals + params + 16 bytes/frame; big locals are on the arena):
+  main: 48 bytes (main -> fill)
+
+arena per thread (exact; big locals, allocated up front):
+  main: 480 bytes (main)
+
+worst-case abstract ops per thread:
+  main: runtime-dependent (dynamic allocation, traversal, or cleanup)

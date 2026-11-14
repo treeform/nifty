@@ -1,0 +1,24 @@
+object State =
+  texts: seq[string]
+
+var state: State
+var stateLock: Lock
+
+proc replace() =
+  state.texts.clear()
+
+proc inspect(text: string) =
+  replace()
+  echo text
+
+proc forward(text: string) =
+  inspect(text)
+
+thread first() =
+  with stateLock:
+    if state.texts.resize(1):
+      forward(state.texts[0])
+
+thread second() =
+  with stateLock:
+    echo state.texts.len

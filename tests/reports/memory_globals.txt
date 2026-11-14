@@ -1,0 +1,26 @@
+nifty report: memory_globals.nifty
+
+globals:
+  text: 24 bytes (string)
+  total: 24 bytes + 1 lock (platform-sized)
+
+heap (runtime-sized; separate from static storage):
+  global text: string (program lifetime; freed after threads finish)
+  owner descriptors are included in globals/stack/arena
+  payload and spare capacity: no static bound inferred
+  allocator overhead and temporary growth/copy peaks are additional
+  cleanup may take runtime-dependent work; global cleanup runs after threads
+  stack estimates exclude allocator/runtime helper frames
+
+locks (acquired in declaration order - deadlock-free):
+  textLock: protects text; used by reader, scanner, writer
+
+stack, worst case per thread (estimate: locals + params + 16 bytes/frame; big locals are on the arena):
+  writer: 40 bytes (writer -> fill)
+  reader: 16 bytes (reader)
+  scanner: 56 bytes (scanner -> scan)
+
+worst-case abstract ops per thread:
+  writer: runtime-dependent (dynamic allocation, traversal, or cleanup)
+  reader: 7 ops total
+  scanner: runtime-dependent (dynamic allocation, traversal, or cleanup)

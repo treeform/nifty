@@ -1,0 +1,19 @@
+# Generic child procedures borrow descriptors and copy owned elements safely.
+
+proc append(values: var seq[$T], value: $T): bool =
+  return values.add(value)
+
+func size(values: seq[$T]): int =
+  return values.len
+
+thread main() =
+  var numbers: seq[int]
+  echo append(numbers, 42)
+  echo size(numbers)
+  var word: string
+  discard word.add("generic")
+  var words: seq[string]
+  echo append(words, word)
+  word.clear()
+  for text in words:
+    echo text

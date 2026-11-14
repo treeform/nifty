@@ -1,0 +1,17 @@
+proc fill(items: var seq[string]) =
+  discard items.resize(2)
+
+proc inspect(items: seq[string]) =
+  for item in items:
+    echo item.len
+
+proc work() =
+  var items: seq[string]
+  fill(items)
+  inspect(items)
+
+thread worker() =
+  work()
+
+thread fixed() =
+  echo 7

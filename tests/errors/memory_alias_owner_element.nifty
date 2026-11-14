@@ -1,0 +1,9 @@
+proc change(values: var seq[int], item: var int) =
+  discard values.resize(2)
+  item = 7
+
+thread main() =
+  var values: seq[int]
+  if values.resize(1):
+    change(values, values[0])
+  echo values.len

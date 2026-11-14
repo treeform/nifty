@@ -60,6 +60,29 @@ proc hasTypeVar(t: Typ): bool =
     return true
   hasTypeVar(t.elem) or hasTypeVar(t.val)
 
+proc seqHasCapacity(p: Parser): bool =
+  ## Distinguish seq[N, T] from seq[T] inside its opening bracket.
+  var depth = 0
+  for i in p.pos ..< p.toks.len:
+    let token = p.toks[i]
+    if token.kind == EofToken:
+      break
+    if token.kind != OpToken:
+      continue
+    case token.text
+    of "[":
+      inc depth
+    of "]":
+      if depth == 0:
+        return false
+      dec depth
+    of ",":
+      if depth == 0:
+        return true
+    else:
+      discard
+  false
+
 proc parseExpr(p: var Parser): Expr
 proc evalConst(p: Parser, e: Expr): int64
 proc parseType(p: var Parser): Typ
@@ -115,7 +138,10 @@ proc parseTypeCore(p: var Parser): Typ =
       p.expectOp("[")
       var n: int64 = 0
       var lv = ""
-      if p.atOp("$"):
+      let dynamic = t.text == "seq" and not p.seqHasCapacity()
+      if dynamic:
+        discard
+      elif p.atOp("$"):
         if not p.allowTypeVar:
           err(p.peek.line, "'$' size variables are only allowed in generic " &
             "parameter lists")
@@ -131,7 +157,8 @@ proc parseTypeCore(p: var Parser): Typ =
           err(lt.line, t.text & " capacity must be an integer literal or a const")
         if n <= 0:
           err(lt.line, t.text & " capacity must be positive")
-      p.expectOp(",")
+      if not dynamic:
+        p.expectOp(",")
       let e = p.parseType()
       if e.kind == LockType:
         err(t.line, "Lock cannot be a " & t.text & " element")
@@ -146,7 +173,7 @@ proc parseTypeCore(p: var Parser): Typ =
         of "seq": SeqType
         of "queue": QueueType
         of "channel": ChannelType
-        else: ArrayType), len: n, lenVar: lv, elem: e)
+        else: ArrayType), len: n, lenVar: lv, elem: e, dynamic: dynamic)
     of "map":
       # map[lo .. hi, V] (dense) or map[N, K, V] (sorted sparse)
       p.expectOp("[")
@@ -174,7 +201,8 @@ proc parseTypeCore(p: var Parser): Typ =
           err(t.line, "map capacity must be positive")
         p.expectOp(",")
         let k = p.parseType()
-        if not (k.kind == IntType or k.kind == StringType) or k.opt:
+        if not (k.kind == IntType or k.kind == StringType) or
+            k.opt or k.dynamic:
           err(t.line, "map keys must be ints (or ranges) or string[N], got " & $k)
         p.expectOp(",")
         let v = p.parseType()
@@ -194,6 +222,8 @@ proc parseTypeCore(p: var Parser): Typ =
       p.expectOp("]")
       Typ(kind: SetType, elem: e)
     of "string":
+      if not p.atOp("["):
+        return Typ(kind: StringType, dynamic: true)
       p.expectOp("[")
       var n: int64 = 0
       var lv = ""

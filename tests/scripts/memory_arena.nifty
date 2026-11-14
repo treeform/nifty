@@ -1,0 +1,22 @@
+# Reused names in sibling blocks must keep distinct arena offsets.
+
+proc work() =
+  block:
+    var a: array[20, string]
+    var b: array[20, string]
+    if not a[0].add("a"):
+      return
+    if not b[0].add("b"):
+      return
+    echo a[0], b[0]
+  block:
+    var x: array[20, string]
+    var a: array[20, string]
+    if not x[0].add("x"):
+      return
+    if not a[0].add("a"):
+      return
+    echo x[0], a[0]
+
+thread main() =
+  work()

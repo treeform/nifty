@@ -1,0 +1,7 @@
+proc make(): string =
+  var text: string
+  discard text.add("hello")
+  return text
+
+thread main() =
+  echo make()

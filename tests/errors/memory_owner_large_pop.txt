@@ -1,0 +1,1 @@
+memory_owner_large_pop.nifty:7: pop cannot copy a large element; use guarded indexing and pass the element to a child procedure

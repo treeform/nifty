@@ -1,0 +1,6 @@
+thread main() =
+  var source: string
+  discard source.add("hello")
+  var target: string
+  target = source
+  echo target

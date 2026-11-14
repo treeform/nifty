@@ -1,11 +1,6 @@
-## Static resource report. Three numbers per program, all derived at
-## compile time from properties the checker already proved:
-## - RAM: the globals ARE the heap, so their sizes sum exactly.
-## - Stack: no recursion means the call graph is a DAG; worst-case depth
-##   per thread is the deepest chain of frames (a language-level
-##   estimate: locals + params + fixed frame overhead).
-## - Ops: every loop has a proven trip bound, so each thread has a
-##   worst-case abstract operation count per pass of its outer loop.
+## Resource reports separate static storage from runtime heap payloads.
+## Static programs retain exact arena sizes and bounded operation counts.
+## Dynamic work is propagated through calls instead of given a false bound.
 
 import std/[strutils, tables, sets]
 import types, checker
@@ -97,10 +92,105 @@ proc bodyOps(body: seq[Stmt], costs: Table[string, int64]): int64 =
   for s in body:
     result = sadd(result, stmtOps(s, costs))
 
+proc runtimeExpr(e: Expr, costs: Table[string, bool]): bool =
+  ## Detect allocation and work whose size is chosen at runtime.
+  if e.isNil:
+    return false
+  if e.kind == CallExpr and costs.getOrDefault(e.sval, false):
+    return true
+  if e.kind == MethodExpr and e.kids.len > 0:
+    let t = e.kids[0].typ
+    if t.hasOwned and e.sval notin ["get", "pop", "len", "cap", "ok"]:
+      return true
+  if e.kind == FieldExpr and e.sval == "toInt" and
+      e.kids.len > 0 and e.kids[0].typ.hasOwned:
+    return true
+  for k in e.kids:
+    if runtimeExpr(k, costs):
+      return true
+
+proc runtimeLength(e: Expr, lengths: HashSet[string]): bool =
+  ## Recognize bounds derived from a dynamic container's length.
+  if e.isNil:
+    return false
+  if e.kind == IdentExpr and e.sval in lengths:
+    return true
+  if e.kind == FieldExpr and e.sval in ["len", "cap"] and
+      e.kids.len > 0 and e.kids[0].typ.hasOwned:
+    return true
+  for k in e.kids:
+    if runtimeLength(k, lengths) or
+        (e.kind == CallExpr and k.typ.hasOwned):
+      return true
+
+proc collectLengths(body: seq[Stmt], lengths: var HashSet[string]) =
+  ## Conservatively follow saved runtime lengths through local assignments.
+  for s in body:
+    if s.kind in {VarStmt, LetStmt} and runtimeLength(s.init, lengths):
+      lengths.incl s.name
+    if s.kind == AssignStmt and s.lhs != nil and
+        s.lhs.kind == IdentExpr and runtimeLength(s.rhs, lengths):
+      lengths.incl s.lhs.sval
+    collectLengths(s.body, lengths)
+    collectLengths(s.elseBody, lengths)
+    for br in s.elifs:
+      collectLengths(br.body, lengths)
+
+proc runtimeBody(body: seq[Stmt], costs: Table[string, bool],
+    lengths: HashSet[string]): bool
+
+proc runtimeStmt(s: Stmt, costs: Table[string, bool],
+    lengths: HashSet[string]): bool =
+  ## Include implicit owner cleanup and dynamically bounded iteration.
+  if s.kind in {VarStmt, LetStmt} and s.typ.hasOwned:
+    return true
+  if s.kind in {WhileStmt, ForStmt, ForEachStmt} and s.tripBound < 0:
+    return true
+  if s.kind == ForEachStmt and s.value != nil and s.value.typ.hasOwned:
+    return true
+  if s.kind == ForStmt and
+      (runtimeLength(s.lo, lengths) or runtimeLength(s.hi, lengths)):
+    return true
+  if s.kind == WhileStmt and s.maxTrips == 0 and
+      runtimeLength(s.cond, lengths):
+    return true
+  for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
+    if runtimeExpr(e, costs):
+      return true
+  for a in s.args:
+    if runtimeExpr(a, costs) or
+        (s.kind == EchoStmt and a.typ.hasOwned):
+      return true
+  if runtimeBody(s.body, costs, lengths) or
+      runtimeBody(s.elseBody, costs, lengths):
+    return true
+  for br in s.elifs:
+    if runtimeExpr(br.cond, costs) or runtimeBody(br.body, costs, lengths):
+      return true
+
+proc runtimeBody(body: seq[Stmt], costs: Table[string, bool],
+    lengths: HashSet[string]): bool =
+  ## Find runtime work in any branch of a statement list.
+  for s in body:
+    if runtimeStmt(s, costs, lengths):
+      return true
+
+proc collectOwners(body: seq[Stmt], routine: string,
+    owners: var seq[string]) =
+  ## List owner declarations without counting borrowed parameters.
+  for s in body:
+    if s.kind in {VarStmt, LetStmt} and s.typ.hasOwned:
+      owners.add "  local " & routine & "." & s.name & ": " &
+        $s.typ & " (declaration scope)"
+    collectOwners(s.body, routine, owners)
+    collectOwners(s.elseBody, routine, owners)
+    for br in s.elifs:
+      collectOwners(br.body, routine, owners)
+
 ## Worst-Case Stack
 
 proc paramBytes(p: Param): int64 =
-  if p.isVar or p.typ.kind == ArrayType:
+  if p.isVar or p.typ.kind == ArrayType or p.typ.hasOwned:
     8 # passed as a pointer
   else:
     typeSize(p.typ)
@@ -115,7 +205,8 @@ proc localBytes(body: seq[Stmt]): int64 =
     if s.kind == ForStmt:
       result = sadd(result, 8)
     if s.kind == ForEachStmt:
-      result = sadd(result, sadd(typeSize(s.typ), 16)) # elem + iterator
+      let size = if s.typ.hasOwned: 8'i64 else: typeSize(s.typ)
+      result = sadd(result, sadd(size, 16)) # Element borrow/value + iterator.
     result = sadd(result, localBytes(s.body))
     for br in s.elifs:
       result = sadd(result, localBytes(br.body))
@@ -189,7 +280,7 @@ proc buildReport*(m: Module, src: string): string =
   var lines: seq[string]
   lines.add "nifty report: " & src
 
-  # Globals: the whole heap, one line each.
+  # Globals contain fixed storage and any owning descriptors.
   lines.add ""
   lines.add "globals:"
   var total = 0'i64
@@ -207,6 +298,25 @@ proc buildReport*(m: Module, src: string): string =
       " (platform-sized)"
   lines.add totalLine
 
+  var owners: seq[string]
+  for gd in m.globals:
+    if gd.typ.hasOwned:
+      owners.add "  global " & gd.name & ": " & $gd.typ &
+        " (program lifetime; freed after threads finish)"
+  for r in m.routines:
+    collectOwners(r.body, r.name, owners)
+  if owners.len > 0:
+    lines.add ""
+    lines.add "heap (runtime-sized; separate from static storage):"
+    lines.add owners
+    lines.add "  owner descriptors are included in globals/stack/arena"
+    lines.add "  payload and spare capacity: no static bound inferred"
+    lines.add "  allocator overhead and temporary growth/copy peaks are " &
+      "additional"
+    lines.add "  cleanup may take runtime-dependent work; global cleanup " &
+      "runs after threads"
+    lines.add "  stack estimates exclude allocator/runtime helper frames"
+
   # Locks: what each one actually protects (from the checker's
   # ownership analysis - a lock that protected nothing did not compile).
   if lockReport.len > 0:
@@ -223,10 +333,22 @@ proc buildReport*(m: Module, src: string): string =
   # first, so a single pass suffices - declare-before-use is a topological
   # sort of the call DAG).
   var costs: Table[string, int64]
+  var runtimeCosts: Table[string, bool]
   var frames: Table[string, int64]
   var deepest: Table[string, tuple[bytes: int64, chain: string]]
   for r in m.routines:
     costs[r.name] = bodyOps(r.body, costs)
+    var lengths: HashSet[string]
+    while true:
+      let count = lengths.len
+      collectLengths(r.body, lengths)
+      if count == lengths.len:
+        break
+    runtimeCosts[r.name] = runtimeBody(r.body, runtimeCosts, lengths)
+    if r.externLib != "":
+      for p in r.params:
+        if p.typ.hasOwned:
+          runtimeCosts[r.name] = true
     frames[r.name] = sadd(frameOverhead,
       sadd(localBytes(r.body), block:
         var pb = 0'i64
@@ -237,6 +359,8 @@ proc buildReport*(m: Module, src: string): string =
     collectCalls(r.body, globals, calls)
     var best = (bytes: 0'i64, chain: "")
     for callee in calls:
+      if runtimeCosts.getOrDefault(callee, false):
+        runtimeCosts[r.name] = true
       if callee in deepest:
         let d = deepest[callee]
         if d.bytes > best.bytes:
@@ -289,6 +413,10 @@ proc buildReport*(m: Module, src: string): string =
   lines.add "worst-case abstract ops per thread:"
   for r in m.routines:
     if r.kind != ThreadRoutine:
+      continue
+    if runtimeCosts.getOrDefault(r.name, false):
+      lines.add "  " & threadLabel(r) &
+        ": runtime-dependent (dynamic allocation, traversal, or cleanup)"
       continue
     var outside = 0'i64
     var passes: seq[int64]

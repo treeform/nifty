@@ -1,0 +1,14 @@
+var shared: string
+var sharedLock: Lock
+
+proc inspect(text: string) =
+  shared.clear()
+  echo text
+
+thread first() =
+  with sharedLock:
+    inspect(shared)
+
+thread second() =
+  with sharedLock:
+    echo shared.len

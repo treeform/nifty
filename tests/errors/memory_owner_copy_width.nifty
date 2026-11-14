@@ -1,0 +1,6 @@
+thread main() =
+  var source: seq[int8]
+  discard source.add(42)
+  var target: seq[-128 .. 127]
+  discard target.copyFrom(source)
+  echo target.len

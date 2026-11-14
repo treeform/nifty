@@ -1,0 +1,1 @@
+memory_owner_readonly_mutation.nifty:2: cannot mutate immutable 'text' (declared with let; make it var if it must change)

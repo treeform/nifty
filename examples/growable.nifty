@@ -1,0 +1,32 @@
+# Empty owners acquire storage only when their children grow them.
+# Every allocating operation reports failure, and every local owner is
+# released automatically on return or when its enclosing block finishes.
+
+proc collect(values: var seq[int]): bool =
+  for i in 0 ..< 12:
+    if not values.add(i * i):
+      return false
+  return true
+
+proc describe(values: seq[int], text: var string): bool =
+  text.clear()
+  if not text.add("squares:"):
+    return false
+  for value in values:
+    if not text.add(" "):
+      return false
+    if not text.addNum(value):
+      return false
+  return true
+
+thread main() =
+  block:
+    var values: seq[int]
+    if collect(values):
+      var text: string
+      if describe(values, text):
+        echo text
+        if values.resize(3):
+          echo "kept ", values.len, " values"
+  # Both allocations have been freed before this statement.
+  echo "scope complete"

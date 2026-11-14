@@ -1,0 +1,24 @@
+# Nested owners are filled through child borrows and copied explicitly.
+
+object Row =
+  text: string
+  values: seq[int]
+
+proc fill(row: var Row): bool =
+  if not row.text.add("nested"):
+    return false
+  return row.values.push(7)
+
+thread main() =
+  var rows: seq[Row]
+  echo rows.resize(1)
+  if rows.len > 0:
+    echo fill(rows[0])
+  var copied: seq[Row]
+  echo copied.copyFrom(rows)
+  rows.clear()
+  echo rows.len, " ", copied.len
+  for row in copied:
+    echo row.text, " ", row.values.get(0).or(-1)
+  echo copied.resize(0)
+  echo copied.len

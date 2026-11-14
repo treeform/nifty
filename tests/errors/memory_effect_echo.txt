@@ -1,0 +1,1 @@
+memory_effect_echo.nifty:9: cannot modify 'text' while an argument or element of its allocation is borrowed

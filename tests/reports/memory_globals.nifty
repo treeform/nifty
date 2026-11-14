@@ -1,0 +1,22 @@
+var text: string
+var textLock: Lock
+
+proc fill(output: var string) =
+  discard output.add("hello")
+
+proc scan(value: string) =
+  let count = value.len
+  for i in 0 ..< count:
+    echo i
+
+thread writer() =
+  with textLock:
+    fill(text)
+
+thread reader() =
+  with textLock:
+    echo text.len
+
+thread scanner() =
+  with textLock:
+    scan(text)

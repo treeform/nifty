@@ -1,0 +1,10 @@
+proc replace(text: var string): int =
+  discard text.copyFrom("a different allocation")
+  return 0
+
+thread main() =
+  var source: string
+  discard source.add("hello")
+  var target: string[32]
+  target.copyRange(source, replace(source), 3)
+  echo target

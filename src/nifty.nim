@@ -1,5 +1,5 @@
 ## Nifty — nimmy's super-static brother.
-## A tiny fixed-everything systems language with Nim-flavored syntax that
+## A small systems language with Nim-flavored syntax that
 ## compiles to portable C. See spec.md for the language definition.
 ##
 ## Pipeline: lexer -> parser -> checker -> codegen.
@@ -21,8 +21,7 @@ proc compileToC*(src: string, moduleName: string, dir = ""): string =
   generate(m, moduleName)
 
 proc reportFor*(src: string, moduleName: string, dir = ""): string =
-  ## Check the program and produce the static resource report:
-  ## exact RAM, worst-case stack and arena, worst-case ops per pass.
+  ## Report static storage and distinguish runtime heap and work costs.
   let m = parse(loadTokens(src, moduleName, dir))
   check(m)
   buildReport(m, moduleName)
@@ -36,7 +35,7 @@ nifty - compile a .nifty file to C and build it with cc
 usage:
   nifty [run] file.nifty [options]   build and, if there are no errors, run (default)
   nifty build file.nifty [options]   build only
-  nifty report file.nifty            static resource report (RAM, stack, ops)
+  nifty report file.nifty            resource report (static RAM, heap, ops)
 
 options:
   -o binary   output binary path (default: source path without extension)

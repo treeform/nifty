@@ -1,0 +1,1 @@
+memory_owner_resize_invalid_zero.nifty:3: resize requires a zero-initializable element type; use add or push to initialize elements

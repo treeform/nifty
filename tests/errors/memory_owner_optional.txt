@@ -1,0 +1,1 @@
+memory_owner_optional.nifty:2: an owning string or seq cannot be optional; use an empty owner

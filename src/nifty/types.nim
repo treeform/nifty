@@ -16,6 +16,7 @@ type
   Typ* = ref object
     kind*: TypKind
     len*: int64          # ArrayType/SeqType/StringType: capacity
+    dynamic*: bool       # Growable seq/string: len is not a static capacity.
     elem*: Typ           # ArrayType/SeqType; SetType: the range element type
     name*: string        # ObjectType
     fields*: seq[Field]  # ObjectType
@@ -124,7 +125,7 @@ type
 
 const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
   "put", "remove", "setLen", "addByte", "addNum", "copyRange",
-  "send", "recv"]
+  "send", "recv", "reserve", "resize", "copyFrom"]
 
 # Names the container/optional method system owns. A routine with one
 # of these names is still callable the classic way, but never through
@@ -143,13 +144,28 @@ proc deOpt*(t: Typ): Typ =
     return t
   Typ(kind: t.kind, len: t.len, elem: t.elem, name: t.name,
     fields: t.fields, val: t.val, rlo: t.rlo, rhi: t.rhi, opt: false,
-    width: t.width, dname: t.dname)
+    width: t.width, dname: t.dname, dynamic: t.dynamic,
+    gname: t.gname, lenVar: t.lenVar)
 
 proc optOf*(t: Typ): Typ =
   ## The optional flavor of a type (a copy with the flag set).
   Typ(kind: t.kind, len: t.len, elem: t.elem, name: t.name,
     fields: t.fields, val: t.val, rlo: t.rlo, rhi: t.rhi, opt: true,
-    width: t.width, dname: t.dname)
+    width: t.width, dname: t.dname, dynamic: t.dynamic,
+    gname: t.gname, lenVar: t.lenVar)
+
+proc hasOwned*(t: Typ): bool =
+  ## Whether a value owns heap storage directly or through its contents.
+  if t.isNil:
+    return false
+  if t.dynamic:
+    return true
+  if hasOwned(t.elem) or hasOwned(t.val):
+    return true
+  for field in t.fields:
+    if hasOwned(field.typ):
+      return true
+  false
 
 proc intType*(lo = low(int64), hi = high(int64)): Typ =
   ## An int type, optionally restricted to a declared range.
@@ -209,9 +225,11 @@ proc typeSize*(t: Typ): int64 =
   of FloatType: t.width
   of ArrayType: sizeMul(t.len, typeSize(t.elem))
   of SeqType:
-    (sizeAdd(8, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
+    if t.dynamic: 24
+    else: (sizeAdd(8, sizeMul(t.len, typeSize(t.elem))) + 7) div 8 * 8
   of StringType:
-    (sizeAdd(8, t.len) + 7) div 8 * 8
+    if t.dynamic: 24
+    else: (sizeAdd(8, t.len) + 7) div 8 * 8
   of SetType:
     sizeAdd(8, (t.setSize + 63) div 64 * 8)
   of QueueType:
@@ -241,7 +259,7 @@ proc typeEq*(a, b: Typ): bool =
     return a.isNil and b.isNil
   if a.opt != b.opt:
     return false
-  if a.kind != b.kind:
+  if a.kind != b.kind or a.dynamic != b.dynamic:
     return false
   if a.kind == FloatType:
     return a.width == b.width
@@ -284,8 +302,12 @@ proc `$`*(t: Typ): string =
   of StringLitType: "string"
   of LockType: "Lock"
   of ArrayType: "array[" & t.sizeStr & ", " & $t.elem & "]"
-  of SeqType: "seq[" & t.sizeStr & ", " & $t.elem & "]"
-  of StringType: "string[" & t.sizeStr & "]"
+  of SeqType:
+    if t.dynamic: "seq[" & $t.elem & "]"
+    else: "seq[" & t.sizeStr & ", " & $t.elem & "]"
+  of StringType:
+    if t.dynamic: "string"
+    else: "string[" & t.sizeStr & "]"
   of SetType: "set[" & $t.elem & "]"
   of QueueType: "queue[" & t.sizeStr & ", " & $t.elem & "]"
   of ChannelType: "channel[" & t.sizeStr & ", " & $t.elem & "]"

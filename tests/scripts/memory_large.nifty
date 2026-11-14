@@ -1,0 +1,15 @@
+# Owning elements larger than the thread stack use arena and heap storage.
+
+object Big =
+  text: string
+  padding: array[100000, int]
+
+thread main() =
+  var big: Big
+  echo big.text.add("large")
+  big.padding[99999] = 7
+  var values: seq[Big]
+  echo values.add(big)
+  echo values.len
+  if values.len > 0:
+    echo values[0].text, " ", values[0].padding[99999]

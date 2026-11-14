@@ -1,0 +1,1 @@
+memory_effect_fixed_method_source.nifty:9: cannot modify 'source' while an argument or element of its allocation is borrowed

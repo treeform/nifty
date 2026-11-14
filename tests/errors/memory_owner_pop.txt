@@ -1,0 +1,1 @@
+memory_owner_pop.nifty:4: cannot pop an owning element; shrink the sequence instead

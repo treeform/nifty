@@ -1,0 +1,1 @@
+memory_owner_map.nifty:2: owning strings and seqs cannot be stored in queues, channels, or maps; pass caller-owned storage instead

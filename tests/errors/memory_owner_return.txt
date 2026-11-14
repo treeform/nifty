@@ -1,0 +1,1 @@
+memory_owner_return.nifty:1: owning strings and seqs cannot be returned; fill a var parameter owned by the caller

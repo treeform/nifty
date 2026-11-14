@@ -1,0 +1,9 @@
+proc replace(text: var string): int =
+  text.clear()
+  discard text.copyFrom("a different allocation")
+  return 1
+
+thread main() =
+  var text: string
+  discard text.add("hello")
+  echo text, replace(text)

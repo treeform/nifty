@@ -1,0 +1,4 @@
+thread main() =
+  var values: seq[1 .. 9]
+  discard values.resize(1)
+  echo values.len

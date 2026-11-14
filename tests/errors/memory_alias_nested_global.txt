@@ -1,0 +1,1 @@
+memory_alias_nested_global.nifty:15: borrowed parameter 'text' might alias owning global 'state' accessed by 'inspect'

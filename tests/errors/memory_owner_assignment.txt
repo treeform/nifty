@@ -1,0 +1,1 @@
+memory_owner_assignment.nifty:5: owning strings and seqs cannot be assigned; use copyFrom
