@@ -50,9 +50,10 @@ usage:
 
 options:
   --backend:c|arm64|amd64          backend (default: native host architecture)
+  --opt:none|speed                native optimization (default: speed)
   -o path                         output path
   --emit-c                        write reference C from the checked AST
-  --emit-ir                       write lowered native IR without running
+  --emit-ir                       write selected native IR without running
   --emit-native                   write a native image without running
 """
   var cmd = "run"
@@ -61,6 +62,7 @@ options:
   var outPath = ""
   var emission = ""
   var backend = when defined(arm64): "arm64" else: "amd64"
+  var optimization = SpeedOptimization
   let params = commandLineParams()
   var i = 0
   while i < params.len:
@@ -88,6 +90,11 @@ options:
     else:
       if a.startsWith("--backend:") or a.startsWith("--backend="):
         backend = a[10 .. ^1]
+      elif a.startsWith("--opt:") or a.startsWith("--opt="):
+        case a[6 .. ^1]
+        of "none": optimization = NoOptimization
+        of "speed": optimization = SpeedOptimization
+        else: quit("nifty: unknown optimization " & a[6 .. ^1], 1)
       elif a.startsWith("-"):
         quit("nifty: unknown option " & a, 1)
       else:
@@ -112,8 +119,9 @@ options:
         let target = if backend == "arm64": Arm64Target else: Amd64Target
         let plan = lowerNative(
           checkedModule(source, modName, srcPath.parentDir), modName)
-        let image = emitNative(plan.module, target)
-        stdout.write nativeReport(plan, image, modName)
+        let program = buildNativeProgram(plan, target,
+          optimization = optimization)
+        stdout.write nativeReport(program.plan, program.image, modName)
     except CatchableError as e:
       quit("nifty: " & e.msg, 1)
     quit(0)
@@ -143,10 +151,11 @@ options:
         checkedModule(source, modName, srcPath.parentDir), modName)
       if emission == "--emit-ir":
         let path = if outPath.len > 0: outPath else: base & ".ir"
-        writeFile(path, plan.module.dumpModule())
+        writeFile(path, optimizeNative(plan, optimization).module.dumpModule())
         echo path
         quit(0)
-      let program = buildNativeProgram(plan, target)
+      let program = buildNativeProgram(plan, target,
+        optimization = optimization)
       if emission == "--emit-native":
         let path = if outPath.len > 0: outPath else: base & ".niftybin"
         writeNativeFile(program, path)

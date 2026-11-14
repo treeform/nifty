@@ -1,7 +1,7 @@
 ## Versioned native images with fixed runtime metadata.
 import std/[json, jsonutils, os]
-import common, types, nativeplans, backend/engine
-export nativeplans, engine
+import common, types, nativeplans, nativeoptimizations, backend/engine
+export nativeplans, nativeoptimizations, engine
 
 const
   NativeMagic = "NIFTYN01"
@@ -95,14 +95,15 @@ proc validateNative*(program: NativeProgram) =
 
 proc buildNativeProgram*(plan: NativePlan,
     target: NativeTarget,
-    platform = NativeHostPlatform): NativeProgram =
+    platform = NativeHostPlatform,
+    optimization = SpeedOptimization): NativeProgram =
   ## Compiles checked native IR while retaining runtime descriptors.
   if platform != NativeHostPlatform:
     raise newException(NiftyError,
       "native compilation requires the host operating system ABI")
   result.platform = platform
-  result.plan = plan
-  result.image = emitNative(plan.module, target)
+  result.plan = optimizeNative(plan, optimization)
+  result.image = emitNative(result.plan.module, target)
   result.validateNative()
 
 proc encodeNative*(program: NativeProgram): string =
