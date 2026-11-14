@@ -81,7 +81,8 @@ proc statement(p: var Planner, s: Stmt) =
     p.expression(e)
   case s.kind
   of VarStmt, LetStmt:
-    let mode = if hasOwned(s.typ): OwnerMode else: ValueMode
+    let mode = if hasOwned(s.typ) and not s.nonowningTemp:
+        OwnerMode else: ValueMode
     s.binding = p.addBinding(s.name, s.line, s.typ, mode, LocalSym)
     p.names[^1][s.name] = s.binding
     if mode == OwnerMode:

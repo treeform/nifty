@@ -3,7 +3,7 @@
 ## forward prototypes: definitions appear in call order.
 
 import std/[math, strutils, tables, sets, sequtils]
-import types, semantics
+import types, semantics, echolowering, standardbridges
 
 type
   Gen = object
@@ -875,102 +875,7 @@ proc genStmt(g: var Gen, s: Stmt) =
     g.cleanup(s.drops)
     g.put "break;"
   of EchoStmt:
-    # Every value argument is hoisted to a temp, in order: C leaves printf
-    # argument evaluation order unspecified, nifty does not.
-    var temps: Table[int, string]
-    for i, a in s.args:
-      if a.typ.kind != StringLitType:
-        temps[i] = "ni_e" & $g.tmpN
-        inc g.tmpN
-    if temps.len > 0:
-      g.put "{"
-      inc g.ind
-      for i, a in s.args:
-        if i in temps:
-          let ctype =
-            case a.typ.kind
-            of BoolType: "bool"
-            of StringType: cBase(a.typ)
-            of FloatType: "double"
-            else: "int64_t"
-          let v =
-            if g.hasEffects(a): g.genOrdered(a) else: g.genExpr(a)
-          g.put ctype & " " & temps[i] & " = " & v & ";"
-    if s.args.anyIt(it.typ.kind in {StringType, StringLitType}):
-      # Strings are length-exact and may contain embedded NUL bytes.
-      # Evaluate every argument above, then keep the complete echo atomic.
-      g.put "flockfile(stdout);"
-      for i, a in s.args:
-        case a.typ.kind
-        of StringLitType:
-          if a.sval.len > 0:
-            g.put "if (fwrite(" & cQuote(a.sval) & ", 1, " &
-              $a.sval.len & ", stdout) != " & $a.sval.len &
-              ") ni_output_failure();"
-        of StringType:
-          let v = temps[i]
-          g.put "if (" & v & ".m_len > 0 && fwrite(" & v &
-            ".m_data, 1, (size_t)" & v & ".m_len, stdout) != " &
-            "(size_t)" & v & ".m_len) ni_output_failure();"
-        of IntType:
-          if a.typ.dname == "char":
-            g.put "if (printf(\"%c\", (int)" & temps[i] &
-              ") < 0) ni_output_failure();"
-          else:
-            g.put "if (printf(\"%lld\", (long long)" & temps[i] &
-              ") < 0) ni_output_failure();"
-        of BoolType:
-          g.put "if (fputs(" & temps[i] &
-            " ? \"true\" : \"false\", stdout) < 0) ni_output_failure();"
-        of FloatType:
-          g.put "if (printf(\"%g\", " & temps[i] &
-            ") < 0) ni_output_failure();"
-        else:
-          discard
-      g.put "if (fputc(10, stdout) == EOF) ni_output_failure();"
-      g.put "funlockfile(stdout);"
-      if temps.len > 0:
-        dec g.ind
-        g.put "}"
-      return
-    var fmt = ""
-    var cargs: seq[string]
-    for i, a in s.args:
-      case a.typ.kind
-      of StringLitType:
-        fmt.add a.sval.replace("%", "%%")
-      of StringType:
-        fmt.add "%.*s"
-        cargs.add "(int)(" & temps[i] & ".m_len)"
-        cargs.add (if a.typ.dynamic:
-          "(" & temps[i] & ".m_len ? (const char *)" &
-            temps[i] & ".m_data : \"\")"
-          else: "(const char *)" & temps[i] & ".m_data")
-      of IntType:
-        if a.typ.dname == "char":
-          # char exists to say "this byte is text": print it as text.
-          fmt.add "%c"
-          cargs.add "(int)(" & temps[i] & ")"
-        else:
-          fmt.add "%lld"
-          cargs.add "(long long)(" & temps[i] & ")"
-      of BoolType:
-        fmt.add "%s"
-        cargs.add "((" & temps[i] & ") ? \"true\" : \"false\")"
-      of FloatType:
-        fmt.add "%g"
-        cargs.add temps[i]
-      else:
-        discard
-    fmt.add "\n"
-    var call = "printf(" & cQuote(fmt)
-    for x in cargs:
-      call.add ", " & x
-    call.add ")"
-    g.put "if (" & call & " < 0) ni_output_failure();"
-    if temps.len > 0:
-      dec g.ind
-      g.put "}"
+    raise newException(ValueError, "echo must be expanded before C generation")
   of BlockStmt:
     g.put "{"
     g.genBlock(s.body, s.bodyScope)
@@ -1547,16 +1452,21 @@ proc emitBodyTypeDefs(g: var Gen, body: seq[Stmt]) =
       g.emitBodyTypeDefs(br.body)
     g.emitBodyTypeDefs(s.elseBody)
 
-proc generate*(m: Module, src: string): string =
+proc generate*(source: Module, src: string): string =
   ## Generate the complete C translation unit for a checked module.
-  requireChecked(m)
+  requireChecked(source)
+  let m = lowerEcho(source, src)
+  let routines = if m.supportCount > 0:
+      m.routines[m.routines.len - m.supportCount .. ^1] &
+        m.routines[0 ..< m.routines.len - m.supportCount]
+    else: m.routines
   var g = Gen(src: src, source: m)
-  for r in m.routines:
+  for r in routines:
     g.routines[r.name] = r
   # Arena analysis: big locals leave the C stack for per-thread arenas,
   # sized by the same call-DAG walk the report uses. One bump pointer
   # per thread; constant offsets; overflow impossible by sizing.
-  for r in m.routines:
+  for r in routines:
     var offs: Table[string, int64]
     var off = 0'i64
     var hiWater = 0'i64
@@ -1571,11 +1481,12 @@ proc generate*(m: Module, src: string): string =
         worst = g.needOf[c2]
     g.needOf[r.name] = sizeAdd(g.frameOf[r.name], worst, r.line)
   var anyArena = false
-  for r in m.routines:
+  for r in routines:
     if r.kind == ThreadRoutine and g.needOf[r.name] > 0:
       anyArena = true
   g.put "// Generated by nifty from " & src & ". Do not edit."
   g.o.add cPrelude
+  g.o.add consoleBridgeC
   if m.semantics.usesHeap:
     g.o.add cMemoryPrelude
   if m.routines.anyIt(it.externLib != ""):
@@ -1594,7 +1505,7 @@ proc generate*(m: Module, src: string): string =
     g.emitTypeDefs(td.typ)
   for gd in m.globals:
     g.emitTypeDefs(gd.typ)
-  for r in m.routines:
+  for r in routines:
     for pm in r.params:
       g.emitTypeDefs(pm.typ)
     g.emitTypeDefs(r.ret)
@@ -1619,7 +1530,7 @@ proc generate*(m: Module, src: string): string =
         g.put "static " & cDecl("g_" & gd.name, gd.typ) & ";"
   if anyArena:
     g.put ""
-    for r in m.routines:
+    for r in routines:
       if r.kind == ThreadRoutine and g.needOf[r.name] > 0:
         if r.instances > 1:
           # One arena row per instance, rows padded to keep 16-alignment.
@@ -1630,7 +1541,7 @@ proc generate*(m: Module, src: string): string =
         else:
           g.put "static _Alignas(16) uint8_t ni_arena_" & r.name & "[" &
             $g.needOf[r.name] & "];"
-  for r in m.routines:
+  for r in routines:
     if r.externLib != "":
       # Private identifiers avoid conflicts with incidental runtime header
       # prototypes. The linker still resolves the declared binary symbol.

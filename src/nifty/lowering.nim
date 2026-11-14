@@ -1,6 +1,6 @@
 ## Lowers checked Nifty syntax to explicit native SSA and storage.
 import std/[tables, sets]
-import types, common, semantics, nativeplans, nativeirtypes, backend/irs
+import types, common, semantics, nativeplans, nativeirtypes, echolowering, backend/irs
 
 type
   Binding = object
@@ -911,10 +911,7 @@ proc statement(g: var Lower, s: Stmt, initialize = true) =
     g.cleanup(s.drops)
     g.jump(g.breaks[^1])
   of EchoStmt:
-    var host = NativeHost(kind: EchoHost, operation: "echo",
-      receiverType: -1, resultType: -1)
-    let args = g.packed(s.args, host)
-    g.hostCall(host, g.null, args, g.null)
+    raise newException(NiftyError, "echo must be expanded before native lowering")
   of DiscardStmt, CallStmt:
     discard g.expression(s.value)
   of BlockStmt:
@@ -1031,9 +1028,10 @@ proc statements(g: var Lower, body: seq[Stmt], scope: int) =
   if g.live:
     g.cleanup(g.source.semantics.scopes[scope].drops)
 
-proc lowerNative*(source: Module, filename = ""): NativePlan =
+proc lowerNative*(checked: Module, filename = ""): NativePlan =
   ## Builds native IR, fixed layouts, and executable runtime metadata.
-  source.requireChecked()
+  checked.requireChecked()
+  let source = lowerEcho(checked, filename)
   var g = Lower(source: source)
   g.plan.module.pointerBytes = 8
   g.plan.module.files = if srcFiles.len > 0: srcFiles else: @[filename]

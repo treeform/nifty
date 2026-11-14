@@ -134,6 +134,8 @@ proc validateNative*(program: NativeProgram) =
       if plan.ownedGlobals[j].offset == global.offset:
         raise newException(NiftyError, "duplicate native owned global")
   for host in plan.hosts:
+    if host.kind == ReservedHost:
+      raise newException(NiftyError, "unsupported legacy native host service")
     if host.paramTypes.len != host.paramOffsets.len:
       raise newException(NiftyError, "invalid native host parameters")
     if host.kind == ContainerHost:

@@ -101,3 +101,15 @@ proc loadTokens*(mainSrc, mainName, dir: string): seq[Token] =
   var ld = Loader(dir: dir, standardDirs: standardLibraryDirs())
   var toks = tokenize(mainSrc, 0)
   ld.processImports(toks)
+
+
+proc loadStandardTokens*(name: string): seq[Token] =
+  ## Loads an implicit support module without resetting user source locations.
+  let directories = standardLibraryDirs()
+  for directory in directories:
+    if fileExists(directory / name & ".nifty"):
+      var ld = Loader(dir: directory, standardDirs: directories)
+      result = ld.spliceImport(name, 1)
+      result.add(Token(kind: EofToken, line: 1))
+      return
+  err(1, "cannot find standard library support module '" & name & "'")

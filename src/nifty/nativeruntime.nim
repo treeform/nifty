@@ -1,7 +1,7 @@
 ## Executes native code against bounded startup storage and host services.
 import std/[dynlib, os]
 import common, types, nativefiles, nativecontainers, nativebundles,
-  nativeplatforms
+  nativeplatforms, standardbridges
 import backend/[context, memories]
 export nativefiles, nativebundles, nativecontainers
 
@@ -31,25 +31,15 @@ var cStdout {.importc: "stdout", header: "<stdio.h>".}: File
 var cStderr {.importc: "stderr", header: "<stdio.h>".}: File
 
 when defined(windows):
-  proc flockfile(file: File)
-      {.importc: "_lock_file", header: "<stdio.h>".}
-  proc funlockfile(file: File)
-      {.importc: "_unlock_file", header: "<stdio.h>".}
   proc fileNumber(file: File): cint
       {.importc: "_fileno", header: "<stdio.h>".}
   proc setMode(descriptor, mode: cint): cint
       {.importc: "_setmode", header: "<io.h>".}
-else:
-  proc flockfile(file: File) {.importc, header: "<stdio.h>".}
-  proc funlockfile(file: File) {.importc, header: "<stdio.h>".}
-proc printf(format: cstring): cint {.importc, varargs, header: "<stdio.h>".}
 proc flush(file: File): cint {.importc: "fflush", header: "<stdio.h>".}
 proc fputs(data: cstring, file: File): cint
     {.importc, header: "<stdio.h>".}
 proc exitProcess(status: cint) {.importc: "_Exit", header: "<stdlib.h>",
     noreturn.}
-proc fwrite(data: pointer, size, count: csize_t, file: File): csize_t
-    {.importc, header: "<stdio.h>".}
 
 proc runtimeFailure(message: cstring) {.noreturn.} =
   ## Exits before releasing resources that a live worker might still use.
@@ -64,61 +54,6 @@ proc outputFailure() {.noreturn.} =
 proc offset(address: pointer, bytes: int): pointer {.inline.} =
   ## Returns a byte offset within a validated runtime allocation.
   cast[pointer](cast[uint](address) + uint(bytes))
-
-proc loadInt(address: pointer, layout: NativeLayout): int64 =
-  ## Loads a hardware integer using its signedness and physical width.
-  case layout.bytes
-  of 1:
-    if layout.lower < 0: int64(cast[ptr int8](address)[])
-    else: int64(cast[ptr uint8](address)[])
-  of 2:
-    if layout.lower < 0: int64(cast[ptr int16](address)[])
-    else: int64(cast[ptr uint16](address)[])
-  of 4:
-    if layout.lower < 0: int64(cast[ptr int32](address)[])
-    else: int64(cast[ptr uint32](address)[])
-  else:
-    cast[ptr int64](address)[]
-
-proc executeEcho(host: NativeHost, layouts: seq[NativeLayout],
-    args: pointer) =
-  ## Writes one echo statement under the same libc stream lock as printf.
-  flockfile(cStdout)
-  var failed = false
-  for i, typ in host.paramTypes:
-    template layout: untyped = layouts[typ]
-    let argument = args.offset(host.paramOffsets[i])
-    case layout.kind
-    of IntType:
-      if layout.display == "char":
-        failed = printf("%c", cint(loadInt(argument, layout))) < 0 or failed
-      else:
-        failed = printf("%lld",
-          clonglong(loadInt(argument, layout))) < 0 or failed
-    of BoolType:
-      failed = printf("%s", if cast[ptr byte](argument)[] != 0:
-        "true".cstring else: "false".cstring) < 0 or failed
-    of FloatType:
-      let value = if layout.bytes == 4:
-        float64(cast[ptr float32](argument)[])
-      else:
-        cast[ptr float64](argument)[]
-      failed = printf("%g", value) < 0 or failed
-    of StringType, StringLitType:
-      let data = if layout.dynamic:
-          cast[ptr pointer](argument.offset(16))[]
-        else:
-          argument.offset(layout.dataOffset)
-      let count = cast[ptr int64](argument)[]
-      if count > 0:
-        failed = fwrite(data, 1, csize_t(count), cStdout) !=
-          csize_t(count) or failed
-    else:
-      discard
-  failed = printf("\n") < 0 or failed
-  funlockfile(cStdout)
-  if failed:
-    outputFailure()
 
 proc executeChannel(context: ptr NativeContext, host: NativeHost,
     receiver, args, output: pointer) =
@@ -162,8 +97,8 @@ proc dispatch(context: pointer, hostId: int64,
   let runtime = cast[ptr NativeContext](context)
   template host: untyped = runtime.plan.hosts[int(hostId)]
   case host.kind
-  of EchoHost:
-    executeEcho(host, runtime.plan.layouts, args)
+  of ReservedHost:
+    quit("nifty: unsupported legacy host service", 1)
   of LockHost:
     let mutex = cast[ptr ptr NativeMutex](receiver)[]
     if host.operation == "lock":
@@ -211,6 +146,11 @@ else:
 
 proc resolveExtern(host: NativeHost, libraries: var seq[LibHandle]): pointer =
   ## Resolves C symbols once before any program thread is started.
+  if host.library == "nifty":
+    result = standardSymbol(host.symbol)
+    if result == nil:
+      raise newException(NiftyError, "cannot resolve standard ABI symbol: " & host.symbol)
+    return
   when not defined(windows):
     if host.library == "libc":
       let library = loadLib()

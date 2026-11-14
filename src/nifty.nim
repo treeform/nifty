@@ -20,7 +20,7 @@ proc compileToC*(src: string, moduleName: string, dir = ""): string =
   let m = checkedModule(src, moduleName, dir)
   lastExternLibs = @[]
   for lib in m.externLibs:
-    if lib != "libc":
+    if lib notin ["libc", "nifty"]:
       lastExternLibs.add lib
   generate(m, moduleName)
 

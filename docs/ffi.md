@@ -86,6 +86,9 @@ close or free a foreign resource.
 A Nifty wrapper can return `CFile?`, using the ordinary payload and presence
 flag representation. Optional values cannot cross the foreign ABI directly;
 foreign routines return a plain handle, then wrappers test `.isNull`.
+
+## C-string inputs
+
 NUL-terminated inputs use the distinct `cstring` type. NUL-free string
 literals pass directly without allocation. For a Nifty string, initialize a
 scoped local with `let input = source.toCString()` and check `input.ok`
@@ -103,3 +106,25 @@ opaque type does not track a pointer's borrowed lifetime. As with the
 maximum-access contract, this is a requirement on the foreign declaration;
 the compiler cannot inspect a foreign implementation to prove it.
 See the [C-string rules](../spec.md#nul-terminated-input-cstring).
+
+
+## Console output
+
+`import console` provides `write(text: string): bool`, which writes exactly the
+string bytes and reports failure. Fixed strings can be passed as readonly
+views. Embedded NUL and newline bytes retain their original values, including
+when Windows stdout is redirected. One `write` call is atomic with other
+console writes and complete `echo` lines.
+
+`echo` remains convenient syntax: it evaluates every argument once, from left
+to right, before starting the line. The backends expand it into ordinary Nifty
+procedures from `std/_echo.nifty`; those procedures use the same bounded foreign
+byte writes as `console`. Integer, character, boolean, and float formatting
+use fixed storage. Dynamic strings are borrowed for output. The standard ABI
+bridge supplies only stdout synchronization and a format-only float adapter;
+it contains no output routine.
+
+Console output uses unbuffered descriptor writes. When mixing it with foreign
+buffered stdio such as `printf`, callers must flush the foreign stream before
+calling `write` or `echo` to preserve output order. The foreign declaration's
+stream lifetime and synchronization contracts remain the caller's responsibility.

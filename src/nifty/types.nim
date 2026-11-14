@@ -111,6 +111,7 @@ type
     elifs*: seq[Elif]  # if: all condition branches, first is the `if`
     elseBody*: seq[Stmt]
     bodyScope*, elseScope*: int
+    nonowningTemp*: bool # Compiler-generated readonly descriptor snapshot.
     drops*: seq[BindingId] # Ordered owners released by return or break.
 
   RoutineKind* = enum
@@ -157,6 +158,7 @@ type
     globals*: seq[GlobalDef]
     types*: seq[TypeDef]
     routines*: seq[Routine]
+    supportCount*: int        # Trailing backend support routines.
     semantics*: SemanticPlan # Present only after all source checks pass.
 
 const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",

@@ -1,0 +1,53 @@
+# The echo statement supplies captured values to these ordinary procedures.
+# Fixed formatting buffers and readonly views never own heap allocations.
+import _console
+
+extern "libc":
+  proc echoExit "_Exit"(status: int32)
+
+extern "nifty":
+  proc echoFormatFloat "nifty_format_float"(value: float64, buffer: var string[64] boundedBy count, count: uint64): int32
+
+proc echoFailure() =
+  consoleUnlock()
+  var message: string[IoChunkSize]
+  message.add("nifty: stdout write failed\n")
+  discard ioRawWrite(2, message, message.len)
+  echoExit(1)
+
+proc echoStart() =
+  consoleLock()
+
+proc echoText(text: string) =
+  let written = consoleWrite(text)
+  if not written:
+    echoFailure()
+
+proc echoInt(value: int) =
+  var text: string[20]
+  text.addNum(value)
+  echoText(text)
+
+proc echoChar(value: char) =
+  var text: string[1]
+  text.addByte(value)
+  echoText(text)
+
+proc echoBool(value: bool) =
+  if value:
+    echoText("true")
+  else:
+    echoText("false")
+
+proc echoFloat(value: float64) =
+  var text: string[64]
+  let count = echoFormatFloat(value, text, 64)
+  if count < 0 or count >= 64:
+    echoFailure()
+  if count >= 0 and count < 64:
+    text.setLen(count)
+    echoText(text)
+
+proc echoFinish() =
+  echoText("\n")
+  consoleUnlock()
