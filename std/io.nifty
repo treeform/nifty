@@ -1,0 +1,87 @@
+import console
+
+# Byte-oriented, binary I/O. A successful open owns one stream until close.
+# Handles are borrowed by read/write; callers must close each stream once.
+type CFile = opaque
+
+extern "libc":
+  proc ioOpen "fopen"(path: cstring, mode: cstring): CFile
+  # size is constrained to one: boundedBy count therefore measures bytes.
+  proc ioRead "fread"(data: var string[IoChunkSize] boundedBy count, size: 1 .. 1, count: int64, file: CFile): int64
+  proc ioFileWrite "fwrite"(data: string[IoChunkSize] boundedBy count, size: 1 .. 1, count: int64, file: CFile): int64
+  proc ioFileError "ferror"(file: CFile): int32
+  proc ioFlush "fflush"(file: CFile): int32
+  proc ioClose "fclose"(file: CFile): int32
+
+proc openRead(path: cstring): CFile? =
+  let file = ioOpen(path, "rb")
+  if file.isNull:
+    return none
+  return file
+
+proc openWrite(path: cstring): CFile? =
+  let file = ioOpen(path, "wb")
+  if file.isNull:
+    return none
+  return file
+
+proc close(file: CFile): bool =
+  if file.isNull:
+    return false
+  return ioClose(file) == 0
+
+# Replace a caller's bounded buffer with up to min(capacity,4096) bytes.
+# none means an I/O error; zero means EOF. Embedded NUL is ordinary data.
+proc readChunk(file: CFile, buffer: var string[$N]): 0 .. IoChunkSize? =
+  buffer.clear()
+  if file.isNull:
+    return none
+  var count: int64 = $N
+  if count > IoChunkSize:
+    count = IoChunkSize
+  var scratch: string[IoChunkSize]
+  let got = ioRead(scratch, 1, count, file)
+  if got < 0 or got > IoChunkSize or got > count:
+    return none
+  if ioFileError(file) != 0:
+    return none
+  scratch.setLen(got)
+  buffer.copyRange(scratch, 0, got)
+  return got
+
+# A growable caller receives one chunk. Allocation failure also returns none;
+# the previous buffer remains intact when transactional copyFrom fails.
+proc readChunkGrow(file: CFile, buffer: var string): 0 .. IoChunkSize? =
+  if file.isNull:
+    return none
+  var scratch: string[IoChunkSize]
+  let got = ioRead(scratch, 1, IoChunkSize, file)
+  if got < 0 or got > IoChunkSize:
+    return none
+  if ioFileError(file) != 0:
+    return none
+  if got == 0:
+    return 0
+  scratch.setLen(got)
+  if not buffer.copyFrom(scratch):
+    return none
+  return got
+
+# Write all bytes, retrying short writes. Errors are returned to the caller.
+proc writeFile(file: CFile, text: string): bool =
+  if file.isNull or text.len > IoMaxBytes:
+    return false
+  var sent: 0 .. IoMaxBytes = 0
+  while sent < text.len max IoMaxBytes:
+    var chunk: string[IoChunkSize]
+    chunk.copyRange(text, sent, text.len)
+    let written = ioFileWrite(chunk, 1, chunk.len, file)
+    if written <= 0 or written > IoChunkSize or written > chunk.len:
+      return false
+    let next = sent + written
+    if next > IoMaxBytes:
+      return false
+    sent = next
+  return ioFlush(file) == 0
+
+
