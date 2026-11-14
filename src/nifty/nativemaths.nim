@@ -1,27 +1,43 @@
 ## Specializes standard libm calls without changing exceptional arguments.
 import nativeplans, backend/irs
 
-proc standardSqrt(plan: NativePlan, instruction: IrInstruction): bool =
-  ## Recognizes only the standard library's exact scalar sqrt prototypes.
+type MathOperation = enum
+  NoMath, SqrtMath, FloorMath, RoundMath
+
+proc standardMath(plan: NativePlan,
+    instruction: IrInstruction): MathOperation =
+  ## Recognizes exact standard prototypes validated against platform libm.
   if instruction.op != HostCallOp or instruction.results.count != 1 or
       instruction.arguments.count != 1:
-    return false
+    return NoMath
   let index = int(instruction.target)
   if index < 0 or index >= plan.module.hosts.len:
-    return false
+    return NoMath
   let host = plan.module.hosts[index]
   if host.failureMode != NoFailCall or host.binding < 0 or
       int(host.binding) >= plan.hosts.len:
-    return false
+    return NoMath
   let native = plan.hosts[host.binding]
   if native.kind != ExternHost or native.library != "m":
-    return false
-  let kind = case native.symbol
-    of "sqrt": Float64Type
-    of "sqrtf": Float32Type
-    else: return false
-  host.signature.parameters == @[kind] and
-    host.signature.returns == @[kind]
+    return NoMath
+  var kind = Float64Type
+  case native.symbol
+  of "sqrt":
+    result = SqrtMath
+  of "sqrtf":
+    kind = Float32Type
+    result = SqrtMath
+  of "floor", "round":
+    # Other platforms retain libm until their exception flags are validated.
+    when defined(macosx):
+      result = if native.symbol == "floor": FloorMath else: RoundMath
+    else:
+      return NoMath
+  else:
+    return NoMath
+  if host.signature.parameters != @[kind] or
+      host.signature.returns != @[kind]:
+    result = NoMath
 
 proc arguments(function: var IrFunction,
     values: openArray[ValueId]): Span =
@@ -62,13 +78,44 @@ proc edge(function: var IrFunction, target: int,
   function.edges.add(IrEdge(target: BlockId(target),
     arguments: function.arguments(values)))
 
+proc safeArgument(function: var IrFunction, blockIndex: int,
+    argument: ValueId, kind: IrType, operation: MathOperation,
+    location: LocationId): ValueId =
+  ## Classifies exceptional arguments without changing floating flags.
+  let
+    single = kind == Float32Type
+    integer = if single: UInt32Type else: UInt64Type
+    bits = function.emitValue(blockIndex, ConvertOp, integer,
+      [argument], location)
+    infinity = function.emitValue(blockIndex, ConstantOp, integer,
+      [], location, if single: 0x7f800000'u64
+        else: 0x7ff0000000000000'u64)
+  if operation == SqrtMath:
+    let
+      negativeZero = function.emitValue(blockIndex, ConstantOp, integer,
+        [], location, if single: 0x80000000'u64
+          else: 0x8000000000000000'u64)
+      positive = function.emitValue(blockIndex, CompareOp, BoolType,
+        [bits, infinity], location, comparison = LessEqualComparison)
+      zero = function.emitValue(blockIndex, CompareOp, BoolType,
+        [bits, negativeZero], location)
+    return function.emitValue(blockIndex, OrOp, BoolType,
+      [positive, zero], location)
+  let
+    mask = function.emitValue(blockIndex, ConstantOp, integer,
+      [], location, 0x7fffffffffffffff'u64)
+    magnitude = function.emitValue(blockIndex, AndOp, integer,
+      [bits, mask], location)
+  function.emitValue(blockIndex, CompareOp, BoolType,
+    [magnitude, infinity], location, comparison = LessEqualComparison)
+
 proc specializeNativeMaths*(plan: var NativePlan): int =
-  ## Guards libm sqrt with exact hardware paths for nonnegative numbers.
+  ## Guards libm operations with exact paths for supported numeric arguments.
   for functionIndex in 0 ..< plan.module.functions.len:
     let original = plan.module.functions[functionIndex]
     var found = false
     for instruction in original.instructions:
-      if plan.standardSqrt(instruction):
+      if plan.standardMath(instruction) != NoMath:
         found = true
         break
     if not found:
@@ -80,7 +127,8 @@ proc specializeNativeMaths*(plan: var NativePlan): int =
       function.blocks[current].instructions = Span()
       for index in oldBlock.instructions.indices:
         let instruction = original.instructions[index]
-        if not plan.standardSqrt(instruction):
+        let operation = plan.standardMath(instruction)
+        if operation == NoMath:
           function.emit(current, instruction)
           continue
         inc result
@@ -88,23 +136,9 @@ proc specializeNativeMaths*(plan: var NativePlan): int =
           argument = original.operands[instruction.arguments.first]
           output = instruction.results.first
           kind = original.values[output].valueType
-          single = kind == Float32Type
-          integer = if single: UInt32Type else: UInt64Type
           location = instruction.location
-          bits = function.emitValue(current, ConvertOp, integer,
-            [argument], location)
-          infinity = function.emitValue(current, ConstantOp, integer,
-            [], location, if single: 0x7f800000'u64
-              else: 0x7ff0000000000000'u64)
-          negativeZero = function.emitValue(current, ConstantOp, integer,
-            [], location, if single: 0x80000000'u64
-              else: 0x8000000000000000'u64)
-          positive = function.emitValue(current, CompareOp, BoolType,
-            [bits, infinity], location, comparison = LessEqualComparison)
-          zero = function.emitValue(current, CompareOp, BoolType,
-            [bits, negativeZero], location)
-          safe = function.emitValue(current, OrOp, BoolType,
-            [positive, zero], location)
+          safe = function.safeArgument(current, argument, kind,
+            operation, location)
           fast = function.blocks.len
           fallback = fast + 1
           join = fast + 2
@@ -118,7 +152,12 @@ proc specializeNativeMaths*(plan: var NativePlan): int =
           kind: BranchTerminator,
           arguments: function.arguments([safe]),
           edges: Span(first: first, count: 2), location: location)
-        let root = function.emitValue(fast, SqrtOp, kind,
+        let opcode = case operation
+          of SqrtMath: SqrtOp
+          of FloorMath: FloorOp
+          of RoundMath: RoundOp
+          of NoMath: SqrtOp
+        let root = function.emitValue(fast, opcode, kind,
           [argument], location)
         function.blocks[fast].terminator = IrTerminator(
           kind: JumpTerminator,
