@@ -349,6 +349,76 @@ proc roundBitsFloat32(code: var XAssembler) =
   code.scalar(0x58, 0, 1, true)
   code.place(finish)
 
+proc roundBitsFloat64(code: var XAssembler, away: bool) =
+  ## Rounds binary64 bits exactly without conversions or inexact exceptions.
+  let
+    small = code.label()
+    large = code.label()
+    signed = code.label()
+    finish = code.label()
+  code.floatToBits(Rdx, 0)
+  code.move(R8, Rdx)
+  code.loadImmediate(Rcx, int64.high)
+  code.binary(0x21, R8, Rcx)
+  code.loadImmediate(Rcx, 0x4330000000000000'i64)
+  code.compare(R8, Rcx)
+  code.jumpIf(AboveEqual, large)
+  code.loadImmediate(Rcx, 0x3ff0000000000000'i64)
+  code.compare(R8, Rcx)
+  code.jumpIf(Below, small)
+  # The low 1075-exponent bits encode the fractional significand.
+  code.move(Rcx, R8)
+  code.shift(Rcx, 52)
+  code.negate(Rcx)
+  code.addImmediate(Rcx, 1075)
+  code.loadImmediate(Rax, 1)
+  code.rex(true, 4, Rax.ord)
+  code.emit(0xd3)
+  code.registers(4, Rax.ord)
+  code.move(R9, Rax)
+  code.negate(R9)
+  if away:
+    code.shift(Rax, 1)
+    code.add(R8, Rax)
+  else:
+    let positive = code.label()
+    code.addImmediate(Rax, -1)
+    code.loadImmediate(Rcx, 0)
+    code.compare(Rdx, Rcx)
+    code.jumpIf(GreaterEqual, positive)
+    code.add(R8, Rax)
+    code.place(positive)
+  code.binary(0x21, R8, R9)
+  code.jump(signed)
+  code.place(small)
+  if away:
+    code.loadImmediate(Rcx, 0x3fe0000000000000'i64)
+    code.compare(R8, Rcx)
+    code.loadImmediate(Rax, 0)
+    code.loadImmediate(R8, 0x3ff0000000000000'i64)
+    code.conditionalMove(R8, Rax, Below)
+  else:
+    # Both signs of exact zero retain their original bits.
+    code.loadImmediate(Rcx, 0)
+    code.compare(R8, Rcx)
+    code.jumpIf(Equal, finish)
+    code.compare(Rdx, Rcx)
+    code.loadImmediate(R8, 0)
+    code.loadImmediate(Rax, 0x3ff0000000000000'i64)
+    code.conditionalMove(R8, Rax, Less)
+  code.place(signed)
+  code.loadImmediate(Rcx, int64.low)
+  code.binary(0x21, Rdx, Rcx)
+  code.binary(0x09, R8, Rdx)
+  code.bitsToFloat(0, R8)
+  code.jump(finish)
+  code.place(large)
+  # Addition preserves large integers and infinities and quiets signaling NaNs.
+  code.loadImmediate(Rax, 0)
+  code.bitsToFloat(1, Rax)
+  code.scalar(0x58, 0, 1)
+  code.place(finish)
+
 proc roundFloat32(code: var XAssembler, away: bool) =
   ## Rounds XMM0 with SSE2 while retaining signed zero and large float32 values.
   when not defined(nimkeyNoAmdBitRounding):
@@ -1089,7 +1159,10 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
               continue
             elif item.op in {ir.FloorOp, ir.RoundOp}:
               code.floating(operand(0))
-              code.roundFloat32(item.op == ir.RoundOp)
+              if single:
+                code.roundFloat32(item.op == ir.RoundOp)
+              else:
+                code.roundBitsFloat64(item.op == ir.RoundOp)
             elif item.op == ir.SqrtOp:
               let
                 source = code.floatOperand(operand(0))
