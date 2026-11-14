@@ -304,6 +304,17 @@ proc typeSize*(t: Typ, line = 0): int64 =
     sizeAlign(off, typeAlign(t), line)
   else: 0 # Lock is platform-sized; generic types are not concrete yet.
 
+proc sameStorage(a, b: Typ): bool =
+  ## Match scalar carriers inside otherwise compatible aggregate types.
+  if a.kind == IntType and b.kind == IntType:
+    let
+      aWidth = if a.width > 0: a.width else: 8
+      bWidth = if b.width > 0: b.width else: 8
+      aUnsigned = a.width > 0 and a.rlo >= 0
+      bUnsigned = b.width > 0 and b.rlo >= 0
+    return aWidth == bWidth and aUnsigned == bUnsigned
+  a.width == b.width
+
 proc typeEq*(a, b: Typ): bool =
   if a.isNil or b.isNil:
     return a.isNil and b.isNil
@@ -311,23 +322,27 @@ proc typeEq*(a, b: Typ): bool =
     return false
   if a.kind != b.kind or a.dynamic != b.dynamic:
     return false
+  if a.opt and a.kind == IntType:
+    # Optional payloads are copied as aggregates without scalar conversion.
+    return sameStorage(a, b)
   if a.kind == FloatType:
     return a.width == b.width
   if a.kind in {ArrayType, SeqType, QueueType}:
     # Elements must also match in storage width: the memory layouts of
     # array[4, uint8] and array[4, 0 .. 255] are different things.
     return a.len == b.len and typeEq(a.elem, b.elem) and
-      a.elem.width == b.elem.width
+      sameStorage(a.elem, b.elem)
   if a.kind == StringType:
     return a.len == b.len
   if a.kind == SetType:
     return a.elem.rlo == b.elem.rlo and a.elem.rhi == b.elem.rhi
   if a.kind == DenseMapType:
     return a.elem.rlo == b.elem.rlo and a.elem.rhi == b.elem.rhi and
-      typeEq(a.val, b.val) and a.val.width == b.val.width
+      typeEq(a.val, b.val) and sameStorage(a.val, b.val)
   if a.kind == SparseMapType:
     return a.len == b.len and typeEq(a.elem, b.elem) and
-      typeEq(a.val, b.val) and a.val.width == b.val.width
+      sameStorage(a.elem, b.elem) and
+      typeEq(a.val, b.val) and sameStorage(a.val, b.val)
   if a.kind == ObjectType:
     return a.name == b.name
   if a.kind == ChannelType:

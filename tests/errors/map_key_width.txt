@@ -1,0 +1,1 @@
+map_key_width.nifty:7: argument 1 of 'lookup': expected map[4, int, int], got map[4, uint8, int]

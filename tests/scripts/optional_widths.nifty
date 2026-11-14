@@ -1,0 +1,47 @@
+# Same-layout optionals and plain scalar wrapping retain their values.
+func narrow(present: bool): int8? =
+  if present:
+    return -7
+  return none
+
+func wide(present: bool): int? =
+  if present:
+    return 42
+  return none
+
+func consume(value: int64?): int =
+  return value.or(99)
+
+func lookup(values: map[4, uint8, int]): int =
+  return values.get(1, -1)
+
+func lookupAlias(values: map[4, int64, int64]): int =
+  return values.get(1, -1)
+
+thread main() =
+  var values: seq[int8?]
+  echo values.push(narrow(true))
+  echo values.push(narrow(false))
+  if values.len > 0:
+    let absent = values.pop()
+    echo absent.ok, " ", absent.or(11)
+  if values.len > 0:
+    let present = values.pop()
+    echo present.ok, " ", present.or(11)
+  let sameWidth: int64? = wide(true)
+  echo consume(sameWidth)
+  echo consume(wide(false))
+  let plain: int8 = -9
+  let wrapped: int? = -9
+  echo wrapped.or(0)
+  let scalar: int = plain
+  echo scalar
+  var mapping: map[4, uint8, int]
+  discard mapping.put(1, 42)
+  echo lookup(mapping)
+  let unsigned: uint64 = 7
+  let signed: int64 = unsigned
+  echo signed
+  var aliases: map[4, int, int]
+  discard aliases.put(1, 84)
+  echo lookupAlias(aliases)
