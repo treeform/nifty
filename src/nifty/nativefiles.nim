@@ -10,11 +10,15 @@ const
   MaxNativeStorage = 1024 * 1024 * 1024
 
 type
+  NativePlatform* = enum
+    MacosPlatform, LinuxPlatform
   NativeProgram* = object
     image*: NativeImage
     plan*: NativePlan
+    platform*: NativePlatform
   NativeMetadata = object
     target: NativeTarget
+    platform: NativePlatform
     offsets: seq[int]
     globalBytes: int
     initialData: seq[byte]
@@ -22,6 +26,10 @@ type
     hosts: seq[NativeHost]
     layouts: seq[NativeLayout]
     lockOffsets, channelOffsets: seq[int]
+
+const NativeHostPlatform* = when defined(macosx): MacosPlatform
+  elif defined(linux): LinuxPlatform
+  else: {.error: "Native runtime supports macOS and Linux".}
 
 proc putNumber(data: var string, number: uint64) =
   ## Appends one unsigned little endian integer.
@@ -86,8 +94,13 @@ proc validateNative*(program: NativeProgram) =
         raise newException(NiftyError, "invalid native host argument")
 
 proc buildNativeProgram*(plan: NativePlan,
-    target: NativeTarget): NativeProgram =
+    target: NativeTarget,
+    platform = NativeHostPlatform): NativeProgram =
   ## Compiles checked native IR while retaining runtime descriptors.
+  if platform != NativeHostPlatform:
+    raise newException(NiftyError,
+      "native compilation requires the host operating system ABI")
+  result.platform = platform
   result.plan = plan
   result.image = emitNative(plan.module, target)
   result.validateNative()
@@ -96,7 +109,8 @@ proc encodeNative*(program: NativeProgram): string =
   ## Encodes an image deterministically without compiler process state.
   program.validateNative()
   let metadata = NativeMetadata(
-    target: program.image.target, offsets: program.image.offsets,
+    target: program.image.target, platform: program.platform,
+    offsets: program.image.offsets,
     globalBytes: program.plan.globalBytes,
     initialData: program.plan.initialData, threads: program.plan.threads,
     hosts: program.plan.hosts, layouts: program.plan.layouts,
@@ -136,6 +150,7 @@ proc decodeNative*(data: string): NativeProgram =
     metadata = parseJson(metadataText).jsonTo(NativeMetadata)
   except CatchableError as error:
     raise newException(NiftyError, "invalid native metadata: " & error.msg)
+  result.platform = metadata.platform
   result.image.target = metadata.target
   result.image.offsets = metadata.offsets
   result.image.bytes = newSeq[byte](code.len)

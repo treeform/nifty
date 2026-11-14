@@ -190,6 +190,9 @@ proc resolveExtern(host: NativeHost, libraries: var seq[LibHandle]): pointer =
 proc runNative*(program: NativeProgram) =
   ## Runs actual machine code after allocating all fixed program storage.
   program.validateNative()
+  if program.platform != NativeHostPlatform:
+    raise newException(NiftyError,
+      "native image operating system ABI does not match runtime")
   when defined(arm64):
     const HostTarget = Arm64Target
   elif defined(amd64):

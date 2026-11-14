@@ -1,5 +1,5 @@
 ## Packages native images into a reusable standalone runtime executable.
-import std/[os, osproc, strutils]
+import std/[os, osproc, strutils, tempfiles]
 import common, nativefiles
 
 const EmbeddedMagic = "NIFTY_EMBED_V001!"
@@ -88,19 +88,50 @@ proc runtimeTemplate(target: NativeTarget): string =
     raise newException(NiftyError, "missing " & name &
       " runtime template; set NIFTY_RUNTIME_" & name.toUpperAscii())
 
+proc validateTemplate(path: string, target: NativeTarget,
+    platform: NativePlatform) =
+  ## Rejects a template whose executable header disagrees with the image ABI.
+  var file: File
+  if not open(file, path, fmRead):
+    raise newException(NiftyError, "cannot open standalone runtime template")
+  defer: close(file)
+  var header = newString(64)
+  let read = file.readBuffer(addr header[0], header.len)
+  header.setLen(read)
+  var valid = false
+  if platform == MacosPlatform and header.len >= 32 and
+      header.number(0, 4) == 0xfeedfacf'u64:
+    let expected = if target == Arm64Target: 0x100000c'u64 else: 0x1000007'u64
+    valid = header.number(4, 4) == expected
+  elif platform == LinuxPlatform and header.len >= 20 and
+      header[0 ..< 4] == "\x7fELF" and header[4] == '\x02' and
+      header[5] == '\x01':
+    let expected = if target == Arm64Target: 183'u64 else: 62'u64
+    valid = header.number(18, 2) == expected
+  if not valid:
+    raise newException(NiftyError,
+      "standalone runtime template CPU or operating system ABI mismatch")
+
 proc writeStandalone*(program: NativeProgram, path: string) =
   ## Copies a prebuilt runtime and embeds machine code with no compiler step.
+  if program.platform != NativeHostPlatform:
+    raise newException(NiftyError,
+      "standalone packaging requires the host operating system ABI")
   let
     payload = program.encodeNative()
     source = runtimeTemplate(program.image.target)
     destination = absolutePath(path)
   if absolutePath(source) == destination:
     raise newException(NiftyError, "standalone output would replace its runtime")
-  copyFile(source, destination)
+  validateTemplate(source, program.image.target, program.platform)
+  let temporary = createTempFile(".nifty-native-", "", destination.parentDir)
+  close(temporary.cfile)
+  let staging = temporary.path
   try:
+    copyFile(source, staging)
     when defined(macosx):
-      signing("--remove-signature", destination)
-    var data = readFile(destination)
+      signing("--remove-signature", staging)
+    var data = readFile(staging)
     let existing = data.embeddedImage()
     if existing.len > 0:
       raise newException(NiftyError,
@@ -112,14 +143,15 @@ proc writeStandalone*(program: NativeProgram, path: string) =
     data.appendNumber(uint64(payload.len))
     when defined(macosx):
       data.extendMachO()
-    writeFile(destination, data)
-    setFilePermissions(destination,
+    writeFile(staging, data)
+    setFilePermissions(staging,
       getFilePermissions(source) + {fpUserExec, fpGroupExec, fpOthersExec})
     when defined(macosx):
-      signing("--force --sign -", destination)
-      signing("--verify --strict", destination)
-    if embeddedImage(readFile(destination)) != payload:
+      signing("--force --sign -", staging)
+      signing("--verify --strict", staging)
+    if embeddedImage(readFile(staging)) != payload:
       raise newException(NiftyError, "native executable payload was not preserved")
-  except CatchableError:
-    removeFile(destination)
-    raise
+    moveFile(staging, destination)
+  finally:
+    if fileExists(staging):
+      removeFile(staging)
