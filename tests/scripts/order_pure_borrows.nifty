@@ -1,0 +1,28 @@
+# A pure call finishes reading its borrow before later effects run.
+var values: array[1, int]
+var text: string
+
+func first(input: array[1, int]): int =
+  return input[0]
+
+func size(input: string): int =
+  return input.len
+
+proc touch(): 0 .. 0 =
+  values[0] = 42
+  return 0
+
+proc clearText(): int =
+  text.clear()
+  return 0
+
+proc pair(firstValue, secondValue: int) =
+  echo firstValue, " ", secondValue
+
+thread main() =
+  values[0] = 7
+  pair(first(values), touch())
+  values[0] = 7
+  echo first(values) + touch()
+  discard text.add("abc")
+  pair(size(text), clearText())
