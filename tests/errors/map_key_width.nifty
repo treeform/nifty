@@ -1,0 +1,7 @@
+func lookup(values: map[4, int, int]): int =
+  return values.get(1, -1)
+
+thread main() =
+  var values: map[4, uint8, int]
+  discard values.put(1, 42)
+  echo lookup(values)

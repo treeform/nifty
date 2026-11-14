@@ -1,0 +1,1 @@
+map_key_signedness.nifty:7: argument 1 of 'lookup': expected map[4, int64, int], got map[4, uint64, int]

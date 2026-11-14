@@ -1,0 +1,12 @@
+func narrow(present: bool): int8? =
+  if present:
+    return -7
+  return none
+
+thread main() =
+  var values: seq[int?]
+  echo values.push(narrow(true))
+  if values.len > 0:
+    let value = values.pop()
+    echo value.ok
+    echo value.or(99)
