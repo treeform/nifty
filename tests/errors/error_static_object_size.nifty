@@ -1,0 +1,5 @@
+object TooLarge =
+  first: array[4611686018427387904, uint8]
+  second: array[4611686018427387904, uint8]
+thread main() =
+  echo 1

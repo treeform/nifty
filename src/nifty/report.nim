@@ -205,17 +205,17 @@ proc localBytes(m: Module, body: seq[Stmt]): int64 =
   for s in body:
     if s.kind in {VarStmt, LetStmt}:
       let sz = typeSize(s.typ)
-      result = sadd(result, (if sz > arenaThreshold: 8'i64 else: sz))
+      result = sizeAdd(result, (if sz > arenaThreshold: 8'i64 else: sz))
     if s.kind == ForStmt:
-      result = sadd(result, 8)
+      result = sizeAdd(result, 8)
     if s.kind == ForEachStmt:
       let size =
         if m.mode(s.binding).isBorrow: 8'i64 else: typeSize(s.typ)
-      result = sadd(result, sadd(size, 16)) # Element borrow/value + iterator.
-    result = sadd(result, localBytes(m, s.body))
+      result = sizeAdd(result, sizeAdd(size, 16)) # Element borrow/value + iterator.
+    result = sizeAdd(result, localBytes(m, s.body))
     for br in s.elifs:
-      result = sadd(result, localBytes(m, br.body))
-    result = sadd(result, localBytes(m, s.elseBody))
+      result = sizeAdd(result, localBytes(m, br.body))
+    result = sizeAdd(result, localBytes(m, s.elseBody))
 
 proc arenaWalk(body: seq[Stmt], off: var int64, hi: var int64) =
   ## Mirrors codegen's collectBig: sequential 8-aligned allocation,
@@ -224,8 +224,8 @@ proc arenaWalk(body: seq[Stmt], off: var int64, hi: var int64) =
     if s.kind in {VarStmt, LetStmt}:
       let sz = typeSize(s.typ)
       if sz > arenaThreshold:
-        off = (off + 7) div 8 * 8
-        off = sadd(off, sz)
+        off = sizeAlign(off, 8, s.line)
+        off = sizeAdd(off, sz, s.line)
         if off > hi:
           hi = off
     if s.kind == BlockStmt:
@@ -297,7 +297,7 @@ proc buildReport*(m: Module, src: string): string =
       inc locks
       continue
     let size = typeSize(gd.typ)
-    total = sadd(total, size)
+    total = sizeAdd(total, size, gd.line)
     lines.add "  " & gd.name & ": " & $size & " bytes (" & $gd.typ & ")"
   var totalLine = "  total: " & $total & " bytes"
   if locks > 0:
@@ -353,11 +353,11 @@ proc buildReport*(m: Module, src: string): string =
       for p in r.params:
         if p.typ.hasOwned:
           runtimeCosts[r.name] = true
-    frames[r.name] = sadd(frameOverhead,
-      sadd(localBytes(m, r.body), block:
+    frames[r.name] = sizeAdd(frameOverhead,
+      sizeAdd(localBytes(m, r.body), block:
         var pb = 0'i64
         for p in r.params:
-          pb = sadd(pb, paramBytes(m, p))
+          pb = sizeAdd(pb, paramBytes(m, p), r.line)
         pb))
     var calls: HashSet[string]
     collectCalls(r.body, globals, calls)
@@ -369,7 +369,7 @@ proc buildReport*(m: Module, src: string): string =
         let d = deepest[callee]
         if d.bytes > best.bytes:
           best = d
-    deepest[r.name] = (bytes: sadd(frames[r.name], best.bytes),
+    deepest[r.name] = (bytes: sizeAdd(frames[r.name], best.bytes, r.line),
       chain: r.name & (if best.chain.len > 0: " -> " & best.chain else: ""))
 
   lines.add ""
@@ -387,14 +387,14 @@ proc buildReport*(m: Module, src: string): string =
   var adeep: Table[string, tuple[bytes: int64, chain: string]]
   var anyArena = false
   for r in m.routines:
-    aframes[r.name] = (arenaBytes(r.body) + 15) div 16 * 16
+    aframes[r.name] = sizeAlign(arenaBytes(r.body), 16, r.line)
     var calls: HashSet[string]
     collectCalls(r.body, globals, calls)
     var best = (bytes: 0'i64, chain: "")
     for callee in calls:
       if callee in adeep and adeep[callee].bytes > best.bytes:
         best = adeep[callee]
-    adeep[r.name] = (bytes: sadd(aframes[r.name], best.bytes),
+    adeep[r.name] = (bytes: sizeAdd(aframes[r.name], best.bytes, r.line),
       chain: r.name & (if best.chain.len > 0: " -> " & best.chain else: ""))
     if r.kind == ThreadRoutine and adeep[r.name].bytes > 0:
       anyArena = true

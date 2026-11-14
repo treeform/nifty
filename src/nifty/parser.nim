@@ -183,7 +183,9 @@ proc parseTypeCore(p: var Parser): Typ =
         discard p.next
         var hi = p.evalConst(p.parseExpr())
         if not inclusive:
-          hi = hi - 1
+          if hi == low(int64):
+            err(t.line, "empty key range for map")
+          dec hi
         if hi < n:
           err(t.line, "empty key range for map")
         if n < -1_000_000_000 or hi > 1_000_000_000 or
@@ -260,18 +262,22 @@ proc parseTypeCore(p: var Parser): Typ =
     discard p.next
     var hi = p.evalConst(p.parseExpr())
     if not inclusive:
-      hi = hi - 1
+      if hi == low(int64):
+        err(t.line, "empty range type")
+      dec hi
     if hi < lo:
       err(t.line, "empty range type: " & $lo & " .. " & $hi)
     intType(lo, hi)
 
 proc parseType(p: var Parser): Typ =
+  let line = p.peek.line
   result = p.parseTypeCore()
   if p.atOp("?"):
     discard p.next
     if result.kind notin {IntType, ObjectType, StringType}:
       err(p.peek.line, "only ints, objects, and strings can be optional")
     result = optOf(result)
+  discard typeSize(result, line)
 
 proc parseAtom(p: var Parser): Expr =
   let t = p.peek
@@ -580,21 +586,29 @@ proc evalConst(p: Parser, e: Expr): int64 =
         err(e.line, "constant expression overflows int64")
       a - b
     of "*":
-      if a != 0 and b != 0:
-        if (a > 0) == (b > 0):
-          if max(abs(a), abs(b)) > high(int64) div min(abs(a), abs(b)):
-            err(e.line, "constant expression overflows int64")
+      let overflow =
+        if a > 0:
+          (b > 0 and a > high(int64) div b) or
+            (b < 0 and b < low(int64) div a)
+        elif a < 0:
+          (b > 0 and a < low(int64) div b) or
+            (b < 0 and a < high(int64) div b)
         else:
-          if a == low(int64) or b == low(int64) or
-              abs(a) > high(int64) div abs(b):
-            err(e.line, "constant expression overflows int64")
+          false
+      if overflow:
+        err(e.line, "constant expression overflows int64")
       a * b
     of "/":
       if b == 0: err(e.line, "division by zero in const")
+      if a == low(int64) and b == -1:
+        err(e.line, "constant expression overflows int64")
       a div b
     of "%":
       if b == 0: err(e.line, "modulo by zero in const")
-      a mod b
+      if a == low(int64) and b == -1:
+        0
+      else:
+        a mod b
     else:
       err(e.line, "operator not allowed in const expression: " & e.sval)
   else:
@@ -661,6 +675,7 @@ proc parseModule(p: var Parser): Module =
         p.expectNewline()
       if p.peek.kind == DedentToken:
         discard p.next
+      discard typeSize(typ, t.line)
       p.types[name] = typ
       result.types.add TypeDef(name: name, typ: typ, line: t.line)
     of "extern":

@@ -1,0 +1,1 @@
+error_const_divide_min.nifty:1: constant expression overflows int64

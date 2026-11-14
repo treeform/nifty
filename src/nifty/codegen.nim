@@ -513,9 +513,9 @@ proc collectBig(body: seq[Stmt], offs: var Table[string, int64],
   for s in body:
     if s.kind in {VarStmt, LetStmt} and s.typ != nil and
         typeSize(s.typ) > arenaThreshold:
-      off = (off + 7) div 8 * 8
+      off = sizeAlign(off, 8, s.line)
       offs[$s.line & ":" & s.name] = off
-      off = off + typeSize(s.typ)
+      off = sizeAdd(off, typeSize(s.typ), s.line)
       if off > hi:
         hi = off
     if s.kind == BlockStmt:
@@ -1492,14 +1492,14 @@ proc generate*(m: Module, src: string): string =
     var hiWater = 0'i64
     collectBig(r.body, offs, off, hiWater)
     g.bigOffs[r.name] = offs
-    g.frameOf[r.name] = (hiWater + 15) div 16 * 16
+    g.frameOf[r.name] = sizeAlign(hiWater, 16, r.line)
     var callees: HashSet[string]
     collectCallees(r.body, callees)
     var worst = 0'i64
     for c2 in callees:
       if c2 in g.needOf and g.needOf[c2] > worst:
         worst = g.needOf[c2]
-    g.needOf[r.name] = g.frameOf[r.name] + worst
+    g.needOf[r.name] = sizeAdd(g.frameOf[r.name], worst, r.line)
   var anyArena = false
   for r in m.routines:
     if r.kind == ThreadRoutine and g.needOf[r.name] > 0:
@@ -1553,7 +1553,8 @@ proc generate*(m: Module, src: string): string =
       if r.kind == ThreadRoutine and g.needOf[r.name] > 0:
         if r.instances > 1:
           # One arena row per instance, rows padded to keep 16-alignment.
-          let row = (g.needOf[r.name] + 15) div 16 * 16
+          let row = sizeAlign(g.needOf[r.name], 16, r.line)
+          discard sizeMul(row, int64(r.instances), r.line)
           g.put "static _Alignas(16) uint8_t ni_arena_" & r.name & "[" &
             $r.instances & "][" & $row & "];"
         else:

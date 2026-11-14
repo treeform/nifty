@@ -1,0 +1,4 @@
+thread main() =
+  var text: string[9223372036854775807]
+  text.clear()
+  echo text.len

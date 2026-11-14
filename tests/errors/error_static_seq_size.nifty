@@ -1,0 +1,4 @@
+thread main() =
+  var data: seq[1152921504606846976, int]
+  data.add(1)
+  echo data.len

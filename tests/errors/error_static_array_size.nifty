@@ -1,0 +1,4 @@
+thread main() =
+  var data: array[1152921504606846976, int]
+  data[0] = 1
+  echo data[0]

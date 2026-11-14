@@ -26,7 +26,7 @@ type
 
 proc aligned(n, a: int): int =
   ## Rounds storage to its concrete alignment.
-  (n + a - 1) div a * a
+  int(sizeAlign(n, a))
 
 proc layout(g: var Lower, t: Typ): int =
   ## Registers the fixed native representation of a checked type.
@@ -113,6 +113,7 @@ proc layout(g: var Lower, t: Typ): int =
     of TypeVarType:
       raise newException(NiftyError,
         "Internal compiler error: uninstantiated native type " & $t)
+  discard nativeSize(l.bytes, g.line)
   g.plan.layouts[result] = l
 
 proc size(g: var Lower, t: Typ): int =
@@ -261,7 +262,7 @@ proc allocate(g: var Lower, bytes: int, align = 8,
     result = g.emit(IrInstruction(op: OffsetAddressOp,
       offset: int64(g.arena)), [ValueId(3), g.constant(0)], AddressType)
     g.plan.module.functions[g.fn].values[int32(result)].storage = storage
-    g.arena += bytes
+    g.arena = int(sizeAdd(g.arena, bytes, g.line))
     g.highArena = max(g.highArena, g.arena)
   else:
     let slot = g.plan.module.functions[g.fn].slots.len
@@ -452,7 +453,8 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
     bytes = aligned(bytes, if borrowed: 8 else:
       int(g.plan.layouts[g.layout(p.typ)].align))
     offsets.add(bytes)
-    bytes += (if borrowed: 8 else: g.size(p.typ))
+    bytes = int(nativeSize(sizeAdd(bytes,
+      (if borrowed: 8 else: g.size(p.typ))), g.line))
   let argumentType = g.argumentTypes[index]
   let argumentLayout = g.plan.module.storageTypes[argumentType - 1]
   let args = if bytes == 0: g.allocate(0)
@@ -1048,7 +1050,7 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
       bytes = aligned(bytes, int(data.alignment))
       members.add(IrField(name: p.name, storage: storage,
         offset: int32(bytes)))
-      bytes += int(data.byteCount)
+      bytes = int(nativeSize(sizeAdd(bytes, data.byteCount), r.line))
       alignment = max(alignment, int(data.alignment))
     let arguments = g.plan.recordStorage("$args." & $i & "." & r.name,
       members, aligned(bytes, alignment), alignment)
@@ -1072,7 +1074,8 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
       alignment: int32(l.align), storage: g.storage(v.typ)))
     if v.typ.kind == LockType: g.plan.lockOffsets.add(off)
     if v.typ.kind == ChannelType: g.plan.channelOffsets.add(off)
-    g.plan.globalBytes += int(l.bytes)
+    g.plan.globalBytes = int(nativeSize(
+      sizeAdd(g.plan.globalBytes, l.bytes), v.line))
   # Runtime metadata keeps its declaration-order ABI and reverses at exit.
   for i in countdown(source.semantics.globalDrops.high, 0):
     let owner = source.semantics.bindings[source.semantics.globalDrops[i]]
@@ -1108,7 +1111,8 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
           g.plan.module.functions[g.fn].values[int32(bound)].storage =
             g.storage(p.typ)
         g.bindings[p.binding] = Binding(typ: p.typ, address: bound)
-        bytes += (if borrowed: 8 else: g.size(p.typ))
+        bytes = int(nativeSize(sizeAdd(bytes,
+          (if borrowed: 8 else: g.size(p.typ))), g.line))
       if g.routine.externLib == "":
         g.statements(g.routine.body, g.routine.bodyScope)
     if g.live:
@@ -1130,7 +1134,7 @@ proc lowerNative*(source: Module, filename = ""): NativePlan =
     var child = 0
     for callee in g.calls[fn]: child = max(child, total(callee))
     visiting.excl(fn)
-    result = g.frames[fn] + child
+    result = int(sizeAdd(g.frames[fn], child))
     totals[fn] = result
   for i, r in source.routines:
     if r.kind == ThreadRoutine:
