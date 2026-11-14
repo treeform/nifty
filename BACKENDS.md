@@ -18,6 +18,12 @@ This builds `nifty`. On an ARM64 Mac it also builds the
 Nim and a C compiler are bootstrap dependencies for building these tools once.
 Compiling individual Nifty programs with a native backend does not invoke them.
 
+The C backend uses GCC or Clang compatible C compilers. Binary FFI declarations
+use their C99-compatible `__asm__` labels and `__USER_LABEL_PREFIX__` macro to
+bind private C identifiers to the requested external symbols. This keeps the
+declared binary shapes independent of prototypes in runtime headers and lets
+the C compiler provide the target's symbol prefix.
+
 ## Select a backend
 
 ```sh
