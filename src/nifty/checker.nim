@@ -361,7 +361,7 @@ proc foreignWritable(t: Typ): bool =
       elif unsigned: (1'i64 shl bits) - 1
       else: (1'i64 shl (bits - 1)) - 1
     t.rlo == lo and t.rhi == hi
-  of FloatType:
+  of FloatType, OpaqueType:
     true
   of ArrayType:
     foreignWritable(t.elem)
@@ -866,7 +866,7 @@ proc dispatchKey(t: Typ): string =
   of QueueType: "a queue"
   of SetType: "a set"
   of DenseMapType, SparseMapType: "a map"
-  of ObjectType: t.name
+  of ObjectType, OpaqueType: t.name
   else: ""
 
 proc declTypeOf(c: Ctx, e: Expr): Typ =
@@ -1443,6 +1443,12 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       rejectOpt(b, e.kids[1])
       var fa = a
       var fb = b
+      if a.kind == OpaqueType or b.kind == OpaqueType:
+        if e.sval notin ["==", "!="] or not typeEq(a, b):
+          err(e.line, "opaque handles support only == and != with the same " &
+            "opaque type, got " & $a & " and " & $b)
+        e.typ = Typ(kind: BoolType)
+        return e.typ
       if fa.kind == FloatType or fb.kind == FloatType:
         # Float literals take the width of the other side.
         if coerceFloatLit(e.kids[1], fa):
@@ -1585,6 +1591,9 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
       e.typ = Typ(kind: BoolType)
       return e.typ
     rejectOpt(base, e.kids[0])
+    if base.kind == OpaqueType and e.sval == "isNull":
+      e.typ = Typ(kind: BoolType)
+      return e.typ
     if base.kind == StringType and e.sval == "toInt":
       # Parse a decimal number, or none: absence is a value to consult.
       e.typ = optOf(intType())
@@ -3267,7 +3276,7 @@ proc mangleTyp(t: Typ): string =
     of SeqType:
       (if t.dynamic: "seqdyn_" else: "seq" & $t.len & "_") &
         mangleTyp(t.elem)
-    of ObjectType: t.name
+    of ObjectType, OpaqueType: t.name
     of ArrayType: "arr" & $t.len & "_" & mangleTyp(t.elem)
     else: "x"
   if t.opt:
@@ -3332,7 +3341,7 @@ proc typToToks(t: Typ, line: int, gname: string): seq[Token] =
     if not t.dynamic:
       result.add @[Token(kind: IntToken, text: $t.len, line: line), op(",")]
     result.add typToToks(t.elem, line, gname) & @[op("]")]
-  of ObjectType:
+  of ObjectType, OpaqueType:
     result = @[idt(t.name)]
   of ArrayType:
     result = @[idt("array"), op("["),
@@ -3908,7 +3917,7 @@ proc check*(m: Module) =
           err(r.line, "extern '" & r.name &
             "' cannot access owning descriptors; pass string bytes instead")
         case pm.typ.kind
-        of IntType, FloatType:
+        of IntType, FloatType, OpaqueType:
           discard # by value (or by pointer when var)
         of StringType, ArrayType:
           discard # a data pointer; var makes it writable
@@ -3946,9 +3955,12 @@ proc check*(m: Module) =
           if not found:
             err(r.line, "extern '" & r.name & "': boundedBy '" &
               pm.boundedBy & "' needs an integer count parameter or const")
-      if r.ret != nil and r.ret.kind notin {IntType, FloatType}:
-        err(r.line, "extern '" & r.name & "' can only return ints or " &
-          "floats (fill a var buffer for data)")
+      if r.ret != nil and r.ret.opt:
+        err(r.line, "extern '" & r.name & "': optionals cannot cross " &
+          "the C boundary")
+      if r.ret != nil and r.ret.kind notin {IntType, FloatType, OpaqueType}:
+        err(r.line, "extern '" & r.name & "' can only return ints, floats, " &
+          "or opaque handles (fill a var buffer for data)")
       if r.ret != nil and r.ret.kind == IntType and
           not foreignWritable(r.ret):
         err(r.line, "extern '" & r.name &

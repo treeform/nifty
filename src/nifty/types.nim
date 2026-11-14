@@ -9,7 +9,8 @@ type
     QueueType, DenseMapType, SparseMapType, # dense map[range, V]; sorted sparse map[N, K, V]
     ChannelType, # channel[N, T]: a blocking bounded queue (the semaphore system)
     TypeVarType, # a generic $T waiting to be bound at instantiation
-    FloatType # IEEE float32/float64: data values, outside the proof engine
+    FloatType, # IEEE float32/float64: data values, outside the proof engine
+    OpaqueType # nominal foreign pointer; only null testing and equality
   Field* = object
     name*: string
     typ*: Typ
@@ -18,7 +19,7 @@ type
     len*: int64          # ArrayType/SeqType/StringType: capacity
     dynamic*: bool       # Growable seq/string: len is not a static capacity.
     elem*: Typ           # ArrayType/SeqType; SetType: the range element type
-    name*: string        # ObjectType
+    name*: string        # ObjectType/OpaqueType: nominal identity
     fields*: seq[Field]  # ObjectType
     val*: Typ            # DenseMapType/SparseMapType: the value type
     rlo*, rhi*: int64    # IntType: declared range; full range = plain int
@@ -166,7 +167,7 @@ const mutMethods* = ["add", "push", "pop", "clear", "incl", "excl",
 # uniform call syntax - builtins keep their meaning on every type.
 const builtinMethods* = @mutMethods & @["or", "get", "contains",
   "startsWith", "endsWith", "find", "findByte", "toInt",
-  "len", "ok", "lo", "hi"]
+  "len", "ok", "lo", "hi", "isNull"]
 
 proc instances*(r: Routine): int =
   ## How many OS threads a thread declaration starts (thread 4 w()).
@@ -271,6 +272,7 @@ proc typeSize*(t: Typ, line = 0): int64 =
   case t.kind
   of BoolType: 1
   of IntType: (if t.width > 0: t.width else: 8)
+  of OpaqueType: 8
   of FloatType: t.width
   of ArrayType: sizeMul(t.len, typeSize(t.elem, line), line)
   of SeqType:
@@ -344,7 +346,7 @@ proc typeEq*(a, b: Typ): bool =
     return a.len == b.len and typeEq(a.elem, b.elem) and
       sameStorage(a.elem, b.elem) and
       typeEq(a.val, b.val) and sameStorage(a.val, b.val)
-  if a.kind == ObjectType:
+  if a.kind in {ObjectType, OpaqueType}:
     return a.name == b.name
   if a.kind == ChannelType:
     return false # channels are never copied or compared
@@ -379,7 +381,7 @@ proc `$`*(t: Typ): string =
   of ChannelType: "channel[" & t.sizeStr & ", " & $t.elem & "]"
   of DenseMapType: "map[" & $t.elem & ", " & $t.val & "]"
   of SparseMapType: "map[" & $t.len & ", " & $t.elem & ", " & $t.val & "]"
-  of ObjectType: t.name
+  of ObjectType, OpaqueType: t.name
   of TypeVarType: "$" & t.gname
 
 proc bigRet*(t: Typ): bool =

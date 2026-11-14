@@ -274,8 +274,9 @@ proc parseType(p: var Parser): Typ =
   result = p.parseTypeCore()
   if p.atOp("?"):
     discard p.next
-    if result.kind notin {IntType, ObjectType, StringType}:
-      err(p.peek.line, "only ints, objects, and strings can be optional")
+    if result.kind notin {IntType, ObjectType, StringType, OpaqueType}:
+      err(p.peek.line, "only ints, objects, strings, and opaque handles " &
+        "can be optional")
     result = optOf(result)
   discard typeSize(result, line)
 
@@ -643,6 +644,21 @@ proc parseModule(p: var Parser): Module =
         err(t.line, "globals are zero-initialized; initializers are not allowed")
       result.globals.add GlobalDef(name: name, typ: typ, line: t.line)
       p.expectNewline()
+    of "type":
+      discard p.next
+      let name = p.expectIdent()
+      if name in p.types or name in p.consts or
+          name in ["int", "bool", "Lock", "array", "seq", "string", "set",
+            "queue", "channel", "map", "int8", "uint8", "char", "int16",
+            "uint16", "int32", "uint32", "int64", "uint64", "float32",
+            "float64", "opaque"]:
+        err(t.line, "duplicate or reserved type name: '" & name & "'")
+      p.expectOp("=")
+      p.expectKeyword("opaque")
+      p.expectNewline()
+      let typ = Typ(kind: OpaqueType, name: name)
+      p.types[name] = typ
+      result.types.add TypeDef(name: name, typ: typ, line: t.line)
     of "object":
       # object Name = with fields on indented lines. A type can only refer
       # to types declared above it, so recursive types (and thus unknown
@@ -821,7 +837,7 @@ proc parseModule(p: var Parser): Module =
       result.routines.add r
     else:
       err(t.line, "unknown declaration: '" & t.text &
-        "' (expected const, var, object, func, proc, thread, or extern; " &
+        "' (expected const, var, type, object, func, proc, thread, or extern; " &
         "import must be at the top of the file)")
 
 proc parse*(toks: seq[Token]): Module =

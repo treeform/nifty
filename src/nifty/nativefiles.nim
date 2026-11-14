@@ -85,6 +85,12 @@ proc validateNative*(program: NativeProgram) =
     if layout.bytes < 0 or layout.bytes > MaxNativeStorage or
         layout.align <= 0 or layout.align > 16 or layout.capacity < 0:
       raise newException(NiftyError, "invalid native type layout")
+    if layout.kind == OpaqueType and
+        (layout.align != 8 or layout.dynamic or layout.owned or
+        (not layout.optional and layout.bytes != 8) or
+        (layout.optional and
+          (layout.bytes != 16 or layout.okOffset != 8))):
+      raise newException(NiftyError, "invalid native opaque handle layout")
     if layout.dynamic and
         (layout.kind notin {StringType, SeqType} or
         not layout.owned or layout.dataOffset != 16 or

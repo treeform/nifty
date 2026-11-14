@@ -67,6 +67,7 @@ proc mangle(t: Typ): string =
     "_" & mangle(t.val)
   of SparseMapType: "m" & $t.len & "_" & mangle(t.elem) & "_" & mangle(t.val)
   of ObjectType: "o" & t.name
+  of OpaqueType: "h" & t.name
   else: "x"
 
 proc cBase(t: Typ): string =
@@ -74,6 +75,7 @@ proc cBase(t: Typ): string =
     return "NS_" & mangle(t)
   case t.kind
   of BoolType: "bool"
+  of OpaqueType: "void *"
   of FloatType: (if t.width == 4: "float" else: "double")
   of IntType:
     if t.width == 0 or (t.width == 8 and t.rlo < 0): "int64_t"
@@ -187,7 +189,7 @@ proc genExpr(g: var Gen, e: Expr): string =
     of "and": "(" & a & " && " & b & ")"
     of "or": "(" & a & " || " & b & ")"
     else:
-      if isFloat:
+      if isFloat or e.kids[0].typ.kind == OpaqueType:
         "(" & a & " " & e.sval & " " & b & ")"
       else:
         "((int64_t)" & a & " " & e.sval & " (int64_t)" & b & ")"
@@ -225,6 +227,8 @@ proc genExpr(g: var Gen, e: Expr): string =
   of FieldExpr:
     if e.isOptOk:
       g.genExpr(e.kids[0]) & ".m_ok"
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind == OpaqueType:
+      "(" & g.genExpr(e.kids[0]) & " == NULL)"
     elif e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
       "ni_ftoi(" & g.genExpr(e.kids[0]) & ")"
     elif e.sval == "toInt" and e.kids[0].typ != nil and
@@ -340,7 +344,7 @@ proc tempFor(g: var Gen, e: Expr, val: string): string =
   let ctype =
     if e.typ == nil: "int64_t"
     elif e.typ.opt: cBase(e.typ)
-    elif e.typ.kind == FloatType: cBase(e.typ)
+    elif e.typ.kind in {FloatType, OpaqueType}: cBase(e.typ)
     elif e.typ.kind == BoolType: "bool"
     elif e.typ.kind in {ObjectType, SeqType, StringType, SetType, QueueType,
       DenseMapType, SparseMapType}: cBase(e.typ)
@@ -374,6 +378,8 @@ proc genOrdered(g: var Gen, e: Expr): string =
       g.genPathOrdered(e)
     elif e.isOptOk:
       g.tempFor(e, g.genOrdered(e.kids[0]) & ".m_ok")
+    elif e.kids[0].typ != nil and e.kids[0].typ.kind == OpaqueType:
+      g.tempFor(e, "(" & g.genOrdered(e.kids[0]) & " == NULL)")
     elif e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
       g.tempFor(e, "ni_ftoi(" & g.genOrdered(e.kids[0]) & ")")
     elif e.sval == "toInt" and e.kids[0].typ != nil and
@@ -422,7 +428,7 @@ proc genOrdered(g: var Gen, e: Expr): string =
     else:
       let a = g.genOrdered(e.kids[0])
       let b = g.genOrdered(e.kids[1])
-      if e.kids[0].typ != nil and e.kids[0].typ.kind == FloatType:
+      if e.kids[0].typ != nil and e.kids[0].typ.kind in {FloatType, OpaqueType}:
         "(" & a & " " & e.sval & " " & b & ")"
       else:
         "((int64_t)" & a & " " & e.sval & " (int64_t)" & b & ")"

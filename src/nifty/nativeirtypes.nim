@@ -90,7 +90,7 @@ proc layoutStorage*(plan: var NativePlan, mapping: var seq[int32],
       role: RuntimeField))
   else:
     case data.kind
-    of IntType, FloatType, types.BoolType:
+    of IntType, FloatType, OpaqueType, types.BoolType:
       let scalar = case data.kind
         of FloatType:
           if data.bytes == 4: Float32Type else: Float64Type

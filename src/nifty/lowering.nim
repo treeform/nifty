@@ -50,7 +50,7 @@ proc layout(g: var Lower, t: Typ): int =
     l.bytes = int64(aligned(int(l.bytes) + 1, int(l.align)))
   else:
     case t.kind
-    of IntType, FloatType:
+    of IntType, FloatType, OpaqueType:
       l.bytes = if t.width > 0: t.width else: 8
       l.align = l.bytes
     of BoolType:
@@ -143,7 +143,8 @@ proc scalar(t: Typ): IrType =
 
 proc aggregate(t: Typ): bool =
   ## Reports values represented by a storage address.
-  t != nil and (t.opt or t.kind notin {IntType, FloatType, types.BoolType})
+  t != nil and (t.opt or
+    t.kind notin {IntType, FloatType, OpaqueType, types.BoolType})
 
 proc operands(g: var Lower, values: openArray[ValueId]): Span =
   ## Appends an explicit operand range.
@@ -688,7 +689,9 @@ proc expression(g: var Lower, e: Expr): ValueId =
       result = g.routineCall(e)
   of FieldExpr:
     let bt = e.kids[0].typ
-    if bt.kind == FloatType:
+    if bt.kind == OpaqueType and e.sval == "isNull":
+      result = g.compare(EqualComparison, g.expression(e.kids[0]), g.constant(0))
+    elif bt.kind == FloatType:
       result = g.floatInt(g.expression(e.kids[0]))
     elif e.sval == "toInt" and bt.kind == StringType:
       result = g.methodCall(e)

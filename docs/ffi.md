@@ -47,5 +47,42 @@ and capacity metadata private. Foreign-writable objects and arrays cannot
 contain strings, even fixed strings: their nested layouts include length
 metadata that a raw write could invalidate. Pass individual string payloads
 through bounded string parameters instead. Plain objects and arrays made
-from full-range ABI integers and floats remain writable. Foreign routines
-can return only ABI integers and floats, not container or object layouts.
+from full-range ABI integers, floats, and opaque handles remain writable. Foreign routines
+can return ABI integers, floats, and opaque handles, but no container or
+object layouts.
+
+
+## Opaque handles
+
+Declare each foreign pointer family as a nominal type:
+
+```nifty
+type CFile = opaque
+
+extern "libc":
+  proc tmpfile(): CFile
+  proc fclose(file: CFile): int32
+
+func openTemporary(): CFile? =
+  let file = tmpfile()
+  if file.isNull:
+    return none
+  return file
+```
+
+An opaque handle has pointer-sized storage and passes through the C ABI as
+`void *`; `var CFile` passes as `void **`. Its default value is null, and
+`.isNull` is a pure boolean query. Handles can be copied, stored in ordinary
+objects and containers, and compared with `==` or `!=` against the same
+opaque type. Distinct declarations remain distinct types even though their
+binary representations match.
+
+Nifty code cannot construct non-null handles, convert them to or from
+integers, perform pointer arithmetic, dereference them, or compare their
+ordering. Foreign declarations remain responsible for the actual pointer
+contract, including lifetime and ownership. Handle copies do not automatically
+close or free a foreign resource.
+
+A Nifty wrapper can return `CFile?`, using the ordinary payload and presence
+flag representation. Optional values cannot cross the foreign ABI directly;
+foreign routines return a plain handle, then wrappers test `.isNull`.

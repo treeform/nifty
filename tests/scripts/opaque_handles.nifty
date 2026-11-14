@@ -1,0 +1,56 @@
+type CFile = opaque
+type CharPointer = opaque
+
+object FileSlot =
+  marker: uint8
+  handle: CFile
+
+extern "libc":
+  proc tmpfile(): CFile
+  proc fclose(file: CFile): int32
+  proc strtod(text: string[4], ending: var CharPointer): float64
+
+func present(file: CFile): CFile? =
+  if file.isNull:
+    return none
+  return file
+
+func copyHandle(file: $T): $T =
+  return file
+
+func endingHandle(): CharPointer =
+  var handle: CharPointer
+  handle = handle
+  return handle
+
+func nullFile(): CFile =
+  var file: CFile
+  file = file
+  return file
+
+thread main() =
+  let empty = nullFile()
+  echo empty.isNull
+  let file = tmpfile()
+  echo not file.isNull
+  let copied = copyHandle(file)
+  let otherKind = copyHandle(endingHandle())
+  echo otherKind.isNull
+  echo file == copied, " ", file != empty
+  let maybe = present(file)
+  echo maybe.ok
+  if maybe.ok:
+    echo maybe == file
+  let absent = present(empty)
+  echo absent.ok, " ", absent.or(empty).isNull
+  var slot: FileSlot
+  slot.marker = 9
+  slot.handle = file
+  let snapshot = slot
+  echo snapshot.marker, " ", snapshot.handle == file
+  var handles: seq[2, CFile]
+  handles.add(file)
+  echo handles[0] == copied
+  var ending: CharPointer
+  echo strtod("42\0", ending), " ", not ending.isNull
+  echo fclose(file)
