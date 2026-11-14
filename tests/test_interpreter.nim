@@ -2,7 +2,7 @@
 ## Run: nim r tests/test_interpreter.nim /absolute/path/to/nifty [--opt:none|speed]
 import
   std/[algorithm, os, osproc, sha1, streams, strtabs, strutils, times]
-import fixtures
+import fixtures, processstreams
 
 type
   Result = tuple[output: string, code: int]
@@ -10,7 +10,7 @@ type
 
 proc drain(input: tuple[stream: Stream, output: ptr string]) {.thread.} =
   ## Drains output concurrently while the parent enforces a deadline.
-  input.output[] = input.stream.readAll()
+  input.output[] = input.stream.readToEnd()
 
 proc run(compiler, source, optimization, work: string): Result =
   ## Executes a source file without compiler tools on the executable path.

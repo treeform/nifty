@@ -1,5 +1,6 @@
 ## Checks direct interpretation with no compiler or writable source directory.
-import std/[os, osproc, streams, strutils]
+import std/[os, osproc, strutils]
+import processstreams
 
 if paramCount() != 1:
   quit("Usage: test_interpretercli /absolute/path/to/nifty", 1)
@@ -18,7 +19,7 @@ proc invoke(arguments: seq[string]): tuple[output: string, status: int] =
   ## Executes the already built interpreter with an empty executable path.
   let process = startProcess(compiler, args = arguments,
     options = {poStdErrToStdOut})
-  result.output = process.outputStream.readAll()
+  result.output = process.outputStream.readToEnd()
   result.status = process.waitForExit()
   process.close()
 
@@ -34,7 +35,10 @@ try:
         @[source, "--backend:interpret"]]:
       let executed = invoke(arguments & @["--opt:" & optimization])
       doAssert executed.status == 0, executed.output
-      doAssert executed.output == "interpreter CLI passed\n", executed.output
+      doAssert executed.output == "interpreter CLI passed\n",
+        "Unexpected interpreter output: " & executed.output.escape() &
+        " (bytes=" & $executed.output.len & ", optimization=" & optimization &
+        ", arguments=" & $arguments & ")"
   let emitted = invoke(@["interpret", source, "--emit-ir"])
   doAssert emitted.status == 0, emitted.output
   doAssert emitted.output.len > 0
