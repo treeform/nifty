@@ -1,0 +1,1 @@
+error_for_trip_overflow.nifty:4: cannot prove '-' does not overflow: int - 1; narrow the ranges or guard first
