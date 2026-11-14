@@ -160,6 +160,10 @@ for mode in [nearest, downward, upward, towardZero]:
   doAssert setRounding(mode) == 0
   var specialized = plan(Float64Type)
   discard specialized.specializeNativeMaths()
+  for function in specialized.module.functions:
+    for item in function.instructions:
+      if item.op == ConvertOp:
+        doAssert item.conversion == BitcastConversion
   for value in [2.0, 3.0, 0.1, 1.23456789e300]:
     var
       input = value

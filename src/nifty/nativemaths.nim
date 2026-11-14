@@ -52,7 +52,8 @@ proc emitValue(function: var IrFunction, blockIndex: int,
   function.emit(blockIndex, IrInstruction(op: op,
     results: Span(first: int32(result), count: 1),
     arguments: function.arguments(values), bits: bits,
-    comparison: comparison, location: location))
+    comparison: comparison, conversion: BitcastConversion,
+    location: location))
 
 proc edge(function: var IrFunction, target: int,
     values: openArray[ValueId] = []): int32 =
