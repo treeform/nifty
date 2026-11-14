@@ -21,6 +21,9 @@ Spec = importlib.util.spec_from_file_location("ray_benchmark", Root / "benchmark
 Ray = importlib.util.module_from_spec(Spec)
 Spec.loader.exec_module(Ray)
 CFlags = ["-O2", "-pthread", "-fno-strict-aliasing", "-ffp-contract=off"]
+TimingScope = ("Each sample starts a fresh process; the render interval includes "
+               "first-use execution and translation. Per-frame times are the "
+               "complete batch interval divided by its frame count.")
 
 
 def sha256(path):
@@ -124,6 +127,7 @@ def measure(size, repeat, options, host, variants, warmups, samples):
     result["process_wall_ns"] = Ray.summarize(result["process_wall_ns"])
   (options.output / f"{size}.rgb").write_bytes(expected)
   return {"size": size, "repeat": repeat, "warmups": warmups, "samples": samples,
+          "render_timing_scope": TimingScope,
           "correctness": "independent golden and exact RGB" if reference is not None
                          else "exact RGB across all variants; independent golden unavailable",
           "independent_sha256": hashlib.sha256(reference).hexdigest()
@@ -209,8 +213,10 @@ def main(arguments=None):
               (Root / "benchmarks/reference/manifest.json").read_text()),
             "checks": checks, "measurements": measurements}
   (options.output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
+  print(TimingScope)
   for measured in measurements:
-    print(f"{measured['size']}x{measured['size']}: {measured['correctness']}")
+    print(f"{measured['size']}x{measured['size']}, "
+          f"{measured['repeat']} frames/process: {measured['correctness']}")
     for result in measured["variants"]:
       print(f"  {result['label']}: {result['render_ns_per_frame']['median'] / 1e6:.3f} ms/frame")
   print(f"Raw samples, exact build commands, hashes: {options.output / 'results.json'}")

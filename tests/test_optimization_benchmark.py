@@ -62,6 +62,8 @@ def testMeasurements():
         result = Comparison.measure(1, 1, options, {}, variants, 1, 5)
         assert command.call_count == 18
       assert result["independent_sha256"] == result["pixel_sha256"]
+      assert "fresh process" in result["render_timing_scope"]
+      assert "first-use" in result["render_timing_scope"]
       assert result["round_order"][:3] == [
         ["baseline-arm64", "candidate-arm64", "c-arm64"],
         ["candidate-arm64", "c-arm64", "baseline-arm64"],
