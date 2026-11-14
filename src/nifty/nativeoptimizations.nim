@@ -1,5 +1,5 @@
 ## Prepares checked native IR while keeping runtime function indices stable.
-import nativeplans, backend/[irchecks, irinlines, iroptimizations]
+import nativeplans, nativemaths, backend/[irchecks, irinlines, iroptimizations]
 
 type NativeOptimization* = enum
   NoOptimization, SpeedOptimization
@@ -10,6 +10,7 @@ proc optimizeNative*(plan: NativePlan,
   result = plan
   verifyIr(result.module)
   if optimization == SpeedOptimization:
+    discard result.specializeNativeMaths()
     optimizeIr(result.module)
     var config = defaultInlineConfig()
     for round in 0 ..< 3:
