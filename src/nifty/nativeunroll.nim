@@ -214,3 +214,4 @@ proc unrollNative*(source: Module,
     result.routines.add(copied)
   prepareSemantics(result)
   result.semantics.locks = source.semantics.locks
+  result.semantics.channelProgress = source.semantics.channelProgress

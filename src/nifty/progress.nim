@@ -153,12 +153,21 @@ proc body(a: Analysis, statements: seq[Stmt]): Protocol =
       if iteration.unknown or iteration.stopped or iteration.repeatAt >= 0:
         result.unknown = true
       elif iteration.actions.len > 0:
-        if s.lo.rlo != s.lo.rhi or s.hi.rlo != s.hi.rhi or
-            s.tripBound > MaxProtocolSteps:
+        if s.lo.rlo != s.lo.rhi or s.hi.rlo != s.hi.rhi:
           result.unknown = true
         else:
-          for i in 0 ..< int(s.tripBound):
-            result.append(iteration.actions)
+          let first = s.lo.rlo
+          let last = s.hi.rlo
+          if last < first or (last == first and not s.inclusive):
+            discard
+          else:
+            let distance = cast[uint64](last) - cast[uint64](first)
+            if distance > uint64(MaxProtocolSteps) or
+                (s.inclusive and distance == uint64(MaxProtocolSteps)):
+              result.unknown = true
+            else:
+              for i in 0 ..< int(distance) + ord(s.inclusive):
+                result.append(iteration.actions)
     of WhileStmt, ForEachStmt:
       let iteration = a.body(s.body)
       if iteration.unknown or iteration.stopped or iteration.actions.len > 0:
@@ -205,8 +214,18 @@ proc checkProgress*(m: Module): string =
   var a: Analysis
   for routine in m.routines:
     a.routines[routine.name] = routine
-    a.foreign[routine.name] = if routine.externLib.len > 0: routine.name
-      else: a.foreignCalls(routine.body)
+    if routine.externLib.len > 0:
+      a.foreign[routine.name] = routine.name
+  # Generic instances can precede callees in the flattened module.
+  var changed = true
+  while changed:
+    changed = false
+    for routine in m.routines:
+      if routine.name notin a.foreign:
+        let effect = a.foreignCalls(routine.body)
+        if effect.len > 0:
+          a.foreign[routine.name] = effect
+          changed = true
   for routine in m.routines:
     a.checkLocks(routine.body)
   var

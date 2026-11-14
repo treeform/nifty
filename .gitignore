@@ -12,6 +12,7 @@
 /tests/test_memory
 /tests/test_semantics
 /tests/test_progress
+/tests/test_arithmeticproofs
 /tests/tests
 /tests/nifty_t
 /nimcache/

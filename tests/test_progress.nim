@@ -1,7 +1,7 @@
 ## Checks channel progress and foreign blocking before backend generation.
 
 import std/strutils
-import ../src/nifty/[checker, common, loader, parser, report, types]
+import ../src/nifty/[checker, common, loader, nativeunroll, parser, report, types]
 
 proc checked(source: string): Module =
   ## Runs a source fixture through the common semantic checker.
@@ -62,6 +62,16 @@ thread consumer() =
   consume()
 """, "channel protocol can deadlock")
 
+rejects("""
+const Bottom = -9223372036854775807 - 1
+var jobs: channel[1, int]
+thread producer() =
+  for i in Bottom ..< Bottom:
+    jobs.send(i)
+thread consumer() =
+  echo jobs.recv()
+""", "channel protocol can deadlock")
+
 for call in ["wait()", "indirect()"]:
   rejects("""
 extern "libc":
@@ -74,6 +84,18 @@ thread 2 worker() =
     echo 1
     """ & call & "\n", "may block while lock 'gate' is held")
 
+rejects("""
+proc invoke(value: $T) =
+  wait()
+extern "libc":
+  proc wait()
+var gate: Lock
+thread 2 worker() =
+  with gate:
+    echo 1
+    invoke(1)
+""", "may block while lock 'gate' is held")
+
 let finite = checked("""
 var jobs: channel[1, int]
 thread producer() =
@@ -85,6 +107,8 @@ thread consumer() =
 """)
 doAssert "no blocked channel state" in finite.semantics.channelProgress
 doAssert "channels:" in buildReport(finite, "finite.nifty")
+doAssert unrollNative(finite).semantics.channelProgress ==
+  finite.semantics.channelProgress
 
 let counted = checked("""
 var jobs: channel[1, int]
