@@ -22,7 +22,7 @@ type
 
 proc defaultInlineConfig*(): IrInlineConfig =
   ## Bounds duplication while admitting small helpers with branches and loops.
-  IrInlineConfig(maxCalleeInstructions: 384, maxCalleeBlocks: 96,
+  IrInlineConfig(maxCalleeInstructions: 768, maxCalleeBlocks: 192,
     maxCalleeSlots: 128, maxFunctionInstructions: 8192,
     maxFunctionBlocks: 512, maxFunctionSlots: 1024,
     maxFunctionGrowth: 8, maxModuleGrowth: 100000, maxCalls: 4096)
