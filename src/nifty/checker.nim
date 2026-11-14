@@ -3520,6 +3520,60 @@ proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string =
   e.sval = mangled
   mangled
 
+proc orderRoutines(routines: seq[Routine]): seq[Routine] =
+  ## Restores callee-first order after deferred generic instantiation.
+  var
+    indices: Table[string, int]
+    active, finished: HashSet[string]
+    ordered: seq[Routine]
+  for i, routine in routines:
+    indices[routine.name] = i
+
+  proc visit(name: string)
+
+  proc expression(e: Expr) =
+    ## Visits resolved calls in a checked expression.
+    if e.isNil:
+      return
+    for child in e.kids:
+      expression(child)
+    if e.kind == CallExpr:
+      visit(e.sval)
+
+  proc body(statements: seq[Stmt]) =
+    ## Includes calls made implicitly by custom resource hooks.
+    for s in statements:
+      for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
+        expression(e)
+      for e in s.args:
+        expression(e)
+      if s.kind == WithStmt and s.typ.kind != LockType:
+        visit("start")
+        visit("end")
+      body(s.body)
+      for branch in s.elifs:
+        expression(branch.cond)
+        body(branch.body)
+      body(s.elseBody)
+
+  proc visit(name: string) =
+    ## Appends each routine only after all of its resolved callees.
+    if name notin indices or name in finished:
+      return
+    let routine = routines[indices[name]]
+    if name in active:
+      err(routine.line, "recursion is not allowed: call cycle involving '" &
+        name & "'")
+    active.incl(name)
+    body(routine.body)
+    active.excl(name)
+    finished.incl(name)
+    ordered.add(routine)
+
+  for routine in routines:
+    visit(routine.name)
+  ordered
+
 proc check*(m: Module) =
   ## Check the module and publish its shared semantic plan on success.
   m.semantics = nil
@@ -3894,7 +3948,7 @@ proc check*(m: Module) =
         flat.add inst
     else:
       flat.add r
-  m.routines = flat
+  m.routines = orderRoutines(flat)
 
   # Smallest scope for globals (Power of 10, rule 6): a global is only
   # honest if its width is needed - by several routines, or by state
