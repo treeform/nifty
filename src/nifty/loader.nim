@@ -41,7 +41,10 @@ proc spliceImport(ld: var Loader, name: string, line: int): seq[Token] =
   var sub = tokenize(readFile(canon), base)
   if sub.len > 0 and sub[^1].kind == EofToken:
     sub.setLen(sub.len - 1)
+  let parent = ld.dir
+  ld.dir = canon.parentDir
   result = ld.processImports(sub)
+  ld.dir = parent
   discard ld.stack.pop
   discard ld.names.pop
 
@@ -50,7 +53,7 @@ proc processImports(ld: var Loader, toks: seq[Token]): seq[Token] =
   ## place; everything after the imports passes through untouched.
   var i = 0
   while atIdent(toks, i, "import"):
-    if i + 1 >= toks.len or toks[i + 1].kind != IdentToken:
+    if i + 1 >= toks.len or toks[i + 1].kind notin {IdentToken, StrToken}:
       err(toks[i].line, "import needs a module name (import mathmod)")
     let name = toks[i + 1].text
     let line = toks[i].line

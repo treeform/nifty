@@ -64,6 +64,11 @@ amalgamation model, and in nifty it is not even a trade-off, because
 every proof (thread ownership, lock inference, arenas, WCET) is a
 whole-program analysis — separate compilation was never possible.
 
+Quoted paths select modules in other directories, for example
+`import "../lib/json"`. Omit the `.nifty` extension. Each module resolves
+its own imports relative to its directory, and different paths to the same
+file still import it only once.
+
 - Imports come before any declaration; the import graph must be a DAG
   (a cycle is a compile error — the no-recursion principle, one level
   up). Splice order is import order, so declare-before-use holds across

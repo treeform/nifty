@@ -1,0 +1,213 @@
+import jsontypes
+
+func jsonStringHex(byte: int): int =
+  # Returns one hexadecimal digit, or minus one.
+  if byte >= 48 and byte <= 57:
+    return byte - 48
+  if byte >= 65 and byte <= 70:
+    return byte - 55
+  if byte >= 97 and byte <= 102:
+    return byte - 87
+  return -1
+
+proc jsonStringQuad(text: string, position: var int): int? =
+  # Reads exactly four hexadecimal digits without unchecked offsets.
+  var cursor = position
+  var value: 0 .. 65535 = 0
+  for digitIndex in 0 ..< 4:
+    if cursor < 0:
+      return none
+    if cursor >= text.len:
+      return none
+    let digit = jsonStringHex(text[cursor])
+    if digit < 0 or digit > 15:
+      return none
+    if value > 4095:
+      return none
+    value = value * 16 + digit
+    if cursor >= 9223372036854775807:
+      return none
+    cursor = cursor + 1
+  position = cursor
+  return value
+
+proc jsonStringEncode(output: var string, scalar: 0 .. 1114111): bool =
+  # Encodes a validated Unicode scalar as UTF-8 bytes.
+  if scalar <= 127:
+    return output.addByte(scalar)
+  if scalar <= 2047:
+    if not output.addByte(192 + scalar / 64):
+      return false
+    return output.addByte(128 + scalar % 64)
+  if scalar <= 65535:
+    if not output.addByte(224 + scalar / 4096):
+      return false
+    if not output.addByte(128 + scalar / 64 % 64):
+      return false
+    return output.addByte(128 + scalar % 64)
+  if not output.addByte(240 + scalar / 262144):
+    return false
+  if not output.addByte(128 + scalar / 4096 % 64):
+    return false
+  if not output.addByte(128 + scalar / 64 % 64):
+    return false
+  return output.addByte(128 + scalar % 64)
+
+proc jsonStringScanBody(text: string, start: int, output: var string, error: var JsonError): int? =
+  # Scans strict Unicode JSON, rejecting malformed UTF-8 and surrogates.
+  if start < 0:
+    discard jsonFail(error, start, JsonSyntaxError, "Expected string")
+    return none
+  if start >= text.len:
+    discard jsonFail(error, start, JsonSyntaxError, "Expected string")
+    return none
+  if text[start] != 34:
+    discard jsonFail(error, start, JsonSyntaxError, "Expected string quote")
+    return none
+  if start >= 9223372036854775807:
+    return none
+  var position = start + 1
+  var remaining: 0 .. 3 = 0
+  var lower: 0 .. 255 = 128
+  var upper: 0 .. 255 = 191
+  for step in 0 ..< text.len:
+    if position < 0:
+      discard jsonFail(error, position, JsonSyntaxError, "Unterminated string")
+      return none
+    if position >= text.len:
+      discard jsonFail(error, position, JsonSyntaxError, "Unterminated string")
+      return none
+    let byte = text[position]
+    let offset = position
+    if position >= 9223372036854775807:
+      return none
+    position = position + 1
+    if remaining > 0:
+      if byte < lower or byte > upper:
+        discard jsonFail(error, offset, JsonUnicodeError, "Invalid UTF-8 continuation")
+        return none
+      remaining = remaining - 1
+      lower = 128
+      upper = 191
+      if not output.addByte(byte):
+        discard jsonFail(error, offset, JsonAllocationError, "String allocation failed")
+        return none
+    elif byte == 34:
+      return position
+    elif byte == 92:
+      if position < 0:
+        discard jsonFail(error, position, JsonSyntaxError, "Incomplete escape")
+        return none
+      if position >= text.len:
+        discard jsonFail(error, position, JsonSyntaxError, "Incomplete escape")
+        return none
+      let escape = text[position]
+      if position >= 9223372036854775807:
+        return none
+      position = position + 1
+      if escape == 117:
+        let quad = jsonStringQuad(text, position)
+        if not quad.ok:
+          discard jsonFail(error, position, JsonUnicodeError, "Expected four hex digits")
+          return none
+        let first = quad.or(0)
+        var scalar: 0 .. 1114111 = 0
+        if first >= 55296 and first <= 56319:
+          if position < 0:
+            discard jsonFail(error, position, JsonUnicodeError, "Missing low surrogate")
+            return none
+          if position >= text.len:
+            discard jsonFail(error, position, JsonUnicodeError, "Missing low surrogate")
+            return none
+          if text[position] != 92:
+            discard jsonFail(error, position, JsonUnicodeError, "Missing low surrogate")
+            return none
+          if position >= 9223372036854775807:
+            return none
+          position = position + 1
+          if position < 0:
+            discard jsonFail(error, position, JsonUnicodeError, "Missing low surrogate")
+            return none
+          if position >= text.len:
+            discard jsonFail(error, position, JsonUnicodeError, "Missing low surrogate")
+            return none
+          if text[position] != 117:
+            discard jsonFail(error, position, JsonUnicodeError, "Missing low surrogate")
+            return none
+          if position >= 9223372036854775807:
+            return none
+          position = position + 1
+          let lowQuad = jsonStringQuad(text, position)
+          if not lowQuad.ok:
+            discard jsonFail(error, position, JsonUnicodeError, "Invalid low surrogate")
+            return none
+          let low = lowQuad.or(0)
+          if low < 56320 or low > 57343:
+            discard jsonFail(error, position, JsonUnicodeError, "Invalid low surrogate")
+            return none
+          scalar = 65536 + (first - 55296) * 1024 + (low - 56320)
+        elif first >= 56320 and first <= 57343:
+          discard jsonFail(error, offset, JsonUnicodeError, "Unpaired low surrogate")
+          return none
+        elif first >= 0 and first <= 65535:
+          scalar = first
+        if not jsonStringEncode(output, scalar):
+          discard jsonFail(error, offset, JsonAllocationError, "String allocation failed")
+          return none
+      else:
+        var decoded: 0 .. 255 = 0
+        if escape == 34 or escape == 92 or escape == 47:
+          decoded = escape
+        elif escape == 98:
+          decoded = 8
+        elif escape == 102:
+          decoded = 12
+        elif escape == 110:
+          decoded = 10
+        elif escape == 114:
+          decoded = 13
+        elif escape == 116:
+          decoded = 9
+        else:
+          discard jsonFail(error, offset, JsonSyntaxError, "Unknown string escape")
+          return none
+        if not output.addByte(decoded):
+          discard jsonFail(error, offset, JsonAllocationError, "String allocation failed")
+          return none
+    else:
+      if byte < 32:
+        discard jsonFail(error, offset, JsonSyntaxError, "Unescaped control byte")
+        return none
+      if byte >= 128:
+        lower = 128
+        upper = 191
+        if byte >= 194 and byte <= 223:
+          remaining = 1
+        elif byte >= 224 and byte <= 239:
+          remaining = 2
+          if byte == 224:
+            lower = 160
+          if byte == 237:
+            upper = 159
+        elif byte >= 240 and byte <= 244:
+          remaining = 3
+          if byte == 240:
+            lower = 144
+          if byte == 244:
+            upper = 143
+        else:
+          discard jsonFail(error, offset, JsonUnicodeError, "Invalid UTF-8 leading byte")
+          return none
+      if not output.addByte(byte):
+        discard jsonFail(error, offset, JsonAllocationError, "String allocation failed")
+        return none
+  discard jsonFail(error, position, JsonSyntaxError, "Unterminated string")
+  return none
+
+proc jsonScanString(text: string, start: int, output: var string, error: var JsonError): int? =
+  # Returns the next source offset and leaves output empty on failure.
+  output.clear()
+  let next = jsonStringScanBody(text, start, output, error)
+  if not next.ok:
+    output.clear()
+  return next

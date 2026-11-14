@@ -1,0 +1,218 @@
+import jsontypes
+import jsonstrings
+import jsonnumbers
+
+# States 0/1/2: array initial value or end, value after comma, comma or end.
+# States 3/4/5/6/7: object key or end, key after comma, colon, value, comma or end.
+object JsonFrame =
+  node: JsonNode
+  name: string
+  state: int
+
+# Appends a child through a stable union root.
+proc jsonAppend(node: var JsonNode, name: string, child: JsonNode): bool =
+  if type(node) == ArrNode:
+    return node.items.add(child)
+  if type(node) == ObjNode:
+    var field: JsonField
+    if not field.name.copyFrom(name):
+      return false
+    if not jsonCopy(field.value, child):
+      return false
+    return node.fields.add(field)
+  return false
+
+# Attaches a value and advances its parent's grammar state.
+proc jsonAttach(frame: var JsonFrame, child: JsonNode): bool =
+  var key: string
+  if not key.copyFrom(frame.name):
+    return false
+  if not jsonAppend(frame.node, key, child):
+    return false
+  if frame.state == 0 or frame.state == 1:
+    frame.state = 2
+  else:
+    frame.state = 7
+  return true
+
+# Checks a literal without constructing temporary strings.
+func jsonLiteral(text: string, start: int, literal: string[5]): bool =
+  if start < 0 or start > text.len:
+    return false
+  if literal.len > text.len - start:
+    return false
+  var cursor = start
+  for i in 0 ..< literal.len:
+    if cursor < 0 or cursor >= text.len:
+      return false
+    if text[cursor] != literal[i]:
+      return false
+    if cursor >= 9223372036854775807:
+      return false
+    cursor = cursor + 1
+  return true
+
+# Parses with an explicit stack; every step consumes at least one byte.
+# Closing containers copies subtrees, costing O(depth * input size).
+proc jsonParseBody(text: string, output: var JsonNode, error: var JsonError, maxDepth: int): bool =
+  var frames: seq[JsonFrame]
+  var position = 0
+  var rootDone = false
+  for step in 0 ..< text.len:
+    if position < 0 or position >= text.len:
+      break
+    if position >= 9223372036854775807:
+      return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+    let byte = text[position]
+    if byte == 32 or byte == 9 or byte == 10 or byte == 13:
+      if position >= 9223372036854775807:
+        return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+      position = position + 1
+    else:
+      if rootDone:
+        return jsonFail(error, position, JsonSyntaxError, "Trailing JSON content")
+      var state = -1
+      if frames.len > 0:
+        let top = frames.len - 1
+        if top >= 0 and top < frames.len:
+          state = frames[top].state
+      var consumed = false
+      if frames.len > 0:
+        let top = frames.len - 1
+        if top < 0 or top >= frames.len:
+          return jsonFail(error, position, JsonSyntaxError, "Invalid JSON stack")
+        if (state == 0 or state == 2) and byte == 93 or (state == 3 or state == 7) and byte == 125:
+          var completed: JsonNode
+          if not jsonCopy(completed, frames[top].node):
+            return jsonFail(error, position, JsonAllocationError, "Cannot copy JSON container")
+          if not frames.resize(top):
+            return jsonFail(error, position, JsonAllocationError, "Cannot close JSON container")
+          if frames.len == 0:
+            if not jsonCopy(output, completed):
+              return jsonFail(error, position, JsonAllocationError, "Cannot copy JSON root")
+            rootDone = true
+          else:
+            let parent = frames.len - 1
+            if parent < 0 or parent >= frames.len:
+              return jsonFail(error, position, JsonSyntaxError, "Invalid JSON stack")
+            if not jsonAttach(frames[parent], completed):
+              return jsonFail(error, position, JsonAllocationError, "Cannot append JSON container")
+          if position >= 9223372036854775807:
+            return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+          position = position + 1
+          consumed = true
+        elif state == 2 or state == 7:
+          if byte != 44:
+            return jsonFail(error, position, JsonSyntaxError, "Expected comma or container end")
+          if state == 2:
+            frames[top].state = 1
+          else:
+            frames[top].state = 4
+          if position >= 9223372036854775807:
+            return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+          position = position + 1
+          consumed = true
+        elif state == 3 or state == 4:
+          if byte != 34:
+            return jsonFail(error, position, JsonSyntaxError, "Expected object key")
+          let next = jsonScanString(text, position, frames[top].name, error)
+          if not next.ok:
+            return false
+          position = next
+          if top >= 0 and top < frames.len:
+            frames[top].state = 5
+          consumed = true
+        elif state == 5:
+          if byte != 58:
+            return jsonFail(error, position, JsonSyntaxError, "Expected colon")
+          frames[top].state = 6
+          if position >= 9223372036854775807:
+            return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+          position = position + 1
+          consumed = true
+      if not consumed:
+        if byte == 91 or byte == 123:
+          if frames.len >= maxDepth:
+            return jsonFail(error, position, JsonDepthError, "JSON nesting depth exceeded")
+          var frame: JsonFrame
+          if byte == 91:
+            frame.node = ArrNode()
+            frame.state = 0
+          else:
+            frame.node = ObjNode()
+            frame.state = 3
+          if not frames.add(frame):
+            return jsonFail(error, position, JsonAllocationError, "Cannot grow JSON stack")
+          if position >= 9223372036854775807:
+            return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+          position = position + 1
+        else:
+          var child: JsonNode
+          if byte == 34:
+            var value: string
+            let next = jsonScanString(text, position, value, error)
+            if not next.ok:
+              return false
+            child = StrNode()
+            if type(child) == StrNode:
+              if not child.value.copyFrom(value):
+                return jsonFail(error, position, JsonAllocationError, "Cannot copy JSON string")
+            position = next
+          elif byte == 45 or byte >= 48 and byte <= 57:
+            let end = jsonScanNumber(text, position, error)
+            if end < 0:
+              return false
+            child = NumNode()
+            if type(child) == NumNode:
+              if not child.text.copyRange(text, position, end):
+                return jsonFail(error, position, JsonAllocationError, "Cannot copy JSON number")
+            position = end
+          elif jsonLiteral(text, position, "true"):
+            child = BoolNode(true)
+            if position > 9223372036854775803:
+              return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+            position = position + 4
+          elif jsonLiteral(text, position, "false"):
+            child = BoolNode(false)
+            if position > 9223372036854775802:
+              return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+            position = position + 5
+          elif jsonLiteral(text, position, "null"):
+            child = NullNode()
+            if position > 9223372036854775803:
+              return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+            position = position + 4
+          else:
+            return jsonFail(error, position, JsonSyntaxError, "Expected JSON value")
+          if frames.len == 0:
+            if not jsonCopy(output, child):
+              return jsonFail(error, position, JsonAllocationError, "Cannot copy JSON root")
+            rootDone = true
+          else:
+            let parent = frames.len - 1
+            if parent < 0 or parent >= frames.len:
+              return jsonFail(error, position, JsonSyntaxError, "Invalid JSON stack")
+            if not jsonAttach(frames[parent], child):
+              return jsonFail(error, position, JsonAllocationError, "Cannot append JSON value")
+  if not rootDone or frames.len != 0:
+    return jsonFail(error, position, JsonSyntaxError, "Incomplete JSON input")
+  return true
+
+# Clears the result on all failures, including allocation failure.
+proc parseJsonWithDepth(text: string, output: var JsonNode, error: var JsonError, maxDepth: int): bool =
+  output = NullNode()
+  error.offset = 0
+  error.code = 0
+  error.message = ""
+  if maxDepth < 0:
+    return jsonFail(error, 0, JsonDepthError, "Invalid JSON nesting limit")
+  if jsonParseBody(text, output, error, maxDepth):
+    return true
+  output = NullNode()
+  if error.code == 0:
+    return jsonFail(error, 0, JsonSyntaxError, "Invalid JSON input")
+  return false
+
+# Parses strict JSON with a default nesting limit of 512 containers.
+proc parseJson(text: string, output: var JsonNode, error: var JsonError): bool =
+  return parseJsonWithDepth(text, output, error, JsonDefaultDepth)

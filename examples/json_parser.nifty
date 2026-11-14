@@ -1,0 +1,40 @@
+import "../lib/json"
+
+# Each concrete overload handles one JSON alternative.
+proc describe(node: NullNode) =
+  echo "null"
+
+proc describe(node: BoolNode) =
+  echo "boolean ", node.value
+
+proc describe(node: NumNode) =
+  echo "number ", node.text
+
+proc describe(node: StrNode) =
+  echo "string ", node.value
+
+proc describe(node: ArrNode) =
+  echo "array with ", node.items.len, " children"
+
+proc describe(node: ObjNode) =
+  echo "object with ", node.fields.len, " fields"
+
+# The parsed tree owns its values independently of the input string.
+proc inspectJson(text: string) =
+  var root: JsonNode
+  var error: JsonError
+  if not parseJson(text, root, error):
+    echo "JSON error at byte ", error.offset, ": ", error.message
+    return
+  describe(root)
+  if type(root) == ObjNode:
+    for field in root.fields:
+      echo field.name, ":"
+      describe(field.value)
+      let number = jsonInt(field.value)
+      if number.ok:
+        echo "integer value ", number
+
+thread main() =
+  inspectJson("{\"name\":\"Nifty\",\"answer\":42,\"enabled\":true,\"empty\":null,\"items\":[1,\"two\",false],\"nested\":{\"value\":9},\"unicode\":\"\\uD834\\uDD1E\"}")
+  inspectJson("{\"broken\":[1,]}")
