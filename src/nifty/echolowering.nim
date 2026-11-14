@@ -46,6 +46,13 @@ proc hasEcho(body: seq[Stmt]): bool =
       if hasEcho(branch.body):
         return true
 
+proc backendRoutines*(source: Module): seq[Routine] =
+  ## C definitions and storage analysis visit support callees before users.
+  if source.supportCount == 0:
+    return source.routines
+  source.routines[source.routines.len - source.supportCount .. ^1] &
+    source.routines[0 ..< source.routines.len - source.supportCount]
+
 proc lowerEcho*(source: Module, filename = ""): Module =
   ## Keeps the original checked tree and its semantic bindings immutable.
   source.requireChecked()

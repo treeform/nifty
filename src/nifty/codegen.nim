@@ -1456,10 +1456,7 @@ proc generate*(source: Module, src: string): string =
   ## Generate the complete C translation unit for a checked module.
   requireChecked(source)
   let m = lowerEcho(source, src)
-  let routines = if m.supportCount > 0:
-      m.routines[m.routines.len - m.supportCount .. ^1] &
-        m.routines[0 ..< m.routines.len - m.supportCount]
-    else: m.routines
+  let routines = backendRoutines(m)
   var g = Gen(src: src, source: m)
   for r in routines:
     g.routines[r.name] = r

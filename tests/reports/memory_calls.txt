@@ -12,8 +12,12 @@ heap (runtime-sized; separate from static storage):
   stack estimates exclude allocator/runtime helper frames
 
 stack, worst case per thread (estimate: locals + params + 16 bytes/frame; big locals are on the arena):
-  worker: 104 bytes (worker -> work -> inspect)
-  fixed: 16 bytes (fixed)
+  worker: 4409 bytes (worker -> work -> inspect -> niftyEchoSupport_echoInt -> niftyEchoSupport_echoText -> niftyEchoSupport_consoleWrite -> niftyEchoSupport_ioWriteChunk -> niftyEchoSupport_ioRawWrite)
+  fixed: 4321 bytes (fixed -> niftyEchoSupport_echoInt -> niftyEchoSupport_echoText -> niftyEchoSupport_consoleWrite -> niftyEchoSupport_ioWriteChunk -> niftyEchoSupport_ioRawWrite)
+
+arena per thread (exact; big locals, allocated up front):
+  worker: 4112 bytes (worker -> work -> inspect -> niftyEchoSupport_echoStart -> niftyEchoSupport_echoFailure)
+  fixed: 4112 bytes (fixed -> niftyEchoSupport_echoStart -> niftyEchoSupport_echoFailure)
 
 worst-case abstract ops per thread:
   worker: runtime-dependent (dynamic allocation, traversal, or cleanup)

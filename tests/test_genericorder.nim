@@ -51,8 +51,12 @@ doAssert arena.routines[0].name == "leaf"
 doAssert arena.routines[1].name == "inner__int"
 doAssert arena.routines[2].name == "outer__int"
 doAssert arena.routines[3].name == "main"
-doAssert "main: 96 bytes (main -> outer__int -> inner__int -> leaf)" in report
-doAssert "main: 16384 bytes (main -> outer__int -> inner__int -> leaf)" in report
+doAssert ("main: 4409 bytes (main -> outer__int -> inner__int -> leaf -> " &
+  "niftyEchoSupport_echoInt -> niftyEchoSupport_echoText -> " &
+  "niftyEchoSupport_consoleWrite -> niftyEchoSupport_ioWriteChunk -> " &
+  "niftyEchoSupport_ioRawWrite)") in report
+doAssert ("main: 20496 bytes (main -> outer__int -> inner__int -> leaf -> " &
+  "niftyEchoSupport_echoStart -> niftyEchoSupport_echoFailure)") in report
 doAssert "main: 28 ops total" in report, report
 doAssert "main: runtime-dependent" in
   reportFor(DynamicSource, "generic-dynamic.nifty")

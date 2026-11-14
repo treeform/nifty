@@ -128,3 +128,7 @@ Console output uses unbuffered descriptor writes. Under the stdout stream lock,
 `write` and `echo` first call ordinary foreign `fflush` to preserve the order of
 preceding buffered stdio such as `puts` and `printf`. Native Windows stream
 lookup and synchronization use the same UCRT instance as ordinary libc FFI.
+
+C resource reports include echo argument captures and standard-library helper
+buffers in stack and exact arena storage. Their abstract operation counts and
+ownership/progress sections continue to describe the checked source program.
