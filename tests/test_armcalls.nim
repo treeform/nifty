@@ -1,6 +1,6 @@
 ## Exercises call-local volatile floating preservation under ABI clobbering.
 import nifty/backend/[context, engine, irmachines, irchecks, irlifetimes,
-  memories]
+  irallocations, memories]
 
 proc `==`(a, b: ValueId): bool =
   ## Compares opaque SSA identifiers for liveness assertions.
@@ -140,6 +140,16 @@ doAssert dying notin live[callIndex]
 doAssert called notin live[callIndex]
 for value in values:
   doAssert value in live[callIndex]
+for colors in [false, true]:
+  let allocated = allocateRegisters(host, floats = 30,
+    preservedFloats = (1'u64 shl 30) - 1,
+    preferredPreservedFloats = 0xff'u64 shl 22, floatColors = colors,
+    preferredRegisters = newSeq[int32](host.values.len))
+  var preserved = 0
+  for value in values:
+    if allocated.registers[int32(value)] in 22'i32 .. 29'i32:
+      inc preserved
+  doAssert preserved == 8
 module.functions.add(host)
 
 let signature = IrSignature(

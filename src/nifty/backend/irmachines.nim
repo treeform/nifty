@@ -332,7 +332,8 @@ proc emitArm64Ir*(module: ir.IrModule,
         preservedIntegers = integerMask,
         fixedValues = fixed,
         floatColors = floatColors,
-        preferredRegisters = preferences
+        preferredRegisters = preferences,
+        preferredPreservedFloats = if useCallSaves: preservedFloats else: 0'u64
       )
     let loadPairs = floatLoadPairs(function, allocation.registers,
       floatLoads and DefaultArmFloatLoads)

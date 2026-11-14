@@ -24,7 +24,7 @@ proc colorRegisters(function: IrFunction, analysis: IrLiveness,
     preservedIntegers, preservedFloats: uint64,
     fixedValues: openArray[bool], preferredRegisters: openArray[int32],
     graph: seq[uint64],
-    floatingOnly = false): IrAllocation =
+    floatingOnly = false, preferredPreservedFloats = 0'u64): IrAllocation =
   ## Colors exact conflicts while preferring incoming block argument locations.
   var
     allocation = IrAllocation(ranges: analysis.ranges,
@@ -82,7 +82,13 @@ proc colorRegisters(function: IrFunction, analysis: IrLiveness,
           if register >= 0:
             occupied[register] = true
         bits = bits and (bits - 1)
-    if preferredRegisters.len > 0:
+    if crossesCall and function.values[value].valueType.floating():
+      for register in 0 ..< occupied.len:
+        if preserved(preferredPreservedFloats, register) and
+            not occupied[register]:
+          allocation.registers[value] = int32(register)
+          break
+    if allocation.registers[value] < 0 and preferredRegisters.len > 0:
       let register = preferredRegisters[value]
       if register >= 0 and register < int32(count) and not occupied[register]:
         allocation.registers[value] = register
@@ -110,7 +116,8 @@ proc allocateRegisters*(function: IrFunction, integers = 6,
     holes = not defined(nimkeyNoIrLiveHoles),
     affinity = not defined(nimkeyNoIrOperandAffinity),
     floatColors = DefaultIrFloatColors,
-    preferredRegisters: openArray[int32] = []): IrAllocation =
+    preferredRegisters: openArray[int32] = [],
+    preferredPreservedFloats = 0'u64): IrAllocation =
   ## Scans integer definitions and colors floating conflicts within the bound.
   doAssert fixedValues.len == 0 or fixedValues.len == function.values.len
   doAssert preferredRegisters.len == 0 or
@@ -137,7 +144,8 @@ proc allocateRegisters*(function: IrFunction, integers = 6,
   if coalesce:
     return colorRegisters(function, analysis, crossing, integers, floats,
       preservedIntegers, preservedFloats, fixedValues, preferredRegisters,
-      interference(function, analysis))
+      interference(function, analysis),
+      preferredPreservedFloats = preferredPreservedFloats)
   let
     exact = holes and function.values.len <=
       MaxConflictBytes div sizeof(uint64) div max(1, analysis.words)
@@ -182,7 +190,13 @@ proc allocateRegisters*(function: IrFunction, integers = 6,
     if crossesCall:
       for register in 0 ..< occupied.len:
         occupied[register] = occupied[register] or not preserved(mask, register)
-    if preferredRegisters.len > 0:
+    if crossesCall and isFloat:
+      for register in 0 ..< occupied.len:
+        if preserved(preferredPreservedFloats, register) and
+            not occupied[register]:
+          allocation.registers[value] = int32(register)
+          break
+    if allocation.registers[value] < 0 and preferredRegisters.len > 0:
       let register = preferredRegisters[value]
       if register >= 0 and register < int32(count) and not occupied[register]:
         allocation.registers[value] = register
@@ -228,7 +242,8 @@ proc allocateRegisters*(function: IrFunction, integers = 6,
       fixedValues,
       preferredRegisters,
       graph,
-      floatingOnly = true
+      floatingOnly = true,
+      preferredPreservedFloats = preferredPreservedFloats
     )
     for value in order:
       if function.values[value].valueType.floating():
