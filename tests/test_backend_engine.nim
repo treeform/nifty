@@ -192,6 +192,32 @@ discard empty.instruction(MoveBytesOp, [ValueId(2), ValueId(1)], resultCount = 0
 empty.finish()
 module.functions.add(empty)
 
+var wide = newFunction("float64AcrossCalls")
+var wideValues: seq[ValueId]
+for i in 0 ..< 36:
+  wideValues.add(wide.instruction(LoadOp, [ValueId(1)], Float64Type,
+    offset = int64(i * 8)))
+let
+  wideScale = wide.instruction(ConstantOp, [], Float32Type,
+    bits = uint64(cast[uint32](3.5'f)))
+  wideFactor = wide.instruction(ConstantOp, [], Int32Type, bits = 2)
+discard wide.instruction(HostCallOp, [wideScale, wideFactor], Float32Type,
+  target = 1)
+for i, value in wideValues:
+  discard wide.instruction(StoreOp, [ValueId(2), value],
+    offset = int64(i * 8), resultCount = 0)
+let
+  wideDifference = wide.instruction(SubtractOp,
+    [wideValues[5], wideValues[2]], Float64Type)
+  wideQuotient = wide.instruction(DivideOp,
+    [wideDifference, wideValues[1]], Float64Type)
+  wideSquare = wide.instruction(MultiplyOp,
+    [wideQuotient, wideQuotient], Float64Type)
+discard wide.instruction(StoreOp, [ValueId(2), wideSquare],
+  offset = 36 * 8, resultCount = 0)
+wide.finish()
+module.functions.add(wide)
+
 var builder = IrBuilder(module: IrModule(pointerBytes: 8))
 let builderLabel = builder.label()
 builder.declareFunctions(["builder"], [builderLabel])
@@ -274,6 +300,16 @@ for target in NativeTarget:
       entry(8)(ctx.addr, data[100].addr, nil, nil)
       doAssert data == expected
       entry(9)(ctx.addr, nil, nil, nil)
+      var wideInput: array[36, float64]
+      var wideOutput: array[37, float64]
+      for i in 0 ..< wideInput.len:
+        wideInput[i] = float64(i + 1)
+      wideInput[0] = cast[float64](0x8000000000000000'u64)
+      wideInput[35] = cast[float64](0x7ff8000000001234'u64)
+      entry(10)(ctx.addr, wideInput.addr, wideOutput.addr, nil)
+      for i in 0 ..< wideInput.len:
+        doAssert cast[uint64](wideOutput[i]) == cast[uint64](wideInput[i])
+      doAssert wideOutput[36] == 2.25
       buffer.release()
       doAssert buffer.entry() == nil
 

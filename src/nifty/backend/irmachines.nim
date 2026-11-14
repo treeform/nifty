@@ -176,7 +176,7 @@ proc emitArm64Ir*(module: ir.IrModule,
             continue
           when not defined(nimkeyNoArmPreservedFloats):
             if function.values[value].valueType in
-                {ir.Float32Type, ir.Float32x2Type}:
+                {ir.Float32Type, ir.Float64Type, ir.Float32x2Type}:
               preservedFloats = 0xff'u64 shl volatileFloats
           when not defined(nimkeyNoArmPreservedIntegers):
             if not function.values[value].valueType.floating():
@@ -308,13 +308,14 @@ proc emitArm64Ir*(module: ir.IrModule,
     proc floatFrameOperand(code: var machine.Assembler, offset: int,
         scratch: machine.Register, kind: ir.IrType):
         tuple[base: machine.Register, offset: int] =
-      ## Encodes scalar or packed binary32 stack displacements directly.
+      ## Encodes scalar or packed floating stack displacements directly.
       if vectorSpills and kind == ir.Float32x2Type and
         offset >= 0 and offset mod 8 == 0 and offset div 8 <= 4095:
           return (StackPointer, offset)
       when not defined(nimkeyNoArmFloatSpills):
-        if kind == ir.Float32Type and offset >= 0 and offset mod 4 == 0 and
-          offset div 4 <= 4095:
+        let width = if kind == ir.Float32Type: 4 else: 8
+        if kind in {ir.Float32Type, ir.Float64Type} and offset >= 0 and
+          offset mod width == 0 and offset div width <= 4095:
             return (StackPointer, offset)
       code.address(scratch, offset)
       (scratch, 0)
@@ -348,28 +349,28 @@ proc emitArm64Ir*(module: ir.IrModule,
       X12
     proc floatOperand(code: var machine.Assembler, value: ir.ValueId,
         scratch: int): int =
-      ## Reads float32 directly from its register, loading only spills.
+      ## Reads floating values directly from registers, loading only spills.
       when not defined(nimkeyNoArmFloatOperands):
         if function.values[int32(value)].valueType in
-            {ir.Float32Type, ir.Float32x2Type} and
+            {ir.Float32Type, ir.Float64Type, ir.Float32x2Type} and
             places[int32(value)].register > 0:
             return places[int32(value)].register - 1
       code.floating(value, scratch)
       scratch
     proc floatOperand(code: var machine.Assembler, value: ir.ValueId,
         scratch: int, previous: ir.ValueId, previousRegister: int): int =
-      ## Reuses one float32 input read twice by the same instruction.
+      ## Reuses one floating input read twice by the same instruction.
       when not defined(nimkeyNoArmSharedFloatOperands):
         if int32(value) == int32(previous) and
           function.values[int32(value)].valueType in
-          {ir.Float32Type, ir.Float32x2Type}:
+          {ir.Float32Type, ir.Float64Type, ir.Float32x2Type}:
             return previousRegister
       code.floatOperand(value, scratch)
     proc floatDestination(value: int): int =
-      ## Selects an allocated float32 result or the normal scratch register.
+      ## Selects an allocated floating result or the normal scratch register.
       when not defined(nimkeyNoArmFloatOperands):
         if function.values[value].valueType in
-            {ir.Float32Type, ir.Float32x2Type} and
+            {ir.Float32Type, ir.Float64Type, ir.Float32x2Type} and
             places[value].register > 0:
             return places[value].register - 1
       scratchFloat
@@ -393,8 +394,7 @@ proc emitArm64Ir*(module: ir.IrModule,
         single = kind == ir.Float32Type
       if place.register > 0:
         when not defined(nimkeyNoArmFloatOperands):
-          if (single or function.values[value].valueType ==
-              ir.Float32x2Type) and place.register - 1 == source:
+          if kind.floating() and place.register - 1 == source:
             return
         code.floatUnary(0, place.register - 1, source, single)
       else:
