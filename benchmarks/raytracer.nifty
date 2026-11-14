@@ -1,0 +1,307 @@
+# Ported from Nimkey's float64 vmath raytracer under the attached license.
+# The runner changes only these three constants for each workload.
+const ImageSize = 64
+const Repetitions = 1
+const EmitPixels = 1
+const MaxDepth = 5
+const PixelCount = ImageSize * ImageSize
+const ChannelCount = PixelCount * 3
+
+object Vec3 =
+  x: float64
+  y: float64
+  z: float64
+
+object Camera =
+  forward: Vec3
+  right: Vec3
+  up: Vec3
+  pos: Vec3
+
+object Ray =
+  start: Vec3
+  dir: Vec3
+
+object Intersection =
+  thing: -1 .. 2
+  dist: float64
+
+object Properties =
+  diffuse: Vec3
+  specular: Vec3
+  reflect: float64
+  roughness: float64
+
+object Timespec =
+  sec: int64
+  nsec: int64
+
+extern "m":
+  proc sqrt(value: float64): float64
+  proc floor(value: float64): float64
+  proc pow(base: float64, exponent: float64): float64
+  proc round(value: float64): float64
+
+extern "libc":
+  proc clock_gettime(clock: int32, value: var Timespec): int32
+
+func vector(x, y, z: float64): Vec3 =
+  # Constructs a position, direction, or RGB color.
+  var value: Vec3
+  value.x = x
+  value.y = y
+  value.z = z
+  return value
+
+func add(a, b: Vec3): Vec3 =
+  # Adds vector or color components in source evaluation order.
+  return vector(a.x + b.x, a.y + b.y, a.z + b.z)
+
+func subtract(a, b: Vec3): Vec3 =
+  # Subtracts vector components.
+  return vector(a.x - b.x, a.y - b.y, a.z - b.z)
+
+func scale(a: Vec3, amount: float64): Vec3 =
+  # Scales vector or color components.
+  return vector(a.x * amount, a.y * amount, a.z * amount)
+
+func multiply(a, b: Vec3): Vec3 =
+  # Multiplies color components.
+  return vector(a.x * b.x, a.y * b.y, a.z * b.z)
+
+func dot(a, b: Vec3): float64 =
+  # Computes the scalar product in source evaluation order.
+  return a.x * b.x + a.y * b.y + a.z * b.z
+
+func cross(a, b: Vec3): Vec3 =
+  # Computes the vector product.
+  return vector(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x)
+
+proc magnitude(a: Vec3): float64 =
+  # Computes vector length using the platform float64 square root.
+  return sqrt(dot(a, a))
+
+proc normalize(a: Vec3): Vec3 =
+  # Divides each component by length exactly as vmath does.
+  let length = magnitude(a)
+  return vector(a.x / length, a.y / length, a.z / length)
+
+proc newCamera(): Camera =
+  # Builds the original fixed camera basis.
+  var camera: Camera
+  camera.pos = vector(3.0, 2.0, 4.0)
+  let lookAt = vector(-1.0, 0.5, 0.0)
+  let down = vector(0.0, -1.0, 0.0)
+  let forward = normalize(subtract(lookAt, camera.pos))
+  let right = cross(forward, down)
+  let up = cross(forward, right)
+  camera.forward = forward
+  camera.right = scale(normalize(right), 1.5)
+  camera.up = scale(normalize(up), 1.5)
+  return camera
+
+func center(thing: 0 .. 2): Vec3 =
+  # Looks up the fixed sphere centers without mutable global state.
+  if thing == 2:
+    return vector(-1.0, 0.5, 1.5)
+  return vector(0.0, 1.0, -0.25)
+
+func lightPosition(light: 0 .. 3): Vec3 =
+  # Looks up the four original light positions.
+  if light == 0:
+    return vector(-2.0, 2.5, 0.0)
+  if light == 1:
+    return vector(1.5, 2.5, 1.5)
+  if light == 2:
+    return vector(1.5, 2.5, -1.5)
+  return vector(0.0, 3.5, 0.0)
+
+func lightColor(light: 0 .. 3): Vec3 =
+  # Looks up the four original light colors.
+  if light == 0:
+    return vector(0.49, 0.07, 0.07)
+  if light == 1:
+    return vector(0.07, 0.07, 0.49)
+  if light == 2:
+    return vector(0.07, 0.49, 0.071)
+  return vector(0.21, 0.21, 0.35)
+
+proc getNormal(thing: 0 .. 2, pos: Vec3): Vec3 =
+  # Computes the original sphere or plane normal.
+  if thing != 0:
+    return normalize(subtract(pos, center(thing)))
+  return vector(0.0, 1.0, 0.0)
+
+proc objectIntersect(thing: 0 .. 2, ray: Ray): Intersection =
+  # Returns an object index or negative one for a miss.
+  var hit: Intersection
+  hit.thing = -1
+  if thing != 0:
+    let eo = subtract(center(thing), ray.start)
+    let projection = dot(eo, ray.dir)
+    if projection >= 0.0:
+      var radius2 = 1.0
+      if thing == 2:
+        radius2 = 0.25
+      var distance = 0.0
+      let discriminant = radius2 - (dot(eo, eo) - projection * projection)
+      if discriminant >= 0.0:
+        distance = projection - sqrt(discriminant)
+      if distance != 0.0:
+        hit.thing = thing
+        hit.dist = distance
+  else:
+    let normal = vector(0.0, 1.0, 0.0)
+    let denominator = dot(normal, ray.dir)
+    if denominator < 0.0:
+      hit.thing = thing
+      hit.dist = (dot(normal, ray.start) + 0.0) / -denominator
+  return hit
+
+proc getProperties(thing: 0 .. 2, pos: Vec3): Properties =
+  # Selects the original shiny or checkerboard material.
+  var properties: Properties
+  let white = vector(1.0, 1.0, 1.0)
+  properties.specular = white
+  properties.reflect = 0.7
+  properties.roughness = 150.0
+  if thing != 0:
+    properties.diffuse = white
+    properties.specular = vector(0.5, 0.5, 0.5)
+    properties.roughness = 250.0
+  else:
+    let parity = floor(pos.z) + floor(pos.x)
+    let value = parity.toInt
+    if value % 2 != 0:
+      properties.diffuse = white
+      properties.reflect = 0.1
+  return properties
+
+proc intersections(ray: Ray): Intersection =
+  # Finds the nearest intersection before the original far plane.
+  var closest = 1000000.0
+  var nearest: Intersection
+  nearest.thing = -1
+  for i in 0 ..< 3:
+    let hit = objectIntersect(i, ray)
+    if hit.thing != -1 and hit.dist < closest:
+      nearest = hit
+      closest = hit.dist
+  return nearest
+
+proc naturalColor(thing: 0 .. 2, pos, normal, reflectDir: Vec3): Vec3 =
+  # Accumulates unshadowed diffuse and specular light in original order.
+  var color = vector(0.0, 0.0, 0.0)
+  let reflectNorm = normalize(reflectDir)
+  let properties = getProperties(thing, pos)
+  for i in 0 ..< 4:
+    let lightDist = subtract(lightPosition(i), pos)
+    let lightVec = normalize(lightDist)
+    let lightLength = magnitude(lightDist)
+    var shadowRay: Ray
+    shadowRay.start = pos
+    shadowRay.dir = lightVec
+    let shadowHit = intersections(shadowRay)
+    let inShadow = shadowHit.thing != -1 and shadowHit.dist <= lightLength
+    if not inShadow:
+      let illumination = dot(lightVec, normal)
+      let specular = dot(lightVec, reflectNorm)
+      var diffuse = vector(0.0, 0.0, 0.0)
+      var specularColor = vector(0.0, 0.0, 0.0)
+      if illumination > 0.0:
+        diffuse = scale(lightColor(i), illumination)
+      if specular > 0.0:
+        specularColor = scale(lightColor(i), pow(specular, properties.roughness))
+      diffuse = multiply(diffuse, properties.diffuse)
+      specularColor = multiply(specularColor, properties.specular)
+      color = add(add(color, diffuse), specularColor)
+  return color
+
+proc traceRay(primary: Ray): Vec3 =
+  # Stores six recursive frames, then folds them in the original order.
+  var naturals: array[6, Vec3]
+  var reflectivities: array[6, float64]
+  var count: 0 .. 6 = 0
+  var ray = primary
+  var color = vector(0.0, 0.0, 0.0)
+  for depth in 0 ..< 6:
+    let hit = intersections(ray)
+    let thing = hit.thing
+    if thing >= 0:
+      let direction = ray.dir
+      let pos = add(scale(direction, hit.dist), ray.start)
+      let normal = getNormal(thing, pos)
+      let reflectDir = subtract(direction, scale(scale(normal, dot(normal, direction)), 2.0))
+      let natural = add(vector(0.0, 0.0, 0.0), naturalColor(thing, pos, normal, reflectDir))
+      if depth < MaxDepth:
+        naturals[depth] = natural
+        reflectivities[depth] = getProperties(thing, pos).reflect
+        count = depth + 1
+        ray.start = pos
+        ray.dir = reflectDir
+      else:
+        color = add(natural, vector(0.5, 0.5, 0.5))
+    else:
+      break
+  var remaining: 0 .. 6 = count
+  while remaining > 0:
+    remaining = remaining - 1
+    color = add(naturals[remaining], scale(color, reflectivities[remaining]))
+  return color
+
+proc getPoint(x, y: 0 .. ImageSize - 1, camera: Camera): Vec3 =
+  # Retains vmath's pixel coordinates and camera projection.
+  let width = float64(ImageSize)
+  let xf = float64(x)
+  let yf = float64(y)
+  let recenterX = (xf - width / 2.0) / 2.0 / width
+  let recenterY = -(yf - width / 2.0) / 2.0 / width
+  let horizontal = scale(camera.right, recenterX)
+  let vertical = scale(camera.up, recenterY)
+  return normalize(add(camera.forward, add(horizontal, vertical)))
+
+proc channel(value: float64): uint8 =
+  # Rounds then wraps over-bright values rather than clamping them.
+  let roundedValue = round(value * 255.0)
+  let rounded = roundedValue.toInt
+  let wrapped = rounded % 256
+  return wrapped
+
+proc render(pixels: var array[ChannelCount, uint8], camera: Camera) =
+  # Writes one complete RGB image using the fixed scene and camera.
+  for y in 0 ..< ImageSize:
+    for x in 0 ..< ImageSize:
+      var ray: Ray
+      ray.start = camera.pos
+      ray.dir = getPoint(x, y, camera)
+      let color = traceRay(ray)
+      let pixel = (y * ImageSize + x) * 3
+      pixels[pixel] = channel(color.x)
+      pixels[pixel + 1] = channel(color.y)
+      pixels[pixel + 2] = channel(color.z)
+
+thread main() =
+  var pixels: array[ChannelCount, uint8]
+  let camera = newCamera()
+  var started: Timespec
+  var finished: Timespec
+  let startStatus = clock_gettime(6, started)
+  for repetition in 0 ..< Repetitions:
+    render(pixels, camera)
+  let finishStatus = clock_gettime(6, finished)
+  var checksum: 0 .. ChannelCount * 255 = 0
+  for i in 0 ..< ChannelCount:
+    checksum = checksum + pixels[i]
+  echo "NIFTY_RAY_V1"
+  echo "size ", ImageSize
+  echo "repeat ", Repetitions
+  echo "start_sec ", started.sec
+  echo "start_nsec ", started.nsec
+  echo "end_sec ", finished.sec
+  echo "end_nsec ", finished.nsec
+  echo "clock_status ", startStatus, " ", finishStatus
+  echo "checksum ", checksum
+  if EmitPixels == 1:
+    for pixel in 0 ..< PixelCount:
+      let offset = pixel * 3
+      echo "rgb ", pixels[offset], " ", pixels[offset + 1], " ", pixels[offset + 2]
