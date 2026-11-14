@@ -32,7 +32,7 @@ proc reportFor*(src: string, moduleName: string, dir = ""): string =
 
 when isMainModule:
   import std/[os, strutils]
-  import nifty/[lowering, nativeruntime, nativereports]
+  import nifty/[lowering, nativeruntime, nativereports, nativeunroll]
 
   try:
     if tryRunEmbedded():
@@ -117,8 +117,10 @@ options:
         stdout.write reportFor(source, modName, srcPath.parentDir)
       else:
         let target = if backend == "arm64": Arm64Target else: Amd64Target
-        let plan = lowerNative(
-          checkedModule(source, modName, srcPath.parentDir), modName)
+        var checked = checkedModule(source, modName, srcPath.parentDir)
+        if optimization == SpeedOptimization:
+          checked = unrollNative(checked)
+        let plan = lowerNative(checked, modName)
         let program = buildNativeProgram(plan, target,
           optimization = optimization)
         stdout.write nativeReport(program.plan, program.image, modName)
@@ -147,8 +149,10 @@ options:
         quit("nifty: C compilation failed", 1)
     else:
       let target = if backend == "arm64": Arm64Target else: Amd64Target
-      let plan = lowerNative(
-        checkedModule(source, modName, srcPath.parentDir), modName)
+      var checked = checkedModule(source, modName, srcPath.parentDir)
+      if optimization == SpeedOptimization:
+        checked = unrollNative(checked)
+      let plan = lowerNative(checked, modName)
       if emission == "--emit-ir":
         let path = if outPath.len > 0: outPath else: base & ".ir"
         writeFile(path, optimizeNative(plan, optimization).module.dumpModule())
