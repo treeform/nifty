@@ -1,5 +1,5 @@
 ## Compare every backend against unchanged language golden files.
-## Build the CLI first, then run: nim r tests/test_native.nim /path/to/nifty.
+## Run: nim r tests/test_native.nim /path/to/nifty [--opt:none|speed].
 import
   std/[algorithm, json, os, osproc, streams, strtabs, strutils, times]
 
@@ -98,8 +98,18 @@ proc canExecute(target: string): bool =
 
 proc main() =
   ## Build, inspect, and execute the full golden corpus for each backend.
-  if paramCount() != 1:
-    quit("Usage: test_native /absolute/path/to/nifty", 1)
+  const Usage = "Usage: test_native /absolute/path/to/nifty " &
+    "[--opt:none|speed]"
+  if paramCount() notin 1 .. 2:
+    quit(Usage, 1)
+  var optimizationArgs: seq[string]
+  if paramCount() == 2:
+    if paramStr(2) notin ["--opt:none", "--opt:speed"]:
+      quit(Usage, 1)
+    optimizationArgs.add paramStr(2)
+  let optimization = if optimizationArgs.len == 0: "compiler default"
+    else: paramStr(2)[6 .. ^1]
+  echo "Native optimization: ", optimization
   let
     compiler = absolutePath(paramStr(1))
     root = currentSourcePath().parentDir
@@ -127,8 +137,10 @@ proc main() =
         let
           expected = normalized(readFile(expectedPath))
           binary = path.changeFileExt("." & target)
-          built = run(compiler, @["build", path, "--backend:" & target,
-            "-o", binary], isolated = target != "c")
+        var buildArgs = @["build", path, "--backend:" & target, "-o", binary]
+        if target != "c":
+          buildArgs.add optimizationArgs
+        let built = run(compiler, buildArgs, isolated = target != "c")
         if mode == Reject:
           var actual = normalized(built.output)
             .replace(path.parentDir & DirSep, "")
@@ -178,7 +190,7 @@ proc main() =
   else:
     echo "FAIL --emit-c: ", c.output
     inc failed
-  let ir = run(compiler, @[sample, "--emit-ir"])
+  let ir = run(compiler, @[sample, "--emit-ir"] & optimizationArgs)
   if ir.code == 0 and fileExists(sample.changeFileExt(".ir")) and
       readFile(sample.changeFileExt(".ir")).len > 0:
     inc passed
@@ -190,15 +202,24 @@ proc main() =
     if fileExists(artifact):
       removeFile(artifact)
     let native = run(compiler, @[sample, "--backend:" & target,
-      "--emit-native"], isolated = true)
+      "--emit-native"] & optimizationArgs, isolated = true)
     if native.code == 0 and fileExists(artifact) and
         imageTarget(artifact, target):
       inc passed
     else:
       echo "FAIL --emit-native/", target, ": ", native.output
       inc failed
+    let reported = run(compiler, @["report", sample, "--backend:" & target] &
+      optimizationArgs, isolated = true)
+    if reported.code == 0 and "nifty native report:" in reported.output and
+        "(" & target & ")" in reported.output:
+      inc passed
+    else:
+      echo "FAIL report/", target, ": ", reported.output
+      inc failed
 
-  echo "Native backend tests: ", passed, " passed, ", failed,
+  echo "Native backend tests (opt=", optimization, "): ",
+    passed, " passed, ", failed,
     " failed, ", emitted, " native executables inspected"
   if failed > 0:
     echo "Artifacts retained at ", work
