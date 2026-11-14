@@ -122,6 +122,7 @@ discard host.blockValues()
 let
   callIndex = host.instructions.len
   called = host.instruction(HostCallOp, [values[1], values[0], dying])
+host.instructions[^1].cold = true
 host.jump(3, [called])
 discard host.blockValues()
 let
@@ -140,6 +141,11 @@ doAssert dying notin live[callIndex]
 doAssert called notin live[callIndex]
 for value in values:
   doAssert value in live[callIndex]
+let filtered = liveAcrossCalls(host, analyzeLiveness(host),
+  ignoreColdFloatCalls = true)
+for value in values:
+  doAssert not filtered[int32(value)]
+doAssert filtered[2]
 for colors in [false, true]:
   let allocated = allocateRegisters(host, floats = 30,
     preservedFloats = (1'u64 shl 30) - 1,
@@ -210,9 +216,53 @@ for kind in [Float32Type, Float32x2Type]:
   caller.finish()
   module.functions.add(caller)
 
+var mixed = storageFunction("mixedHotColdLoop")
+let
+  hotValue = mixed.instruction(LoadOp, [ValueId(1)])
+  hotArgument = mixed.instruction(LoadOp, [ValueId(1)], offset = 8)
+  extra = mixed.instruction(LoadOp, [ValueId(1)], offset = 36 * 8)
+  hotResult = mixed.instruction(HostCallOp, [hotArgument, hotValue, extra])
+  coldOnly = mixed.instruction(LoadOp, [ValueId(1)], offset = 16)
+  initialIndex = mixed.instruction(ConstantOp, [], Int64Type)
+  step = mixed.instruction(ConstantOp, [], Int64Type)
+mixed.instructions[^1].bits = 1
+let limit = mixed.instruction(ConstantOp, [], Int64Type)
+mixed.instructions[^1].bits = 3
+mixed.jump(1, [initialIndex, coldOnly])
+let parameters = mixed.blockValues([Int64Type, Float64Type])
+let conditionValue = mixed.instruction(CompareOp,
+  [parameters[0], limit], BoolType)
+mixed.instructions[^1].comparison = LessComparison
+let firstLoopEdge = mixed.edge(2)
+discard mixed.edge(3)
+mixed.blocks[^1].terminator = IrTerminator(kind: BranchTerminator,
+  arguments: mixed.operands([conditionValue]),
+  edges: Span(first: firstLoopEdge, count: 2))
+discard mixed.blockValues()
+let coldResult = mixed.instruction(HostCallOp,
+  [parameters[1], hotValue, extra])
+mixed.instructions[^1].cold = true
+discard mixed.instruction(StoreOp, [ValueId(2), coldOnly], offset = 8,
+  count = 0)
+let nextIndex = mixed.instruction(AddOp, [parameters[0], step], Int64Type)
+mixed.jump(1, [nextIndex, coldResult])
+discard mixed.blockValues()
+for i, value in [hotValue, coldOnly, parameters[1], hotResult]:
+  discard mixed.instruction(StoreOp, [ValueId(2), value],
+    offset = int64(i * 8), count = 0)
+mixed.finish()
+let mixedCrossing = liveAcrossCalls(mixed, analyzeLiveness(mixed),
+  ignoreColdFloatCalls = true)
+doAssert mixedCrossing[int32(hotValue)]
+doAssert not mixedCrossing[int32(coldOnly)]
+doAssert not mixedCrossing[int32(hotResult)]
+doAssert mixedCrossing[2]
+module.functions.add(mixed)
+
 verifyIr(module)
-for useSaves in [false, true]:
-  let image = emitArm64Ir(module, MaxNativeBytes, callSaves = useSaves)
+for mode in [(false, false), (false, true), (true, true)]:
+  let image = emitArm64Ir(module, MaxNativeBytes,
+    callSaves = mode[0], coldCallSaves = mode[1])
   for bytes in image.frameBytes:
     doAssert bytes mod 16 == 0
   when defined(arm64):
@@ -267,6 +317,19 @@ for useSaves in [false, true]:
           doAssert uint32(output[i]) == uint32(input[i])
         else:
           doAssert output[i] == input[i]
+    hostCalls = 0
+    let mixedCall = cast[Entry](cast[uint](buffer.entry()) +
+      uint(image.offsets[8]))
+    mixedCall(ctx.addr, input.addr, output.addr, nil)
+    doAssert hostCalls == 4
+    doAssert output[0] == input[0]
+    doAssert output[1] == input[2]
+    var accumulated = cast[float64](input[2])
+    for i in 0 ..< 3:
+      accumulated = accumulated - cast[float64](input[0]) +
+        cast[float64](input[36])
+    doAssert output[2] == cast[uint64](accumulated)
+    doAssert output[3] == expected
     buffer.release()
 
 echo "ARM call-local volatile floating preservation passed"

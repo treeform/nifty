@@ -14,6 +14,9 @@ const
   DefaultArmCallSaves* = defined(nimkeyArmCallSaves) and
     not defined(nimkeyNoArmCallSaves) and
     not defined(nimkeyNoIrAllocation)
+  DefaultArmColdCallSaves* = not defined(nimkeyNoArmCallSaves) and
+    not defined(nimkeyNoArmColdCallSaves) and
+    not defined(nimkeyNoIrAllocation)
   DefaultArmGlobalBindings* = defined(nimkeyArmGlobalBindings) and
     not defined(nimkeyNoArmGlobalBindings)
   DefaultArmUnsignedWords* = defined(nimkeyArmUnsignedWords) and
@@ -221,7 +224,8 @@ proc emitArm64Ir*(module: ir.IrModule,
     abiFloats = DefaultArmAbiFloats,
     unusedCopies = DefaultIrUnusedCopies,
     branchPairs = DefaultArmBranchPairs,
-    callSaves = DefaultArmCallSaves): IrMachineImage
+    callSaves = DefaultArmCallSaves,
+    coldCallSaves = DefaultArmColdCallSaves): IrMachineImage
     {.raises: [BackendError].} =
   ## Assigns physical locations only after the complete IR module is verified.
   let
@@ -276,10 +280,15 @@ proc emitArm64Ir*(module: ir.IrModule,
       contextRegister = if leaf: X0 else: X19
     var useCallSaves = callSaves and not defined(nimkeyNoArmCallSaves) and
       not defined(nimkeyNoIrAllocation)
+    var useColdCallSaves = coldCallSaves and
+      not defined(nimkeyNoArmCallSaves) and
+      not defined(nimkeyNoIrAllocation)
     for data in function.blocks:
       if data.terminator.kind in
           {ir.InvokeTerminator, ir.InvokeHostTerminator}:
         useCallSaves = false
+        useColdCallSaves = false
+    let selectiveSaves = useColdCallSaves and not useCallSaves
     var needsGlobals = not globalBindings and not leaf
     if not leaf:
       for item in function.instructions:
@@ -306,7 +315,8 @@ proc emitArm64Ir*(module: ir.IrModule,
       var preservedFloats, integerMask: uint64
       when not defined(nimkeyNoArmPreservedFloats) or
         not defined(nimkeyNoArmPreservedIntegers):
-        let crossing = liveAcrossCalls(function, analyzeLiveness(function))
+        let crossing = liveAcrossCalls(function, analyzeLiveness(function),
+          ignoreColdFloatCalls = selectiveSaves)
         var constants = newSeq[bool](function.values.len)
         for item in function.instructions:
           if item.op in {ir.ConstantOp, ir.FrameSizeOp}:
@@ -335,7 +345,8 @@ proc emitArm64Ir*(module: ir.IrModule,
         fixedValues = fixed,
         floatColors = floatColors,
         preferredRegisters = preferences,
-        preferredPreservedFloats = if useCallSaves: preservedFloats else: 0'u64
+        preferredPreservedFloats = if useCallSaves: preservedFloats else: 0'u64,
+        ignoreColdFloatCalls = selectiveSaves
       )
     let loadPairs = floatLoadPairs(function, allocation.registers,
       floatLoads and DefaultArmFloatLoads)
@@ -406,9 +417,11 @@ proc emitArm64Ir*(module: ir.IrModule,
     var
       savedCalls = newSeq[seq[int]](function.instructions.len)
       maxSavedFloats = 0
-    if useCallSaves:
+    if useCallSaves or selectiveSaves:
       let live = liveThroughCalls(function, analyzeLiveness(function))
       for instruction, values in live:
+        if not useCallSaves and not function.instructions[instruction].cold:
+          continue
         for value in values:
           let register = allocation.registers[int32(value)]
           if function.values[int32(value)].valueType.floating() and
