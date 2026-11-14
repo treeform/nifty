@@ -50,3 +50,8 @@ targets stdout and adds no newline. These functions process strings in
 All file operations use ordinary `extern "libc"` declarations. The `fread` and
 `fwrite` declarations constrain their element size to one, so their checked
 `boundedBy count` contracts describe the actual number of accessible bytes.
+
+`examples/file_io.nifty` writes `nifty-io-example.bin` in the working directory,
+reads it back into a bounded buffer, and sends the bytes to stdout without
+using `echo`. Run it with `nifty examples/file_io.nifty` or select `--backend:c`
+to exercise the C reference backend.
