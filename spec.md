@@ -26,7 +26,10 @@ Unproven direct access does not compile; allocation failure is a value.
   same body: a thread pool is one declaration. All threads start at
   program start. There is no `createThread` or user thread teardown; a program
   is "start once, run until done (or forever)". The program exits when
-  every thread returns.
+  every thread returns. Every worker waits for all thread creation and
+  startup resources to succeed before entering its body. If startup fails,
+  waiting workers exit without running user code, and the process reports
+  a startup error after joining them.
 - **No recursion.** Declare-before-use with no forward declarations makes
   the call graph a DAG by construction; a routine calling itself is
   rejected. Stack use is therefore statically bounded — and big locals
@@ -618,7 +621,10 @@ deterministic floats. Generics exist — see Generics above.
 - `return expr` / `return` / `break`
 - `echo a, b, c` — writes a line to stdout. Accepts `int`, `bool`,
   `string[N]`, and string literals. Arguments are evaluated left to
-  right (hoisted to temporaries in the generated C).
+  right (hoisted to temporaries in the generated C). If a write or the
+  final buffered flush fails, the process prints
+  `nifty: stdout write failed` to stderr and exits nonzero. A closed
+  POSIX pipe uses this path instead of terminating through SIGPIPE.
 - `discard expr` — explicitly drop a value. Silently ignoring a returned
   value is an error.
 
