@@ -1,0 +1,62 @@
+{
+  "name": "Hand ASM",
+  "target": "arm64-apple-darwin",
+  "platform": "macOS ARM64",
+  "source": "benchmarks/snappy_straight.c",
+  "source_sha256": "9003a213b5d42838d0fba554bb4ff57af48ccac069f93c95bdcc8b57794e3c2b",
+  "upstream": "Supersnappy ff8fe2bffefc1f4edc15deb20d921f600babb8c4",
+  "license": "lib/SNAPPY_LICENSE",
+  "compiler": "Apple clang version 16.0.0 (clang-1600.0.26.4)\nTarget: arm64-apple-darwin24.1.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+  "command": [
+    "cc",
+    "-O2",
+    "-pthread",
+    "-fno-strict-aliasing",
+    "-ffp-contract=off",
+    "-DSNAPPY_NO_MAIN",
+    "-S",
+    "benchmarks/snappy_straight.c",
+    "-o",
+    "benchmarks/arm64/snappy_clang.s"
+  ],
+  "baseline_assembly_sha256": "57e169c1f1127bbf65852bc25e8a4c6e799fdbe1fe11083296d059f8351271ad",
+  "hand_assembly_sha256": "69cf5938bca20745186381d39063818f12605875605887489d8b1f87378c8fc2",
+  "changes": [
+    {
+      "function": "snappyCompress",
+      "change": "Use scaled halfword table addressing; remove redundant match-loop subtraction; hoist invariant vector moves from long-copy emission."
+    },
+    {
+      "function": "snappyUncompress",
+      "change": "Read bounded copy-offset trailers with byte, halfword, or word loads instead of a byte loop."
+    },
+    {
+      "function": "snappyUncompress copy and fill helpers",
+      "change": "Use exact-size ARM64 copies and fills through 64 bytes; retain libc memcpy for larger literals and initialized-span doubling for overlaps."
+    },
+    {
+      "function": "object metadata",
+      "change": "Use macOS 11 deployment marker with baseline Apple Silicon instructions."
+    }
+  ],
+  "abi": {
+    "SnappyBuffer_size": 24,
+    "SnappyBuffer_len": 8,
+    "SnappyBuffer_cap": 16,
+    "snappyCompress": "int (const uint8_t *input, size_t length, SnappyBuffer *output)",
+    "snappyUncompress": "int (const uint8_t *input, size_t length, SnappyBuffer *output, size_t maxOutput)"
+  },
+  "scope": "General raw Snappy codec, arbitrary supported bytes, all copy tags, overlap, strict limits and truncation checks. Identical compressed bytes to the Nifty and Nim algorithm.",
+  "timing": "Same C driver as Hand C; retained output buffers; paired compression plus decompression; input generation, checksums and byte comparisons untimed.",
+  "worktree_base_revision": "92bf20eeff6acac568cec52d2d23a274813b7dd7",
+  "rejected_candidates": [
+    {
+      "change": "Inline all literal sizes",
+      "reason": "Improved some mixed samples but regressed large random literals; keep libc for bulk copies."
+    },
+    {
+      "change": "Forward overlap expansion and short-period SIMD table expansion",
+      "reason": "Slower than initialized-span doubling in rotated screening; preserve the simpler selected implementation."
+    }
+  ]
+}

@@ -52,6 +52,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python benchmarks/test_snappy_runner.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python benchmarks/test_snappy_hand.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python tests/test_snappy.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python tests/test_optimization_benchmark.py

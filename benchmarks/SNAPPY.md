@@ -90,6 +90,7 @@ performance claim against the original Nim implementation.
 ```sh
 python3 benchmarks/run_snappy.py
 python3 benchmarks/run_snappy.py --samples 7 --repeat 10 --wall
+python3 benchmarks/run_snappy.py --backend hand-asm,hand-c
 python3 benchmarks/run_snappy.py --backend c,arm64 --size 65537
 python3 benchmarks/run_snappy.py --opt none --output /tmp/snappy-unoptimized
 ```
@@ -101,8 +102,8 @@ By default, each backend processes three deterministic 256 KiB workloads:
 - `random`: pseudorandom bytes from a fixed integer generator.
 
 Each workload crosses four compressor fragments. The benchmark reports
-compressed size, compression time, decompression time, and throughput
-based on uncompressed bytes. Both codec calls are timed separately with
+compressed size and one combined compression-plus-decompression time.
+Both codec calls are timed separately with
 `clock_gettime(CLOCK_MONOTONIC)`. Setup, hex formatting, checksums, and
 byte-for-byte verification are outside the intervals. Clock-call overhead
 is included.
@@ -116,40 +117,65 @@ the cost of allocating and freeing fresh buffers on every operation.
 The runner builds each backend once and rotates execution order across
 warmup and measured rounds. Each sample starts a fresh process, with its
 own capacity warmup. The reported median is taken over process samples;
-each sample averages its repeated codec calls. Native optimization
+each sample averages the sum of its paired compression and decompression
+calls. It does not add independently calculated medians. Separate codec
+times and throughput remain available in the JSON results. Native optimization
 defaults to `speed`; `--opt none` selects the unoptimized native pipeline.
 The C backend uses its normal `-O2` flags. AMD64 on Apple Silicon is
 explicitly labeled as Rosetta execution.
 
-The timing runner requires macOS or Linux, Python's standard library, the
-Nifty compiler, and matching runtime templates. The C backend also
-requires a C compiler, selected with `--cc` or `CC`. Handwritten C and
-assembly implementations are not part of this benchmark.
+The timing runner requires macOS or Linux and Python's standard library.
+Nifty rows require the Nifty compiler and matching runtime templates.
+Hand C and the C backend require a C compiler, selected with `--cc` or `CC`.
+Hand ASM requires macOS on ARM64. Selecting only Hand C or Hand ASM does
+not require the Nifty compiler.
+
+[snappy_straight.c](snappy_straight.c) is a standalone C port of the same
+Supersnappy algorithm. It uses wide loads and match scanning, retains the
+same fragment, hash, probe, and copy-splitting rules, and produces the same
+compressed bytes. Its decoder checks input lengths, output limits, and
+copy distances before expanding data. The maximum hash table occupies
+32 KiB of stack storage. The Nifty implementation keeps its table in the
+per-thread arena instead.
+
+Hand ASM links a persisted ARM64 codec into the same C benchmark driver.
+See [SNAPPY_HAND_ASM.md](SNAPPY_HAND_ASM.md) for its provenance, manual
+changes, and validation. Default row order is Hand ASM, Hand C, Nifty C
+backend, ARM64 backend, and AMD64 backend via Rosetta where applicable.
 
 An independent Python decoder validates each process's compressed bytes
 against separately generated inputs. Every timed round trip compares all
-decoded bytes in Nifty; the runner also validates lengths and checksums.
+decoded bytes in the workload program; the runner also validates lengths
+and checksums.
 Compressed output must agree across backends and samples. Errors prevent
 publication of timing results.
 
 `benchmarks/output/snappy` is ignored by Git and contains the report,
 original inputs, raw timing samples, clock values, executable architecture,
 build commands, and compiler/source hashes. Each build keeps snapshots of
-the workload and all four library modules. Use a separate `--output`
+the workload and all four library modules for Nifty, or the C driver and
+selected assembly with provenance for the standalone implementations.
+Use a separate `--output`
 directory to retain another run. `--wall` also shows process wall time,
 which includes the deliberately untimed verification and output work.
 
 ### Measured example
 
-Apple M4 Pro, macOS 15.1, November 14, 2026. Each cell below is median
-compression / decompression time in milliseconds for 256 KiB, seven
-process samples, and ten operations per sample:
+Apple M4 Pro, macOS 15.1, November 14, 2026. Each cell is median
+compression plus decompression time in milliseconds for 256 KiB, seven
+process samples, and one hundred paired operations per sample:
 
-| Backend | Repetitive | Mixed | Random |
+| Implementation | Repetitive | Mixed | Random |
 | --- | ---: | ---: | ---: |
-| Nifty C (`-O2`) | 0.189 / 0.168 | 0.289 / 0.255 | 0.189 / 0.167 |
-| Nifty ARM64 | 0.631 / 0.634 | 0.976 / 0.743 | 0.583 / 0.605 |
-| Nifty AMD64 via Rosetta | 0.402 / 0.679 | 0.839 / 0.893 | 0.536 / 0.760 |
+| Hand ASM | 0.025 | 0.192 | 0.012 |
+| Hand C | 0.034 | 0.211 | 0.013 |
+| Nifty C backend | 0.324 | 0.522 | 0.358 |
+| ARM64 backend | 1.241 | 1.672 | 1.170 |
+| AMD64 via Rosetta | 1.064 | 1.681 | 1.274 |
+
+The saved run is `benchmarks/output/snappy-hand/results.json`. The combined
+[raytrace / JSON / snappy table](COMPARISON.md) keeps the earlier raytrace
+and JSON measurements.
 
 All backends produced identical compressed blocks: 12,475 bytes for
 repetitive data, 40,513 for mixed data, and 262,159 for random data. The
@@ -160,6 +186,7 @@ input. These are synthetic workloads and timings are machine-specific.
 
 ```sh
 python3 benchmarks/test_snappy_runner.py
+python3 benchmarks/test_snappy_hand.py
 python3 tests/test_snappy.py
 python3 tests/test_snappy.py --supersnappy /path/to/supersnappy
 nim r tests/test_snappy.nim

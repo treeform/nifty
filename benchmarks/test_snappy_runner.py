@@ -94,7 +94,7 @@ def testArguments():
   for args in (["--size", "0"], ["--size", "4194305"], ["--repeat", "0"],
                ["--repeat", "1001"], ["--samples", "4"], ["--warmups", "0"],
                ["--timeout", "nan"], ["--timeout", "inf"], ["--timeout", "0"],
-               ["--opt", "fast"], ["--backend", "hand-asm"]):
+               ["--opt", "fast"], ["--backend", "invalid"]):
     with redirect_stderr(io.StringIO()):
       rejects(lambda: run.parseArguments(args), SystemExit)
 
@@ -190,6 +190,100 @@ def testUnavailableAndStaleReports():
          patch.object(run.Ray, "availableBackends", side_effect=AssertionError("Discovery must follow clock validation")):
       rejects(lambda: run.main(["--output", temporary]))
 
+
+def testStandalone():
+  """Snapshot standalone inputs and reject mismatched assembly binaries."""
+  darwin = {"system": "Darwin", "physical_architecture": "arm64"}
+  assert run.parseArguments(["--backend", "amd64,hand-c,c,hand-asm,arm64"]).backend == list(run.Backends)
+  with patch.object(run.Ray, "availableBackends", side_effect=AssertionError("No Nifty discovery")):
+    assert run.availableBackends(darwin, None, "cc", False) == ["hand-asm", "c-straight"]
+    assert run.availableBackends({"system": "Linux", "physical_architecture": "arm64"}, None, "cc", False) == ["c-straight"]
+    assert run.availableBackends(darwin, None, None, False) == []
+  with patch.object(run.Ray, "availableBackends", return_value=["arm64"]):
+    assert run.availableBackends(darwin, None, "custom-cc") == ["hand-asm", "c-straight", "c", "arm64"]
+  with tempfile.TemporaryDirectory() as temporary:
+    options = SimpleNamespace(output=Path(temporary), size=100, repeat=2,
+      straight_c_bytes=b"/* Frozen C. */", hand_asm_bytes=b"// Frozen ASM.",
+      hand_asm_manifest_bytes=b'{"origin":"test"}', cc="test-cc",
+      timeout=1, host=darwin)
+    def build(command, timeout, env):
+      """Write a fixture binary without invoking either compiler."""
+      Path(command[-1]).write_bytes(b"binary")
+      assert "-DSNAPPY_SIZE=100" in command
+      return SimpleNamespace(stdout=b"", stderr=b""), 1
+    with patch.object(run.time, "CLOCK_MONOTONIC", 1, create=True), patch.object(run.Ray, "runCommand", side_effect=build), patch.object(run.Ray, "binaryArchitectures", return_value=["arm64"]):
+      result = run.buildBackend("hand-asm", options, {})
+      assert result["source_sha256"] == hashlib.sha256(options.straight_c_bytes).hexdigest()
+      assert result["assembly_sha256"] == hashlib.sha256(options.hand_asm_bytes).hexdigest()
+      assert result["provenance_sha256"] == hashlib.sha256(options.hand_asm_manifest_bytes).hexdigest()
+      assert (Path(result["source"]).parent / "snappy_manifest.json").read_bytes() == options.hand_asm_manifest_bytes
+      assert "-DSNAPPY_HAND_ASM" in result["compile_command"]
+      run.buildBackend("c-straight", options, {})
+    with patch.object(run.time, "CLOCK_MONOTONIC", 1, create=True), patch.object(run.Ray, "runCommand", side_effect=build), patch.object(run.Ray, "binaryArchitectures", return_value=["amd64"]):
+      rejects(lambda: run.buildBackend("hand-asm", options, {}))
+
+
+def testStandaloneMain():
+  """Run standalone selection with absent Nifty inputs and record hashes."""
+  import json
+  from contextlib import redirect_stdout
+  with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    source = directory / "codec.c"
+    source.write_bytes(b"/* Snapshot. */")
+    cc = directory / "cc"
+    cc.write_bytes(b"compiler")
+    assembly = directory / "snappy_hand.S"
+    assembly.write_bytes(b"// Assembly.")
+    manifest = directory / "snappy_manifest.json"
+    manifest.write_bytes(b'{"origin":"fixture"}')
+    args = ["--backend", "hand-asm,hand-c", "--compiler", str(directory / "missing"),
+      "--source", str(directory / "missing.nifty"), "--hand-c-source", str(source),
+      "--hand-asm-source", str(assembly), "--output", str(directory / "out")]
+    def benchmark(options, backends, host, env):
+      """Check immutable inputs before returning an empty report fixture."""
+      assert options.source_text is None and options.library_files == {}
+      assert options.straight_c_bytes == source.read_bytes()
+      assert backends == ["hand-asm", "c-straight"]
+      return {"backends": [], "correctness": "Validated"}
+    host = {"system": "Darwin", "physical_architecture": "arm64"}
+    with patch.object(run.time, "CLOCK_MONOTONIC", 1, create=True), patch.object(run.Ray, "hostInfo", return_value=host), patch.object(run.shutil, "which", return_value=str(cc.resolve())), patch.object(run.Ray, "availableBackends", side_effect=AssertionError("No Nifty discovery")), patch.object(run.Ray, "optionalCommand", return_value="fixture"), patch.object(run, "benchmark", side_effect=benchmark), redirect_stdout(io.StringIO()):
+      assert run.main(args) == 0
+    report = json.loads((directory / "out/results.json").read_bytes())
+    for path in (source, assembly, manifest, cc):
+      assert report["inputs_sha256"][str(path.resolve())] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert report["toolchain"]["compiler"] is None
+    with patch.object(run.Ray, "hostInfo", return_value={"system": "Linux", "physical_architecture": "arm64"}):
+      rejects(lambda: run.main(args))
+
+
+def testCombined():
+  """Sum paired iterations before means and medians across processes."""
+  valid, expected = response()
+  baseline = run.parseOutput(valid, 100, 2, expected)
+  datasets = []
+  for compress, decompress in [(1, 100), (50, 50), (100, 1)]:
+    datasets.append([{**block, "iterations": [
+      {"compress_ns": compress, "decompress_ns": decompress,
+       "roundtrip_ns": compress + decompress} for unused in range(2)]}
+      for block in baseline])
+  def build(backend, options, env):
+    """Supply sample state for aggregation only."""
+    return {"backend": backend, "execution_command": [backend],
+      "raw_samples": [], "warmups": [], "process_wall_ns": []}
+  with tempfile.TemporaryDirectory() as temporary:
+    options = SimpleNamespace(output=Path(temporary), size=100, repeat=2,
+      samples=3, warmups=0, timeout=1)
+    with patch.object(run, "buildBackend", side_effect=build), patch.object(run.Ray, "runCommand", return_value=(SimpleNamespace(stdout=valid, stderr=b""), 1)), patch.object(run, "parseOutput", side_effect=datasets):
+      workload = run.benchmark(options, ["c"], {}, {})["backends"][0]["workloads"][0]
+    assert workload["compress_ns"]["median"] == 50
+    assert workload["decompress_ns"]["median"] == 50
+    assert workload["roundtrip_ns"]["median"] == 101
+
+
+testStandalone()
+testStandaloneMain()
+testCombined()
 
 testOracle()
 testProtocol()

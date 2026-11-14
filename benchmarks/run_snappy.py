@@ -24,12 +24,16 @@ def load(name, path):
 Ray = load("ray_benchmark", Root / "benchmarks/run.py")
 BenchmarkError = Ray.BenchmarkError
 LibraryNames = ("snappy.nifty", "snappytypes.nifty", "snappycompress.nifty", "snappydecompress.nifty")
+StandaloneBackends = ("hand-asm", "c-straight")
+Backends = StandaloneBackends + Ray.Backends
 Kinds = ("repetitive", "mixed", "random")
 TimingScope = ("Compression and decompression calls are timed separately with monotonic clocks. "
                "Input generation, hex output, checksums and exact roundtrip comparisons are untimed. "
                "Each process prewarms both output buffers and reuses their capacities; any codec "
                "internal allocation remains timed. Clock-call overhead remains included. "
-               "Every sample is a fresh process. MiB/s uses uncompressed input bytes.")
+               "Every sample is a fresh process. Snappy timing sums compression and decompression "
+               "within each iteration, averages those sums per process, then reports their median. "
+               "MiB/s uses uncompressed input bytes once per roundtrip.")
 
 
 def digest(data):
@@ -101,6 +105,7 @@ def parseOutput(output, size, repeat, expected):
           raise BenchmarkError("Invalid Snappy monotonic interval")
         elapsed.append(duration)
       samples.append({"compress_ns": elapsed[0], "decompress_ns": elapsed[1],
+                      "roundtrip_ns": sum(elapsed),
                       "clock_fields": values[1:13], "compressed_bytes": values[13],
                       "compressed_checksum": values[14], "decoded_checksum": values[15]})
     parsed.append({"kind": fixture["kind"], "compressed_bytes": len(compressed),
@@ -123,24 +128,48 @@ def configuredSource(source, size, repeat):
 def buildBackend(backend, options, env):
   """Compile deterministic source snapshots once and preserve diagnostics."""
   directory = options.output / "build" / f"n{options.size}-r{options.repeat}" / backend
-  (directory / "lib").mkdir(parents=True, exist_ok=True)
-  for name, data in options.library_files.items():
-    (directory / "lib" / name).write_bytes(data)
-  source = directory / "snappy.nifty"
-  source.write_bytes(configuredSource(options.source_text, options.size, options.repeat).encode("utf-8"))
+  directory.mkdir(parents=True, exist_ok=True)
   executable = directory / "snappy"
   executable.unlink(missing_ok=True)
-  command = [str(options.compiler), "build", str(source), f"--backend:{backend}", f"--opt:{options.opt}", "-o", str(executable)]
+  assembly = None
+  provenance = None
+  if backend in StandaloneBackends:
+    source = directory / "snappy_straight.c"
+    source.write_bytes(options.straight_c_bytes)
+    flags = Ray.StraightCFlags.copy()
+    if backend == "hand-asm":
+      flags += ["-arch", "arm64", "-DSNAPPY_HAND_ASM"]
+      assembly = directory / "snappy_hand.S"
+      assembly.write_bytes(options.hand_asm_bytes)
+      provenance = directory / "snappy_manifest.json"
+      provenance.write_bytes(options.hand_asm_manifest_bytes)
+    command = [options.cc] + flags + [
+      f"-DSNAPPY_SIZE={options.size}",
+      f"-DSNAPPY_REPETITIONS={options.repeat}",
+      f"-DSNAPPY_CLOCK_ID={time.CLOCK_MONOTONIC}", str(source)]
+    if assembly is not None:
+      command.append(str(assembly))
+    command += ["-o", str(executable)]
+  else:
+    (directory / "lib").mkdir(parents=True, exist_ok=True)
+    for name, data in options.library_files.items():
+      (directory / "lib" / name).write_bytes(data)
+    source = directory / "snappy.nifty"
+    source.write_bytes(configuredSource(options.source_text, options.size, options.repeat).encode("utf-8"))
+    command = [str(options.compiler), "build", str(source), f"--backend:{backend}", f"--opt:{options.opt}", "-o", str(executable)]
   response, elapsed = Ray.runCommand(command, options.timeout, env)
   (directory / "build.stdout").write_bytes(response.stdout)
   (directory / "build.stderr").write_bytes(response.stderr)
   architectures = Ray.binaryArchitectures(executable)
-  if len(architectures) != 1 or (backend != "c" and architectures != [backend]):
+  if len(architectures) != 1 or (backend in ("arm64", "amd64", "hand-asm") and
+      architectures != ["arm64" if backend == "hand-asm" else backend]):
     raise BenchmarkError("Unexpected Snappy executable architecture")
   execution = [str(executable)]
   if architectures == ["amd64"] and options.host["physical_architecture"] == "arm64":
     execution = ["/usr/bin/arch", "-x86_64"] + execution
   return {"backend": backend, "label": Ray.backendLabel(backend, options.host, architectures[0]),
+          "assembly_sha256": hashlib.sha256(assembly.read_bytes()).hexdigest() if assembly else None,
+          "provenance_sha256": hashlib.sha256(provenance.read_bytes()).hexdigest() if provenance else None,
           "source": str(source), "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
           "executable": str(executable), "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
           "execution_architecture": architectures[0], "compile_command": command,
@@ -179,7 +208,7 @@ def benchmark(options, backends, host, env):
     for kind, fixture in enumerate(expected):
       summary = {key: value for key, value in fixture.items() if key != "input"}
       summary["compressed_bytes"] = result["raw_samples"][0]["workloads"][kind]["compressed_bytes"]
-      for operation in ("compress", "decompress"):
+      for operation in ("compress", "decompress", "roundtrip"):
         values = [sum(row[operation + "_ns"] for row in sample["workloads"][kind]["iterations"]) / options.repeat for sample in result["raw_samples"]]
         summary[operation + "_ns"] = Ray.summarize(values)
         summary[operation + "_mib_per_second"] = options.size * 1e9 / 1048576 / summary[operation + "_ns"]["median"]
@@ -187,7 +216,7 @@ def benchmark(options, backends, host, env):
   for fixture in expected:
     (options.output / (fixture["kind"] + ".bin")).write_bytes(fixture["input"])
   return {"sample_order": orders, "backends": results,
-          "correctness": "Every baseline decoded independently in Python; every timed roundtrip compared byte for byte in Nifty; every iteration checksum and length validated in Python"}
+          "correctness": "Every baseline decoded independently in Python; every timed roundtrip compared byte for byte by each codec; every iteration checksum and length validated in Python"}
 
 
 def parseArguments(arguments=None):
@@ -199,6 +228,8 @@ def parseArguments(arguments=None):
   parser.add_argument("--opt", choices=("none", "speed"), default="speed")
   parser.add_argument("--compiler", type=Path, default=Root / "nifty")
   parser.add_argument("--source", type=Path, default=Root / "benchmarks/snappy.nifty")
+  parser.add_argument("--hand-c-source", "--straight-c-source", dest="straight_c_source", type=Path, default=Root / "benchmarks/snappy_straight.c")
+  parser.add_argument("--hand-asm-source", type=Path, default=Root / "benchmarks/arm64/snappy_hand.S")
   parser.add_argument("--output", type=Path, default=Root / "benchmarks/output/snappy")
   parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
   parser.add_argument("--timeout", type=float, default=300)
@@ -212,30 +243,50 @@ def parseArguments(arguments=None):
   selected = []
   for entry in options.backend:
     for backend in entry.split(","):
-      if backend not in Ray.Backends:
+      backend = "c-straight" if backend == "hand-c" else backend
+      if backend not in Backends:
         parser.error(f"Unknown backend: {backend}")
       if backend not in selected:
         selected.append(backend)
-  options.backend = selected
-  for name in ("compiler", "source", "output"):
+  options.backend = [backend for backend in Backends if backend in selected]
+  for name in ("compiler", "source", "straight_c_source", "hand_asm_source", "output"):
     setattr(options, name, getattr(options, name).expanduser().resolve())
   return options
 
 
 def markdownReport(report, wall=False):
-  """Present separate codec throughput and explicit timing boundaries."""
+  """Present paired roundtrip timing and explicit timing boundaries."""
   settings = report["settings"]
   lines = [f"Nifty raw Snappy benchmark: {settings['size']} bytes per workload, {settings['repeat']} repetitions, {settings['samples']} samples, {settings['warmups']} warmups.", "", f"Native optimization: {settings['opt']}. C uses -O2.", "", TimingScope, "", report["benchmark"]["correctness"] + ".", "",
-           "| Backend | Compile ms | Workload | Compressed bytes | Compress ms | Decompress ms | Compress MiB/s | Decompress MiB/s |",
-           "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |"]
+           "| Backend | Compile ms | Workload | Compressed bytes | Snappy ms | Snappy MiB/s |",
+           "| --- | ---: | --- | ---: | ---: | ---: |"]
   for backend in report["benchmark"]["backends"]:
     for workload in backend["workloads"]:
-      lines.append(f"| {backend['label']} | {backend['compile_wall_ns']/1e6:.3f} | {workload['kind']} | {workload['compressed_bytes']} | {workload['compress_ns']['median']/1e6:.3f} | {workload['decompress_ns']['median']/1e6:.3f} | {workload['compress_mib_per_second']:.3f} | {workload['decompress_mib_per_second']:.3f} |")
+      lines.append(f"| {backend['label']} | {backend['compile_wall_ns']/1e6:.3f} | {workload['kind']} | {workload['compressed_bytes']} | {workload['roundtrip_ns']['median']/1e6:.3f} | {workload['roundtrip_mib_per_second']:.3f} |")
   if wall:
     lines += ["", "Whole-process wall medians include input generation, validation and output:"]
     for backend in report["benchmark"]["backends"]:
       lines += [f"- {backend['label']}: {backend['process_wall_ns']['median']/1e6:.3f} ms."]
   return "\n".join(lines) + "\n"
+
+
+def handAsmSupported(host):
+  """Restrict frozen Mach-O assembly to physical Apple ARM64 hosts."""
+  return host["system"] == "Darwin" and host.get("physical_architecture") == "arm64"
+
+
+def availableBackends(host, compiler, cc, needsNifty=True):
+  """Discover standalone backends without requiring a Nifty compiler."""
+  available = list(Ray.availableBackends(host, compiler)) if needsNifty else []
+  if cc:
+    available += ["c-straight"]
+    if needsNifty and "c" not in available:
+      available.append("c")
+    if handAsmSupported(host):
+      available += ["hand-asm"]
+  else:
+    available = [backend for backend in available if backend != "c"]
+  return [backend for backend in Backends if backend in available]
 
 
 def main(arguments=None):
@@ -247,18 +298,33 @@ def main(arguments=None):
   host = Ray.hostInfo()
   if host["system"] not in ("Darwin", "Linux") or getattr(time, "CLOCK_MONOTONIC", None) is None:
     raise BenchmarkError("Snappy timing requires POSIX clock_gettime")
-  if not options.compiler.is_file() or not os.access(options.compiler, os.X_OK):
-    raise BenchmarkError("Compiler is not executable")
+  if "hand-asm" in options.backend and not handAsmSupported(host):
+    raise BenchmarkError("Hand ASM requires macOS on physical ARM64")
+  needsNifty = not options.backend or any(backend not in StandaloneBackends for backend in options.backend)
+  options.source_text = None
+  options.library_files = {}
+  if needsNifty:
+    if not options.compiler.is_file() or not os.access(options.compiler, os.X_OK):
+      raise BenchmarkError("Compiler is not executable")
+    options.source_text = options.source.read_bytes().decode("utf-8")
+    options.library_files = {name: (Root / "lib" / name).read_bytes() for name in LibraryNames}
   options.cc = shutil.which(options.cc)
-  available = Ray.availableBackends(host, options.compiler)
-  if not options.cc:
-    available = [backend for backend in available if backend != "c"]
+  available = availableBackends(host, options.compiler, options.cc, needsNifty)
   backends = options.backend or available
   if not backends or any(backend not in available for backend in backends):
     raise BenchmarkError("Requested backend unavailable; available: " + ", ".join(available))
-  options.source_text = options.source.read_bytes().decode("utf-8")
-  options.library_files = {name: (Root / "lib" / name).read_bytes() for name in LibraryNames}
-  inputs = [options.compiler] + ([Path(options.cc)] if options.cc and "c" in backends else [])
+  standalone = any(backend in StandaloneBackends for backend in backends)
+  options.straight_c_bytes = options.straight_c_source.read_bytes() if standalone else None
+  options.hand_asm_bytes = options.hand_asm_source.read_bytes() if "hand-asm" in backends else None
+  manifest = options.hand_asm_source.with_name("snappy_manifest.json")
+  options.hand_asm_manifest_bytes = manifest.read_bytes() if "hand-asm" in backends else None
+  inputs = [options.compiler] if needsNifty else []
+  if options.cc and any(backend in ("c",) + StandaloneBackends for backend in backends):
+    inputs.append(Path(options.cc))
+  if standalone:
+    inputs.append(options.straight_c_source)
+  if "hand-asm" in backends:
+    inputs += [options.hand_asm_source, manifest]
   hashes = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
   env = os.environ.copy()
   if options.cc:
@@ -271,12 +337,16 @@ def main(arguments=None):
   if any(hashlib.sha256(Path(path).read_bytes()).hexdigest() != digest for path, digest in hashes.items()):
     raise BenchmarkError("Compiler changed during benchmark")
   report = {"schema": "nifty-snappy-benchmark-v1", "machine": host, "timing_scope": TimingScope,
-            "inputs_sha256": hashes, "toolchain": {"compiler": str(options.compiler), "cc": options.cc,
-            "compiler_help": Ray.optionalCommand([str(options.compiler), "--help"]),
+            "inputs_sha256": hashes, "toolchain": {"compiler": str(options.compiler) if needsNifty else None, "cc": options.cc,
+            "compiler_help": Ray.optionalCommand([str(options.compiler), "--help"]) if needsNifty else None,
             "cc_version": Ray.optionalCommand([options.cc, "--version"]) if options.cc else None},
             "settings": {"size": options.size, "repeat": options.repeat, "samples": options.samples,
             "warmups": options.warmups, "opt": options.opt, "backends": backends,
-            "source_sha256": hashlib.sha256(options.source_text.encode("utf-8")).hexdigest(),
+            "source_sha256": hashlib.sha256(options.source_text.encode("utf-8")).hexdigest() if needsNifty else None,
+            "straight_c_sha256": hashlib.sha256(options.straight_c_bytes).hexdigest() if standalone else None,
+            "hand_asm_sha256": hashlib.sha256(options.hand_asm_bytes).hexdigest() if options.hand_asm_bytes is not None else None,
+            "hand_asm_provenance": json.loads(options.hand_asm_manifest_bytes) if options.hand_asm_manifest_bytes is not None else None,
+            "hand_asm_provenance_sha256": hashlib.sha256(options.hand_asm_manifest_bytes).hexdigest() if options.hand_asm_manifest_bytes is not None else None,
             "library_sha256": {name: hashlib.sha256(data).hexdigest() for name, data in options.library_files.items()}},
             "benchmark": result}
   markdown = markdownReport(report, options.wall)
