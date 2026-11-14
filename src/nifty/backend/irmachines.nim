@@ -676,7 +676,8 @@ proc emitArm64Ir*(module: ir.IrModule,
             places[second.results.first].register - 1,
             base,
             int(item.offset),
-            single = true
+            single = function.values[item.results.first].valueType ==
+              ir.Float32Type
           )
           continue
         let resultId = int(item.results.first)
@@ -1013,7 +1014,8 @@ proc emitArm64Ir*(module: ir.IrModule,
           if floating:
             let left = code.floatOperand(operand(0), scratchFloat)
             if zeros.comparisons[instructionIndex]:
-              code.compareFloatZero(left, single = true)
+              code.compareFloatZero(left,
+                single = operandKind(0) == ir.Float32Type)
             else:
               let right = code.floatOperand(
                 operand(1),

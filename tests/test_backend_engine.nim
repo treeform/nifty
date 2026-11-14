@@ -233,6 +233,29 @@ for item in bitcasts.instructions.mitems:
     item.conversion = BitcastConversion
 bitcasts.finish()
 module.functions.add(bitcasts)
+var zeroComparisons = newFunction("float64ZeroComparisons")
+let
+  compared = zeroComparisons.instruction(LoadOp, [ValueId(1)], Float64Type)
+  positiveZero = zeroComparisons.instruction(ConstantOp, [], Float64Type)
+for comparison in IrComparison:
+  let value = zeroComparisons.instruction(CompareOp,
+    [compared, positiveZero], BoolType)
+  zeroComparisons.instructions[^1].comparison = comparison
+  discard zeroComparisons.instruction(StoreOp, [ValueId(2), value],
+    offset = int64(ord(comparison)), resultCount = 0)
+zeroComparisons.finish()
+module.functions.add(zeroComparisons)
+
+var pairEdges = newFunction("float64PairEdges")
+var edgeValues: seq[ValueId]
+for offset in [-512'i64, -504'i64, 504'i64, 512'i64]:
+  edgeValues.add(pairEdges.instruction(LoadOp, [ValueId(1)], Float64Type,
+    offset = offset))
+for i, value in edgeValues:
+  discard pairEdges.instruction(StoreOp, [ValueId(2), value],
+    offset = int64(i * 8), resultCount = 0)
+pairEdges.finish()
+module.functions.add(pairEdges)
 
 var builder = IrBuilder(module: IrModule(pointerBytes: 8))
 let builderLabel = builder.label()
@@ -337,6 +360,23 @@ for target in NativeTarget:
         entry(11)(ctx.addr, bitInput.addr, bitOutput.addr, nil)
         for value in bitOutput:
           doAssert value == bits
+      for representation in [0'u64, 0x8000000000000000'u64,
+          cast[uint64](1.0), cast[uint64](-1.0),
+          0x7ff8000000001234'u64, 0x7ff0000000000000'u64,
+          0xfff0000000000000'u64]:
+        var
+          compared = cast[float64](representation)
+          observed: array[6, bool]
+        entry(12)(ctx.addr, compared.addr, observed.addr, nil)
+        doAssert observed == [compared == 0.0, compared != 0.0,
+          compared < 0.0, compared <= 0.0, compared > 0.0, compared >= 0.0]
+      var edgeInput: array[129, float64]
+      var edgeOutput: array[4, float64]
+      for i in 0 ..< edgeInput.len:
+        edgeInput[i] = float64(i) + 0.5
+      entry(13)(ctx.addr, edgeInput[64].addr, edgeOutput.addr, nil)
+      doAssert edgeOutput ==
+        [edgeInput[0], edgeInput[1], edgeInput[127], edgeInput[128]]
       buffer.release()
       doAssert buffer.entry() == nil
 

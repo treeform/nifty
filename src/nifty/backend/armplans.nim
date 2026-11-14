@@ -54,7 +54,7 @@ proc floatAbiPreferences*(function: IrFunction): seq[int32] {.raises: [].} =
 
 proc floatLoadPairs*(function: IrFunction, registers: openArray[int32],
     enabled = true): seq[bool] {.raises: [].} =
-  ## Selects adjacent binary32 loads after their physical registers are known.
+  ## Selects adjacent same-width floating loads after register allocation.
   result = newSeq[bool](function.instructions.len)
   if not enabled:
     return
@@ -69,22 +69,27 @@ proc floatLoadPairs*(function: IrFunction, registers: openArray[int32],
         not first.volatile and not second.volatile and
         first.results.count == 1 and second.results.count == 1 and
         first.arguments.count == 1 and second.arguments.count == 1 and
-        function.values[first.results.first].valueType == Float32Type and
-        function.values[second.results.first].valueType == Float32Type and
+        function.values[first.results.first].valueType in
+          {Float32Type, Float64Type} and
+        function.values[second.results.first].valueType ==
+          function.values[first.results.first].valueType and
         int32(function.operands[first.arguments.first]) ==
           int32(function.operands[second.arguments.first]) and
-        first.offset in -256'i64 .. 252'i64 and first.offset mod 4 == 0 and
-        second.offset == first.offset + 4 and
         registers[first.results.first] >= 0 and
         registers[second.results.first] >= 0 and
         registers[first.results.first] != registers[second.results.first]:
-          result[index] = true
-          inc index
+          let width = if function.values[first.results.first].valueType ==
+              Float32Type: 4'i64 else: 8'i64
+          if first.offset >= -64 * width and first.offset <= 63 * width and
+              first.offset mod width == 0 and
+              second.offset == first.offset + width:
+            result[index] = true
+            inc index
       inc index
 
 proc floatZeroComparisons*(function: IrFunction, enabled = true):
     ArmFloatZeroPlan {.raises: [].} =
-  ## Selects exact positive binary32 zero without keeping an unused register.
+  ## Selects exact positive floating zero without an unused register.
   result.comparisons = newSeq[bool](function.instructions.len)
   result.omitted = newSeq[bool](function.values.len)
   if not enabled:
@@ -103,7 +108,8 @@ proc floatZeroComparisons*(function: IrFunction, enabled = true):
       observe(item.arguments)
       if item.op == ConstantOp and item.results.count == 1 and
         not item.volatile and item.bits == 0 and
-        function.values[item.results.first].valueType == Float32Type:
+        function.values[item.results.first].valueType in
+          {Float32Type, Float64Type}:
           zeros[item.results.first] = true
     observe(data.terminator.arguments)
     for index in data.terminator.edges.indices:
