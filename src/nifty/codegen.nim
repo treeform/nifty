@@ -2,7 +2,7 @@
 ## Because nifty enforces declare-before-use, the generated C needs no
 ## forward prototypes: definitions appear in call order.
 
-import std/[strutils, tables, sets, sequtils]
+import std/[math, strutils, tables, sets, sequtils]
 import types, semantics
 
 type
@@ -109,6 +109,22 @@ proc genOrdered(g: var Gen, e: Expr): string
 proc genPathOrdered(g: var Gen, e: Expr): string
 proc borrowArg(g: var Gen, e: Expr, target: Typ, ordered: bool): string
 
+proc floatLiteral(e: Expr): string =
+  ## Emits the parsed value after rounding to its checked storage width.
+  let
+    single = e.typ != nil and e.typ.width == 4
+    value = if single: float64(float32(e.fval)) else: e.fval
+    suffix = if single: "f" else: ""
+  case value.classify
+  of fcInf:
+    if single: "INFINITY" else: "((double)INFINITY)"
+  of fcNegInf:
+    if single: "(-INFINITY)" else: "(-((double)INFINITY))"
+  of fcNan:
+    if single: "NAN" else: "((double)NAN)"
+  else:
+    $value & suffix
+
 proc genExpr(g: var Gen, e: Expr): string =
   if e.wrapOpt:
     # A plain value flowing into an optional destination.
@@ -125,7 +141,7 @@ proc genExpr(g: var Gen, e: Expr): string =
   of IntExpr:
     $e.ival & "LL"
   of FloatExpr:
-    (if e.typ != nil and e.typ.width == 4: $e.fval & "f" else: $e.fval)
+    floatLiteral(e)
   of BoolExpr:
     if e.bval: "true" else: "false"
   of StrExpr:
@@ -1012,6 +1028,7 @@ const cPrelude = """
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 #include <string.h>
 #include <pthread.h>
 #include <stdlib.h>

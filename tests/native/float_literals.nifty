@@ -1,0 +1,28 @@
+# Widthless literals are parsed once and then rounded to their checked width.
+func literal(): float32 =
+  return 1.0000001788139343
+
+func isOne(value: float32): bool =
+  return value == 1.0
+
+thread main() =
+  let lower: float32 = 1.0000000596046448
+  let upper: float32 = 1.0000001788139343
+  echo lower == 1.0
+  echo upper == 1.000000238418579, " ", literal() == upper
+  echo isOne(1.0000000596046448)
+  let negative: float32 = -1.0000000596046448
+  echo negative == -1.0
+  let tiny: float32 = 1.401298464324817e-45
+  let zero: float32 = -1.0e-100
+  echo float64(tiny) == 1.401298464324817e-45
+  echo 1.0 / zero < 0.0
+  let largest: float32 = 3.4028234663852886e38
+  echo float64(largest) == 3.4028234663852886e38
+  let overflow: float32 = 1.0e40
+  echo float64(overflow) == 1.0 / 0.0
+  let infinity: float64 = 1.0e400
+  echo infinity == 1.0 / 0.0, " ", -1.0e400 == -1.0 / 0.0
+  echo infinity.toInt, " ", (-1.0e400).toInt
+  echo 1.7976931348623157e308 > 1.0e308
+  echo 4.9406564584124654e-324 > 0.0
