@@ -487,6 +487,15 @@ proc capPathName(c: Ctx, e: Expr): string =
       return path & ".cap"
   ""
 
+proc capCountKey(c: Ctx, buffer, count: Expr): string =
+  ## Names a proven count <= capacity relationship for two stable values.
+  if count.kind != IdentExpr or c.factName(count) == "":
+    return ""
+  let path = c.stablePathName(buffer)
+  if path == "":
+    return ""
+  path & "@cap@" & count.sval
+
 proc stablePathName(c: Ctx, e: Expr): string =
   ## A provable name: an eligible ident, or a pure field chain on one
   ## ("p.fix"). Indexed paths have no stable name.
@@ -611,6 +620,9 @@ proc addCondFacts(c: var Ctx, e: Expr, negated = false) =
       let lo = if e.sval == "reserve": max(old.lo, size.lo)
         else: size.lo
       c.facts[path & ".cap"] = Fact(lo: lo, hi: IntHigh)
+      let key = c.capCountKey(e.kids[0], e.kids[1])
+      if key != "":
+        c.facts[key] = Fact(lo: 1, hi: 1)
   if e.kind == FieldExpr and e.isOptOk and not negated:
     let pn = c.stablePathName(e.kids[0])
     if pn != "":
@@ -642,6 +654,16 @@ proc addCondFacts(c: var Ctx, e: Expr, negated = false) =
   var left = e.kids[0]
   var right = e.kids[1]
   var relation = if negated: negateCmp(e.sval) else: e.sval
+  if relation in ["<=", "<"]:
+    if right.kind == FieldExpr and right.sval == "cap":
+      let key = c.capCountKey(right.kids[0], left)
+      if key != "":
+        c.facts[key] = Fact(lo: 1, hi: 1)
+  elif relation in [">=", ">"]:
+    if left.kind == FieldExpr and left.sval == "cap":
+      let key = c.capCountKey(left.kids[0], right)
+      if key != "":
+        c.facts[key] = Fact(lo: 1, hi: 1)
   if relation == ">":
     swap(left, right)
     relation = "<"
@@ -2113,6 +2135,12 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             let n = parseBiggestInt(pm.boundedBy)
             Fact(lo: n, hi: n)
         let buffer = e.kids[i]
+        let capRelation =
+          if countIndex >= 0 and pm.isVar and pm.typ.kind == StringType:
+            let key = c.capCountKey(buffer, e.kids[countIndex])
+            key != "" and key in c.facts and c.facts[key].lo >= 1
+          else:
+            false
         let followsLength =
           if countIndex >= 0 and not pm.isVar and
               e.kids[countIndex].kind == FieldExpr and
@@ -2127,6 +2155,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
             pm.typ.len
           elif pm.isVar and not pm.typ.dynamic:
             pm.typ.len
+          elif buffer.kind == StrExpr and not pm.isVar:
+            int64(buffer.sval.len)
           else:
             let path = c.stablePathName(buffer)
             if path == "": 0'i64
@@ -2134,7 +2164,8 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
               c.facts.getOrDefault(path & ".cap",
                 Fact(lo: 0, hi: IntHigh)).lo
             else: c.curFact(path & ".len").lo
-        if count.lo < 0 or (not followsLength and count.hi > available):
+        if count.lo < 0 or
+            (not followsLength and not capRelation and count.hi > available):
           err(e.line, "cannot prove foreign buffer '" & pm.name &
             "' has " & rangeStr(count) & " accessible bytes or elements " &
             "(available at least " & $available & "); resize or guard first")

@@ -6,8 +6,8 @@ that each caller supplies storage for that span.
 
 ```nifty
 extern "libc":
-  proc read(fd: int32, buffer: var string[128] boundedBy count, count: int64): int64
-  proc write(fd: int32, buffer: string[128] boundedBy count, count: int64): int64
+  proc read(fd: int32, buffer: var string boundedBy count, count: int64): int64
+  proc write(fd: int32, buffer: string boundedBy count, count: int64): int64
   proc pipe(fds: var array[2, int32] boundedBy 2): int32
 ```
 
@@ -28,6 +28,13 @@ if buffer.reserve(128):
   if n >= 0 and n <= 128:
     discard buffer.setLen(n)
 ```
+
+The checker also accepts a guarded variable count such as
+`if n <= buffer.cap: read(fd, buffer, n)`, and a successful
+`buffer.reserve(n)` proves the same relationship. Changing either value
+invalidates that proof. A read-only literal has its known byte length,
+so `write(fd, "hello", 5)` is valid with a compatible fixed-string
+declaration.
 
 Foreign results and writable integer fields must have ranges guaranteed by
 their ABI type. A C result declared `0 .. 0` is rejected because the C

@@ -1,0 +1,24 @@
+# platforms: posix
+extern "libc":
+  proc fill "memset"(buffer: var string boundedBy count, value: int32, count: int64): int64
+  proc compare "memcmp"(left: string[8] boundedBy count, right: string[8] boundedBy count, count: int64): int32
+
+proc reserved(count: 0 .. 100) =
+  var buffer: string
+  if buffer.reserve(count):
+    discard fill(buffer, 65, count)
+    if buffer.setLen(count):
+      echo buffer
+
+proc guarded(count: 0 .. 100) =
+  var buffer: string
+  if buffer.reserve(8):
+    if count <= buffer.cap:
+      discard fill(buffer, 66, count)
+      if buffer.setLen(count):
+        echo buffer
+
+thread main() =
+  reserved(3)
+  guarded(4)
+  echo compare("hello", "hello", 5)

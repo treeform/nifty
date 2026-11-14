@@ -1,0 +1,11 @@
+extern "libc":
+  proc fill "memset"(buffer: var string boundedBy count, value: int32, count: int64): int64
+
+proc attempt(count: 0 .. 100) =
+  var buffer: string
+  if buffer.reserve(count):
+    discard buffer.resize(1)
+    discard fill(buffer, 65, count)
+
+thread main() =
+  attempt(5)
