@@ -26,6 +26,8 @@ type
   IrAmd64Image* = object
     bytes*: seq[byte]
     offsets*: seq[int]
+    frameBytes*: seq[int]
+    wrapperFrameBytes*: int
 
 proc copyFloat(code: var XAssembler, destination, source: int,
     single: bool) =
@@ -362,6 +364,9 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
         not defined(nimkeyNoAmdArgumentBanks):
       index > 0 and function.directOnly
     else: false)
+  result.frameBytes = newSeq[int](module.functions.len)
+  result.wrapperFrameBytes = when defined(nimkeyNoAmdEntryCopies): 160
+    else: 16 + aligned(SavedRegisters.len * 8, 16) + 32
   code.prologue([ir.AddressType, ir.AddressType, ir.AddressType, ir.AddressType])
   when not defined(nimkeyNoAmdEntryCopies):
     code.allocateStack(32)
@@ -372,6 +377,7 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
   for index, function in module.functions:
     let contexts = contextAliases(function, module.pointerBytes)
     if function.trapBody():
+      result.frameBytes[index] = 8
       code.place(entries[index])
       code.trap()
       if code.position() > maxBytes:
@@ -472,6 +478,7 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
       frameBytes += savedFloats.len * 16
     if frameBytes > MaxFrameBytes:
       error("IR native frame exceeds limits")
+    result.frameBytes[index] = frameBytes + frameOverhead
     proc integer(code: var XAssembler, value: ir.ValueId,
         destination = Rax) =
       ## Reads an allocated integer without clobbering another live value.

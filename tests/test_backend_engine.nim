@@ -40,6 +40,15 @@ proc floatHost(value: float32, scale: int32): float32
   ## Exercises a narrow integer argument and binary32 C return value.
   value * float32(scale)
 
+proc stackedHost(i0, i1, i2, i3, i4, i5, i6, i7: int64,
+    f0, f1, f2, f3, f4, f5, f6, f7: float32,
+    small: int8, extra: float32, medium: int32, wide: float64,
+    last: int64): float64 {.cdecl, raises: [].} =
+  ## Exercises both overflow argument banks and compact mixed stack slots.
+  float64(i0 + i1 + i2 + i3 + i4 + i5 + i6 + i7) +
+    float64(f0 + f1 + f2 + f3 + f4 + f5 + f6 + f7) +
+    float64(small) + float64(extra) + float64(medium) + wide + float64(last)
+
 var module = IrModule(pointerBytes: 8)
 module.hosts = @[
   IrHost(name: "integerHost", binding: 0, failureMode: NoFailCall,
@@ -52,6 +61,15 @@ module.hosts = @[
 module.globals = @[IrGlobal(name: "value", bytes: Span(first: 0, count: 8),
   alignment: 8, offset: 0)]
 module.data = newSeq[byte](8)
+var stackedParameters: seq[IrType]
+for i in 0 ..< 8:
+  stackedParameters.add(Int64Type)
+for i in 0 ..< 8:
+  stackedParameters.add(Float32Type)
+stackedParameters.add(@[Int8Type, Float32Type, Int32Type, Float64Type, Int64Type])
+module.hosts.add(IrHost(name: "stackedHost", binding: 2,
+  failureMode: NoFailCall, signature: IrSignature(parameters: stackedParameters,
+    returns: @[Float64Type])))
 
 var integer = newFunction("integer")
 let
@@ -137,6 +155,28 @@ discard loop.instruction(StoreOp, [ValueId(2), accumulator], resultCount = 0)
 loop.finish()
 module.functions.add(loop)
 
+var stacked = newFunction("stackedHost")
+var stackArguments: seq[ValueId]
+for i in 1 .. 8:
+  stackArguments.add(stacked.instruction(ConstantOp, [], Int64Type,
+    bits = uint64(i)))
+for i in 1 .. 8:
+  stackArguments.add(stacked.instruction(ConstantOp, [], Float32Type,
+    bits = uint64(cast[uint32](float32(i)))))
+stackArguments.add(stacked.instruction(ConstantOp, [], Int8Type,
+  bits = cast[uint64](-3'i64)))
+stackArguments.add(stacked.instruction(ConstantOp, [], Float32Type,
+  bits = uint64(cast[uint32](0.5'f))))
+stackArguments.add(stacked.instruction(ConstantOp, [], Int32Type, bits = 40))
+stackArguments.add(stacked.instruction(ConstantOp, [], Float64Type,
+  bits = cast[uint64](1.25)))
+stackArguments.add(stacked.instruction(ConstantOp, [], Int64Type, bits = 100))
+let stackedValue = stacked.instruction(HostCallOp, stackArguments,
+  Float64Type, target = 2)
+discard stacked.instruction(StoreOp, [ValueId(2), stackedValue], resultCount = 0)
+stacked.finish()
+module.functions.add(stacked)
+
 var builder = IrBuilder(module: IrModule(pointerBytes: 8))
 let builderLabel = builder.label()
 builder.declareFunctions(["builder"], [builderLabel])
@@ -154,6 +194,15 @@ for target in NativeTarget:
   doAssert image.target == target
   doAssert image.bytes.len > 0
   doAssert image.offsets.len == module.functions.len
+  doAssert image.frameBytes.len == module.functions.len
+  doAssert image.wrapperFrameBytes ==
+    (if target == Arm64Target: 32 else: 112)
+  for frame in image.frameBytes:
+    doAssert frame >= 0
+    if target == Arm64Target:
+      doAssert frame mod 16 == 0
+    else:
+      doAssert frame mod 16 == 0
   for i, offset in image.offsets:
     doAssert offset > 0 and offset < image.bytes.len
     if i > 0:
@@ -164,11 +213,13 @@ for target in NativeTarget:
       var buffer = initCodeBuffer(image.bytes)
       var
         globalData = 91'i64
-        hosts = [cast[pointer](integerHost), cast[pointer](floatHost)]
+        hosts = [cast[pointer](integerHost), cast[pointer](floatHost),
+          cast[pointer](stackedHost)]
         ctx = RuntimeContext(globals: globalData.addr, hosts: hosts.addr)
         argument = 40'i64
         answer = 0'i64
         floatAnswer = 0.0'f
+        doubleAnswer = 0.0
       type Entry = proc(ctx, arguments, returned, reserved: pointer)
         {.cdecl, raises: [].}
       proc entry(index: int): Entry =
@@ -190,6 +241,8 @@ for target in NativeTarget:
       argument = 0
       entry(5)(ctx.addr, argument.addr, answer.addr, nil)
       doAssert answer == 0
+      entry(6)(ctx.addr, nil, doubleAnswer.addr, nil)
+      doAssert doubleAnswer == 210.75
       buffer.release()
       doAssert buffer.entry() == nil
 

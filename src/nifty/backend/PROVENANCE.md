@@ -17,6 +17,12 @@ convenience wrapper that clears the argument, return, and reserved pointers.
 Host bindings are a contiguous table of C function pointers selected by
 `IrHost.binding`, loaded through `RuntimeContext.hosts`. Host signatures support
 scalar integer, address, float32, and float64 values with at most one scalar
-return. ARM64 host calls accept at most eight integer/address and eight floating
-arguments; stack host arguments, aggregate C values, and C variadics are not
-supported there. AMD64 uses the build host platform's C calling convention.
+return. ARM64 host calls use eight registers per argument bank and native stack
+slots for excess arguments, including Darwin's compact scalar stack slots.
+Aggregate C values and C variadics are outside this contract. AMD64 uses the
+build host platform's C calling convention.
+
+`frameBytes` contains the finalized stack bytes for every routine, including
+locals, outgoing argument storage, preserved registers, and (on AMD64) its
+incoming return address. `wrapperFrameBytes` reports the separate wrapper's
+occupancy using the same convention.

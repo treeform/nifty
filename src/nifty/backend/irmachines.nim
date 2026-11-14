@@ -24,12 +24,15 @@ type
   IrMachineImage* = object
     words*: seq[uint32]
     offsets*: seq[int]
+    frameBytes*: seq[int]
+    wrapperFrameBytes*: int
 
   ArgumentLayout = object
     locations: seq[int]
     stackBytes: int
 
-proc argumentLayout(kinds: openArray[ir.IrType], stackBase = 0):
+proc argumentLayout(kinds: openArray[ir.IrType], stackBase = 0,
+    host = false):
     ArgumentLayout {.raises: [].} =
   ## Assigns private scalar arguments to eight registers per bank, then slots.
   var integers, floats = 0
@@ -42,9 +45,16 @@ proc argumentLayout(kinds: openArray[ir.IrType], stackBase = 0):
     if register < 8:
       result.locations.add(copyLocation(kind, register, 0))
     else:
+      let width = int(byteCount(kind, 8))
+      when defined(macosx):
+        if host:
+          result.stackBytes = aligned(result.stackBytes, width)
       result.locations.add(copyLocation(kind, -1,
         stackBase + result.stackBytes))
-      result.stackBytes += 8
+      when defined(macosx):
+        result.stackBytes += (if host: width else: 8)
+      else:
+        result.stackBytes += 8
 
 proc comparisonCondition(comparison: ir.IrComparison,
     kind: ir.IrType): machine.Condition {.raises: [].} =
@@ -103,6 +113,8 @@ proc emitArm64Ir*(module: ir.IrModule,
   for function in module.functions:
     entries.add(code.label())
   let entryBytes = if globalBindings: 16 else: 32
+  result.wrapperFrameBytes = entryBytes
+  result.frameBytes = newSeq[int](module.functions.len)
   code.storePair(FramePointer, LinkRegister, StackPointer, -entryBytes, true)
   if not globalBindings:
     code.storePair(X19, X20, StackPointer, 16)
@@ -208,9 +220,7 @@ proc emitArm64Ir*(module: ir.IrModule,
       for i in first ..< int(item.arguments.count):
         kinds.add(function.values[int32(function.operands[
           item.arguments.first + int32(i)])].valueType)
-      let layout = argumentLayout(kinds)
-      if item.op == ir.HostCallOp and layout.stackBytes != 0:
-        error("ARM64 host calls require arguments within register banks")
+      let layout = argumentLayout(kinds, host = item.op == ir.HostCallOp)
       outgoingBytes = max(outgoingBytes, layout.stackBytes)
     var
       places = newSeq[ValuePlace](function.values.len)
@@ -272,6 +282,7 @@ proc emitArm64Ir*(module: ir.IrModule,
       )
     if frameBytes > MaxFrameBytes:
       error("IR native frame exceeds limits")
+    result.frameBytes[index] = frameBytes + headerBytes
     proc address(code: var machine.Assembler, destination: machine.Register,
         offset: int) =
       ## Computes an arbitrarily sized concrete frame displacement.
@@ -748,12 +759,29 @@ proc emitArm64Ir*(module: ir.IrModule,
           var kinds: seq[ir.IrType]
           for i in first ..< int(item.arguments.count):
             kinds.add(operandKind(i))
-          let layout = argumentLayout(kinds)
+          let layout = argumentLayout(kinds, host = item.op == ir.HostCallOp)
           var copies: seq[IrCopy]
           for i in first ..< int(item.arguments.count):
-            copies.add(IrCopy(source: locations[int32(operand(i))],
-              destination: layout.locations[i - first],
-              valueType: operandKind(i)))
+            let destination = layout.locations[i - first]
+            if item.op == ir.HostCallOp and destination >= StackCopyBase:
+              # Host stack slots use C widths, including Darwin compact slots.
+              let kind = operandKind(i)
+              if kind.floating():
+                code.floating(operand(i), scratchFloat)
+                code.address(X13, destination - StackCopyBase)
+                code.storeFloat(scratchFloat, X13,
+                  single = kind == ir.Float32Type)
+              else:
+                code.integer(operand(i), X12)
+                code.address(X13, destination - StackCopyBase)
+                case byteCount(kind, 8)
+                of 1: code.storeByte(X12, X13)
+                of 2: code.storeHalf(X12, X13)
+                of 4: code.storeWord(X12, X13)
+                else: code.storeDouble(X12, X13)
+            else:
+              copies.add(IrCopy(source: locations[int32(operand(i))],
+                destination: destination, valueType: operandKind(i)))
           code.emitCopies(copies)
           case item.op
           of ir.CallOp: code.branchLink(entries[item.target])
