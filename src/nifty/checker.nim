@@ -3549,6 +3549,15 @@ proc mangleTyp(t: Typ): string =
   if t.opt:
     result.add "opt"
 
+proc bindingKey(t: Typ): string =
+  ## Retains exact widths in addition to the canonical semantic identity.
+  if t.isNil:
+    return "nil"
+  result = typeIdentity(t) & ";width=" & $t.width
+  for child in [t.elem, t.val]:
+    let key = bindingKey(child)
+    result.add ";" & $key.len & ":" & key
+
 proc unifyPat(c: Ctx, pat, at: Typ, sizes: var Table[string, int64],
     typs: var Table[string, Typ], order: var seq[string],
     line: int, gname: string) =
@@ -3720,19 +3729,24 @@ proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string =
         "pass a typed value")
     c.unifyPat(pm.typ, ats[i], sizes, typs, order, e.kids[i].line, gname)
   var parts: seq[string]
+  var keys: seq[string]
   var binds: seq[string]
   for nm in order:
     if nm in sizes:
       parts.add mangleVal(sizes[nm])
+      keys.add "size:" & $sizes[nm]
       binds.add "$" & nm & " = " & $sizes[nm]
     else:
       parts.add mangleTyp(typs[nm])
+      keys.add bindingKey(typs[nm])
       binds.add "$" & nm & " = " & $typs[nm]
-  let key = gname & "|" & parts.join("|")
+  let key = gname & "|" & keys.join("|")
   if key in c.instCache:
     e.sval = c.instCache[key]
     return e.sval
-  let mangled = gname & "__" & parts.join("_")
+  var mangled = gname & "__" & parts.join("_")
+  while mangled in c.usedNames or mangled in c.allRoutines:
+    mangled.add "_"
   # Only substituted type tokens see these fresh aliases. An undefined type
   # written in the generic body must never bind to a caller's declaration.
   var instanceTypes = gr.typesSnap

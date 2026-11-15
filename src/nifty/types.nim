@@ -492,6 +492,8 @@ proc typeIdentity*(t: Typ): string =
   case t.kind
   of ObjectType:
     "object:" & t.name
+  of OpaqueType:
+    "opaque:" & t.name
   of UnionType:
     "union:" & t.name
   of IntType:
