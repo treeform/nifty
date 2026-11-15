@@ -1,0 +1,9 @@
+object Pair =
+  value: int
+
+proc clear(value: var Pair?) =
+  value = none
+
+thread main() =
+  var value: Pair = Pair(7)
+  clear(value)

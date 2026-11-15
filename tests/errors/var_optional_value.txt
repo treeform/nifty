@@ -1,0 +1,1 @@
+var_optional_value.nifty:6: argument 1 of 'clear': expected int?, got int

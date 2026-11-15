@@ -1,0 +1,50 @@
+# Mutable optional arguments keep their original storage after a presence proof.
+object Pair =
+  left: int8
+  right: float32
+
+object Holder =
+  scalar: int?
+  pair: Pair?
+
+proc replace(value: var Pair?): Pair =
+  value = Pair(99, 6.5)
+  return Pair(77, 2.5)
+
+func snapshot(value: Pair?, ignored: Pair): Pair? =
+  return value
+
+proc clearPair(value: var Pair?) =
+  value = none
+
+proc clearInt(value: var int?) =
+  value = none
+
+thread main() =
+  var pair: Pair? = Pair(-127, -0.0)
+  let saved = snapshot(pair, replace(pair))
+  if saved.ok:
+    echo saved.left, " ", 1.0 / saved.right
+  if pair.ok:
+    echo pair.left, " ", pair.right
+    clearPair(pair)
+  echo pair.ok
+
+  var scalar: int? = 7
+  if scalar.ok:
+    clearInt(scalar)
+  echo scalar.ok
+
+  var holder: Holder
+  holder.scalar = 8
+  holder.pair = Pair(-128, 1.25)
+  if holder.scalar.ok:
+    clearInt(holder.scalar)
+  if holder.pair.ok:
+    clearPair(holder.pair)
+  echo holder.scalar.ok, " ", holder.pair.ok
+
+  var values: array[2, int?]
+  values[0] = 9
+  clearInt(values[0])
+  echo values[0].ok

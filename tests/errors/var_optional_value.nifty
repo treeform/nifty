@@ -1,0 +1,6 @@
+proc clear(value: var int?) =
+  value = none
+
+thread main() =
+  var value: int = 7
+  clear(value)

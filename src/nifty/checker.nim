@@ -2475,8 +2475,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           e.kids[i].kind == UnionProjectExpr:
         e.kids[i] = e.kids[i].kids[0]
       let arg = e.kids[i]
-      if pt.isVar and pt.typ.opt and arg.unwrapOpt and
-          pt.typ.kind == UnionType:
+      if pt.isVar and pt.typ.opt and arg.unwrapOpt:
         arg.unwrapOpt = false
         arg.typ = optOf(arg.typ)
       var at: Typ = arg.typ
@@ -2491,8 +2490,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         arg.typ = pt.typ
         at = pt.typ
       else:
-        if (not pt.isVar or pt.typ.kind != UnionType) and
-            c.coerceOpt(arg, pt.typ):
+        if not pt.isVar and c.coerceOpt(arg, pt.typ):
           at = pt.typ
         elif c.coerceStrLit(arg, pt.typ):
           at = pt.typ
