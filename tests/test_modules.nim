@@ -114,6 +114,38 @@ func max(a: int, b: int): int =
 source("leak.nifty", "func run(): int =\n  return missing()\n")
 source("leak_type.nifty", "func identity(value: $T): $T =\n  var extra: Caller\n  return value\n")
 source("other_generic.nifty", "func identity(value: $T): $T =\n  return value\n")
+source("union_number.nifty", """
+object Number =
+  value: int
+func evaluate(item: Number): int =
+  return item.value
+""")
+source("union_flag.nifty", """
+object Flag =
+  value: bool
+func evaluate(item: Flag): int =
+  if item.value:
+    return 2
+  return 3
+""")
+source("union_facade.nifty", "import union_number\nimport union_flag\n")
+source("union_duplicate.nifty", """
+import union_number
+func evaluate(item: Number): int =
+  return 9
+""")
+source("union_effect.nifty", """
+import union_number
+var count: 0 .. 10
+proc record(item: Number) =
+  if count < 10:
+    count = count + 1
+""")
+source("union_effect_flag.nifty", """
+import union_flag
+proc record(item: Flag) =
+  discard item.value
+""")
 
 const Main = """
 import a
@@ -126,13 +158,16 @@ import resource
 import loopnames
 import keyword_var
 import keyword_fn
+import union_facade
 
 type List = facade.Item
+type Item = union_number.Number or union_flag.Flag
 type SameHandle = leaf.Handle
 number = a.Name
 selected = b.foo
 copyValue = leaf.identity
 OtherList = leaf.Item
+dispatch = union_facade.evaluate
 
 object Caller =
   number: int
@@ -141,6 +176,12 @@ func foo(): int =
   return 30
 proc combine(value: int) =
   echo value
+func inspect(item: Item): int =
+  return dispatch(item)
+func evaluate(item: Item): int =
+  return 99
+func inspectExplicit(item: Item): int =
+  return evaluate(item)
 
 thread main() =
   echo next(), " ", a.next(), " ", counter.next(), " ", shared.next()
@@ -174,8 +215,10 @@ thread main() =
   let copied = copyValue(caller)
   echo copied.number
   echo keyword_fn.max(1, 2), " ", keyword_var.count(2)
+  echo inspect(union_number.Number(7)), " ", inspect(union_flag.Flag(true))
+  echo inspectExplicit(union_flag.Flag(false))
 """
-const Expected = "1 2 3 4\n30 10 20 10 20\n1 2 80\n7 8\n6 9 9\n1\none\n3 77\n4\n4\n5\n6\n0\n1\n0\n7\n8\n2 2\n"
+const Expected = "1 2 3 4\n30 10 20 10 20\n1 2 80\n7 8\n6 9 9\n1\none\n3 77\n4\n4\n5\n6\n0\n1\n0\n7\n8\n2 2\n7 2\n99\n"
 
 try:
   let checked = checkedModule(Main, directory / "main.nifty", directory)
@@ -248,6 +291,35 @@ try:
     "unknown type")
   expectError("import leaf\nimport other_generic\nthread main() =\n  echo identity(1)\n",
     "ambiguous imported name 'identity'")
+  expectError("""
+import union_facade
+import leaf
+type Item = union_number.Number or leaf.Item
+func inspect(item: Item): int =
+  return evaluate(item)
+thread main() =
+  echo inspect(union_number.Number(1))
+""", "missing overload for")
+  expectError("""
+import union_facade
+import union_duplicate
+type Item = union_number.Number or union_flag.Flag
+func inspect(item: Item): int =
+  return evaluate(item)
+thread main() =
+  echo inspect(union_number.Number(1))
+""", "ambiguous union dispatch")
+  expectError("""
+import union_effect
+import union_effect_flag
+type Item = union_number.Number or union_flag.Flag
+proc inspect(item: Item) =
+  record(item)
+thread main() =
+  inspect(union_number.Number(1))
+thread worker() =
+  inspect(union_flag.Flag(true))
+""", "shared global")
   let explicitChoice = checkedModule("import over_export\nthread main() =\n  echo choose(0), own()\n",
     directory / "choice.nifty", directory)
   discard lowerNative(explicitChoice)

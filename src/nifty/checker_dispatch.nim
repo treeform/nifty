@@ -62,11 +62,13 @@ proc synthesizeUnionDispatchers(c: var Ctx, m: Module,
   for name in c.routineTab.keys:
     var memberName = false
     for family, overloads in c.overloads:
-      if name != family and name in overloads:
+      if family notin c.moduleViews and name != family and name in overloads:
         memberName = true
         break
     if not memberName:
       families.add name
+  for name in c.moduleViews.keys:
+    families.add name
   families.sort()
   for definition in m.types:
     let union = definition.typ
@@ -76,6 +78,8 @@ proc synthesizeUnionDispatchers(c: var Ctx, m: Module,
       let candidates = c.overloads.getOrDefault(name, @[name])
       var explicit = false
       for candidate in candidates:
+        if candidate notin c.routineTab:
+          continue
         let routine = c.routineTab[candidate]
         if routine.params.len > 0 and
             typeEq(routine.params[0].typ, union):

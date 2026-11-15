@@ -3978,8 +3978,6 @@ proc check*(m: Module) =
       c.routineTab[r.name] = r
     if r.kind == ThreadRoutine:
       anyThread = true
-  c.synthesizeUnionDispatchers(m, used)
-  c.usedNames = used
   # Namespace views merge overloads without introducing wrapper procedures.
   # Locals override only matching dispatch keys; imports never override imports.
   var groups: Table[string, seq[string]]
@@ -4015,7 +4013,7 @@ proc check*(m: Module) =
     c.overloads[name] = candidates
     c.moduleViews[name] = definition.display
     c.allRoutines.incl name
-    c.usedNames.incl name
+    used.incl name
     installing.excl name
   proc members(name: string): seq[string] =
     if name in definitions:
@@ -4023,6 +4021,8 @@ proc check*(m: Module) =
       return c.overloads[name]
     groups.getOrDefault(name, @[name])
   for name in definitions.keys: install(name)
+  c.synthesizeUnionDispatchers(m, used)
+  c.usedNames = used
   if not anyThread:
     err(1, "a nifty program needs at least one thread (thread name() = ...)")
 
