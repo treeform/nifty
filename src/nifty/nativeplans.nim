@@ -18,7 +18,7 @@ type
     display*: string
     fields*: seq[NativeField]
   NativeHostKind* = enum
-    ContainerHost, ReservedHost, ExternHost, LockHost
+    ContainerHost, ReservedHost, ExternHost, LockHost, EmbeddedHost
   NativeHost* = object
     kind*: NativeHostKind
     operation*, symbol*, library*: string

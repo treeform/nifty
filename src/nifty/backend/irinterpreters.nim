@@ -3,6 +3,12 @@ import std/math
 import irs, irchecks, common, context, floatroundings
 
 type
+  ExecutionLimitError* = object of CatchableError
+  ExecutionBudget* = object
+    ## Logical VM resources; host callback allocations are outside this budget.
+    maxWork*, maxMemory*: int64
+    maxDepth*: int
+    work*, memory*, peakMemory*: int64
   IrHostCallback* = proc(context: pointer, hostIndex: int,
     arguments: openArray[uint64], returns: var openArray[uint64])
     {.nimcall, gcsafe.}
@@ -20,6 +26,23 @@ type
     destination: Span
     invoke: bool
     pendingFailure: string
+    chargedBytes: int64
+
+proc spend*(budget: ptr ExecutionBudget, units = 1'i64) =
+  if budget != nil:
+    if units < 0 or units > budget.maxWork - budget.work:
+      raise newException(ExecutionLimitError, "script work limit exceeded")
+    budget.work += units
+
+proc acquire*(budget: ptr ExecutionBudget, bytes: int64) =
+  if budget != nil:
+    if bytes < 0 or bytes > budget.maxMemory - budget.memory:
+      raise newException(ExecutionLimitError, "script memory limit exceeded")
+    budget.memory += bytes
+    budget.peakMemory = max(budget.peakMemory, budget.memory)
+
+proc release*(budget: ptr ExecutionBudget, bytes: int64) =
+  if budget != nil: budget.memory -= bytes
 
 proc interpreterFunctionAddress*(index: int): uint64 =
   ## Encodes a VM function reference for indirect calls.
@@ -175,11 +198,13 @@ proc convert(value: uint64, source, target: IrType,
 
 proc interpret*(plan: ptr IrInterpreterPlan, entry: int,
     arguments: openArray[uint64], host: IrHostCallback,
-    context: pointer = nil): seq[uint64] =
+    context: pointer = nil, budget: ptr ExecutionBudget = nil): seq[uint64] =
   ## Runs a function using an explicit VM stack and invocation-local memory.
   if plan == nil or entry < 0 or entry >= plan.module.functions.len:
     error("IR interpreter entry is invalid")
   var frames: seq[InterpreterFrame]
+  var chargedFrames = 0'i64
+  defer: budget.release(chargedFrames)
   proc push(target: int, args: openArray[uint64], destination: Span,
       invoke = false) =
     ## Allocates one stable activation and binds its entry parameters.
@@ -187,7 +212,14 @@ proc interpret*(plan: ptr IrInterpreterPlan, entry: int,
     if args.len != function.signature.parameters.len:
       error("IR interpreter argument arity mismatch")
     let layout = addr plan.frames[target]
+    if budget != nil and frames.len >= budget.maxDepth:
+      raise newException(ExecutionLimitError, "script call depth limit exceeded")
+    let charged = int64(max(1, layout.bytes + layout.alignment)) +
+      int64(function.values.len + max(1, layout.scratch)) * 8 + 256
+    budget.acquire(charged)
+    chargedFrames += charged
     var frame = InterpreterFrame(function: target,
+      chargedBytes: charged,
       destination: destination, invoke: invoke,
       registers: newSeq[uint64](function.values.len),
       scratch: newSeq[uint64](max(1, layout.scratch)),
@@ -214,6 +246,8 @@ proc interpret*(plan: ptr IrInterpreterPlan, entry: int,
     ## Unwinds activations to the nearest explicit failure continuation.
     while frames.len > 0:
       let invoked = frames[^1].invoke
+      budget.release(frames[^1].chargedBytes)
+      chargedFrames -= frames[^1].chargedBytes
       frames.setLen(frames.len - 1)
       if invoked and frames.len > 0:
         let caller = addr frames[^1]
@@ -225,6 +259,7 @@ proc interpret*(plan: ptr IrInterpreterPlan, entry: int,
     error(message)
   push(entry, arguments, Span())
   while frames.len > 0:
+    budget.spend()
     let frame = addr frames[^1]
     let function = addr plan.module.functions[frame.function]
     let data = function.blocks[frame.blockIndex]
@@ -271,6 +306,7 @@ proc interpret*(plan: ptr IrInterpreterPlan, entry: int,
         copyMem(cast[pointer](address), addr stored,
           width(operandKind(item.arguments, 1)))
       of MoveBytesOp, ClearBytesOp:
+        budget.spend(int64(item.byteCount))
         if item.byteCount > 0:
           if a == 0 or (item.op == MoveBytesOp and b == 0):
             error("IR interpreter null byte operation")
@@ -354,6 +390,8 @@ proc interpret*(plan: ptr IrInterpreterPlan, entry: int,
           return
         for i in 0 ..< count:
           frames[^2].registers[int(destination.first) + i] = frame.scratch[i]
+        budget.release(frame.chargedBytes)
+        chargedFrames -= frame.chargedBytes
         frames.setLen(frames.len - 1)
         if invoked:
           let caller = addr frames[^1]

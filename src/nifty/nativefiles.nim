@@ -51,7 +51,8 @@ proc fingerprint(data: string): uint64 =
   for value in data:
     result = (result xor uint64(byte(value))) * 1099511628211'u64
 
-proc validateNativePlan*(plan: NativePlan, functionCount: int) =
+proc validateNativePlan*(plan: NativePlan, functionCount: int,
+    allowEmbedded = false) =
   ## Validates startup storage and descriptors independently of machine code.
   if plan.globalBytes < 0 or plan.globalBytes > MaxNativeStorage or
       plan.initialData.len > plan.globalBytes:
@@ -134,6 +135,8 @@ proc validateNativePlan*(plan: NativePlan, functionCount: int) =
       if plan.ownedGlobals[j].offset == global.offset:
         raise newException(NiftyError, "duplicate native owned global")
   for host in plan.hosts:
+    if host.kind == EmbeddedHost and not allowEmbedded:
+      raise newException(NiftyError, "embedding callbacks require a scripting runtime")
     if host.kind == ReservedHost:
       raise newException(NiftyError, "unsupported legacy native host service")
     if host.paramTypes.len != host.paramOffsets.len:

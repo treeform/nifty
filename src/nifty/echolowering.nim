@@ -53,7 +53,8 @@ proc backendRoutines*(source: Module): seq[Routine] =
   source.routines[source.routines.len - source.supportCount .. ^1] &
     source.routines[0 ..< source.routines.len - source.supportCount]
 
-proc lowerEcho*(source: Module, filename = "", portableIo = false): Module =
+proc lowerEcho*(source: Module, filename = "", portableIo = false,
+    echoLibrary: Module = nil): Module =
   ## Keeps the original checked tree and its semantic bindings immutable.
   source.requireChecked()
   if source.files.len > 0:
@@ -69,14 +70,16 @@ proc lowerEcho*(source: Module, filename = "", portableIo = false): Module =
   # Support-file ids are appended; existing user/import ids remain valid.
   if srcFiles.len == 0:
     srcFiles.add(if filename.len > 0: filename else: "<source>")
-  var tokens = loadStandardTokens("_echo", portableIo)
-  let moduleLookups = tokens[^1].moduleLookups
-  tokens.setLen(tokens.len - 1)
-  tokens.add(tokenize("thread niftyEchoBootstrap() =\n  discard 0\n"))
-  tokens[^1].moduleLookups = moduleLookups
-  let library = parse(tokens)
-  check(library)
-  library.routines.setLen(library.routines.len - 1)
+  var library = echoLibrary
+  if library == nil:
+    var tokens = loadStandardTokens("_echo", portableIo)
+    let moduleLookups = tokens[^1].moduleLookups
+    tokens.setLen(tokens.len - 1)
+    tokens.add(tokenize("thread niftyEchoBootstrap() =\n  discard 0\n"))
+    tokens[^1].moduleLookups = moduleLookups
+    library = parse(tokens)
+    check(library)
+    library.routines.setLen(library.routines.len - 1)
 
   var used: HashSet[string]
   proc names(body: seq[Stmt]) =

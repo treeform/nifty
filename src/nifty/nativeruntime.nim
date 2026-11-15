@@ -119,6 +119,8 @@ proc dispatchRuntime*(context: pointer, hostId: int64,
         output, runtime.memory)
   of ExternHost:
     quit("nifty: extern requires a direct ABI call", 1)
+  of EmbeddedHost:
+    quit("nifty: embedding callbacks require a scripting runtime", 1)
 
 proc enterThread(argument: pointer) =
   ## Enters one native thread with its own preallocated arena.

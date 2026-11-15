@@ -3,7 +3,7 @@
 ## forward prototypes: definitions appear in call order.
 
 import std/[math, strutils, tables, sets, sequtils]
-import types, semantics, echolowering, standardbridges
+import common, types, semantics, echolowering, standardbridges
 
 type
   Gen = object
@@ -1979,6 +1979,9 @@ proc cArenaFrames*(m: Module): Table[string, int64] =
 
 proc generate*(source: Module, src: string): string =
   ## Plans expression storage, then emits C with exact arena frame sizes.
+  for routine in source.routines:
+    if routine.hostBinding:
+      raise newException(NiftyError, "embedding callbacks require a scripting runtime")
   let m = lowerEcho(source, src)
   var
     expressions: Table[string, Table[pointer, int64]]

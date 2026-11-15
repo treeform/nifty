@@ -33,7 +33,7 @@ proc dispatch(context: pointer, hostId: int64,
       runtime.memory)
   of LockHost:
     discard
-  of ReservedHost, ExternHost:
+  of ReservedHost, ExternHost, EmbeddedHost:
     raise newException(NiftyError, "invalid WASM dispatched host")
 
 proc stackFailure() {.cdecl, exportc: "nifty_stack_failure", noreturn.} =

@@ -1279,6 +1279,8 @@ proc freshOwnedValue(e: Expr): bool =
   ## Allows construction of new owners while forbidding descriptor copies.
   if not hasOwned(e.typ):
     return true
+  if e.freshHostValue:
+    return true
   if e.typ.kind == CStringType:
     return e.kind == NoneExpr or
       (e.typ.opt and e.kind in {MethodExpr, FieldExpr} and
@@ -2610,6 +2612,7 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
         $typeSize(r.ret) & " bytes); a value this big must be stored " &
         "straight into a variable: var x = " & name & "(...)")
     e.typ = r.ret
+    e.freshHostValue = r.hostBinding and hasOwned(r.ret)
     if r.ret != nil and r.ret.kind == IntType:
       e.setFact typeFact(r.ret)
   if e.kind == MethodExpr:
@@ -4274,6 +4277,17 @@ proc check*(m: Module) =
 
   for r in m.routines:
     if r.generic:
+      c.checked.incl r.name
+      continue
+    if r.hostBinding:
+      # Safe embedding callbacks exchange copied values, not the C ABI.
+      for pm in r.params:
+        if pm.isVar or pm.typ.opt or pm.typ.kind notin
+            {IntType, FloatType, BoolType, StringType}:
+          err(r.line, "unsupported embedding callback parameter")
+      if r.ret != nil and (r.ret.opt or r.ret.kind notin
+          {IntType, FloatType, BoolType, StringType}):
+        err(r.line, "unsupported embedding callback result")
       c.checked.incl r.name
       continue
     if r.externLib != "":

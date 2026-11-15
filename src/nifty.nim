@@ -6,8 +6,9 @@
 
 import nifty/[common, parser, checker, codegen, report, loader, types]
 import nifty/[lowering, nativeunroll, wasmfiles, interpreterruntime]
+import nifty/scripting
 
-export common
+export common, scripting
 
 var lastExternLibs*: seq[string] ## non-libc libs of the last compile
 

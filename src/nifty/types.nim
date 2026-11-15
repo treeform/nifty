@@ -79,6 +79,7 @@ type
     binding*: BindingId # Resolved declaration; zero for non-binding nodes.
     borrowedView*: bool # Checked fixed storage to growable readonly view.
     directCall*: bool # Synthesized call already has a resolved callee.
+    freshHostValue*: bool # An owning value copied from a trusted Nim callback.
     symKind*: SymKind
     isVarParam*: bool
     mut*: bool
@@ -145,6 +146,7 @@ type
     bodyScope*: int
     externLib*: string         # extern routines: the library ("libc", ...)
     cname*: string             # extern routines: the C symbol, if renamed
+    hostBinding*: bool        # Set by the Nim embedding API, never by source.
     unionDispatcher*: bool    # Synthesized exhaustive union overload.
     generic*: bool             # has $ variables; body kept as tokens
     toks*: seq[Token]          # generic only: the whole declaration

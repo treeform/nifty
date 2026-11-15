@@ -31,3 +31,4 @@ __pycache__/
 examples/*.c
 examples/*
 !examples/*.nifty
+!examples/*.nim

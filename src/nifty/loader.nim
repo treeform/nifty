@@ -3,6 +3,11 @@ import std/[os, sets, tables, strutils, uri]
 import common, lexer, importcache, parser
 
 type
+  ImportSource* = object
+    ## A host-supplied module. Identity determines import-once behavior.
+    identity*, source*: string
+  ImportResolver* = proc(parent, request: string, bare: bool): ImportSource
+    {.closure.}
   SymbolKind = enum
     ConstantSymbol, TypeSymbol, GlobalSymbol, RoutineSymbol, NamespaceSymbol,
     AliasSymbol, ViewSymbol, AmbiguousSymbol
@@ -26,6 +31,9 @@ type
     aliases: HashSet[int]
     declarations: Table[int, Symbol]
   Loader = ref object
+    resolver: ImportResolver
+    supplied: Table[string, string]
+    mainLineOffset: int
     standardDirs: seq[string]
     modules: Table[string, SourceModule]
     order, stack: seq[SourceModule]
@@ -83,6 +91,12 @@ proc moduleName(path: string): string =
 
 proc importPath(ld: Loader, parent: SourceModule, name: string, bare: bool,
     line: int): string =
+  if ld.resolver != nil:
+    let supplied = ld.resolver(parent.path, name, bare)
+    if supplied.identity.len == 0:
+      err(line, "import is not provided by the host: '" & name & "'")
+    ld.supplied[supplied.identity] = supplied.source
+    return supplied.identity
   var source = name
   if bare:
     let rawDirectory = if parent.remote: ld.root else: parent.directory
@@ -116,9 +130,9 @@ proc importPath(ld: Loader, parent: SourceModule, name: string, bare: bool,
 
 proc load(ld: Loader, source, path: string, main: bool,
     line: int): SourceModule =
-  let key = identity(path)
+  let key = if ld.resolver != nil: path else: identity(path)
   for cycleStart, active in ld.stack:
-    if identity(active.path) == key:
+    if (if ld.resolver != nil: active.path else: identity(active.path)) == key:
       var chain: seq[string]
       for i in cycleStart ..< ld.stack.len: chain.add ld.stack[i].path
       chain.add path
@@ -131,9 +145,11 @@ proc load(ld: Loader, source, path: string, main: bool,
   ld.modules[key] = result
   ld.stack.add result
   let text = if main: source
+    elif ld.resolver != nil: ld.supplied[path]
     elif result.remote: ld.cache.readRemote(path, line)
     else: readFile(path)
-  let tokens = tokenize(text, result.index * fileLineBase)
+  let tokens = tokenize(text, result.index * fileLineBase +
+    (if main: ld.mainLineOffset else: 0))
   var index = 0
   while index < tokens.len and tokens[index].kind == IdentToken and tokens[index].text == "import":
     let start = index
@@ -547,14 +563,19 @@ proc finish(ld: Loader): seq[Token] =
   var definitions: seq[ModuleLookup]
   for definition in ld.lookups.values: definitions.add definition
   result.add Token(kind: EofToken, line: 1, moduleLookups: definitions)
-  ld.cache.saveImportLock()
+  if ld.resolver == nil: ld.cache.saveImportLock()
 
-proc loadTokens*(mainSrc, mainName, dir: string, portableIo = false): seq[Token] =
+proc loadTokens*(mainSrc, mainName, dir: string, portableIo = false,
+    resolver: ImportResolver = nil, mainLineOffset = 0): seq[Token] =
   srcFiles = @[]
   symbolNames.clear()
-  let root = if dir.len > 0: dir else: getCurrentDir()
-  let ld = Loader(standardDirs: standardLibraryDirs(), portableIo: portableIo,
-    root: root, cache: initImportCache(root))
+  let root = if resolver != nil: ""
+    elif dir.len > 0: dir else: getCurrentDir()
+  let ld = Loader(portableIo: portableIo, root: root, resolver: resolver,
+    mainLineOffset: mainLineOffset)
+  if resolver == nil:
+    ld.standardDirs = standardLibraryDirs()
+    ld.cache = initImportCache(root)
   discard ld.load(mainSrc, mainName, true, 1)
   ld.finish()
 

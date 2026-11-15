@@ -490,7 +490,16 @@ proc routineCall(g: var Lower, e: Expr, dest = NoValue): ValueId =
   let output = if r.ret.isNil: g.null
     elif int32(dest) >= 0: dest
     else: g.allocType(r.ret)
-  if r.externLib != "":
+  if r.hostBinding:
+    if hasOwned(r.ret): g.clear(output, g.size(r.ret))
+    var host = NativeHost(kind: EmbeddedHost, operation: r.cname,
+      receiverType: -1, resultType: g.layout(r.ret),
+      paramOffsets: offsets)
+    for p in r.params:
+      host.paramTypes.add(g.layout(p.typ))
+      host.paramVars.add(g.addressParam(p))
+    g.hostCall(host, g.null, args, output)
+  elif r.externLib != "":
     var host = NativeHost(kind: ExternHost, operation: r.name,
       symbol: (if r.cname != "": r.cname else: r.name),
       library: r.externLib, resultType: g.layout(r.ret),
@@ -1089,10 +1098,10 @@ proc statements(g: var Lower, body: seq[Stmt], scope: int) =
     g.cleanup(g.source.semantics.scopes[scope].drops)
 
 proc lowerNative*(checked: Module, filename = "",
-    portableIo = false): NativePlan =
+    portableIo = false, echoLibrary: Module = nil): NativePlan =
   ## Builds native IR, fixed layouts, and executable runtime metadata.
   checked.requireChecked()
-  let source = lowerEcho(checked, filename, portableIo)
+  let source = lowerEcho(checked, filename, portableIo, echoLibrary)
   var g = Lower(source: source)
   g.plan.module.pointerBytes = 8
   g.plan.module.files = if srcFiles.len > 0: srcFiles else: @[filename]

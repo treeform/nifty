@@ -24,6 +24,9 @@ proc invalid(message: string) {.noreturn.} =
 
 proc validateWasmMetadata*(plan: NativePlan) =
   ## Bounds allocations and all descriptors consumed by the shared runtime.
+  for host in plan.hosts:
+    if host.kind == EmbeddedHost:
+      invalid("embedding callbacks require a scripting runtime")
   if plan.globalBytes < 0 or plan.globalBytes > WasmStorageLimit or
       plan.initialData.len > plan.globalBytes:
     invalid("global allocation")

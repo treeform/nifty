@@ -41,6 +41,8 @@ proc buildWasmProgram*(plan: NativePlan,
     of ExternHost:
       symbols.add(wasmExternSymbol(host,
         result.plan.module.hosts[i].signature))
+    of EmbeddedHost:
+      raise newException(NiftyError, "embedding callbacks require a scripting runtime")
     of ReservedHost:
       raise newException(NiftyError, "wasm64 unsupported legacy host service")
   let
