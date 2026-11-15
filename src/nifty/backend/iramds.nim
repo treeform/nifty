@@ -1052,8 +1052,13 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
                 valueType: function.values[value].valueType))
             code.emitCopies(returned)
           elif item.results.count > 0:
-            if resultKind.floating(): code.putFloat(resultId)
-            else: code.putInteger(resultId)
+            if resultKind.floating():
+              code.putFloat(resultId)
+            else:
+              if item.op == ir.HostCallOp:
+                # C returns guarantee only the declared scalar width.
+                code.normalize(resultKind)
+              code.putInteger(resultId)
           for register in 0 ..< FloatRegisters:
             if (callMask and (1'u64 shl register)) != 0:
               code.scalarMemory(register + 2, Rsp, callSlots[register],

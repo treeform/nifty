@@ -1030,8 +1030,13 @@ proc emitArm64Ir*(module: ir.IrModule,
                 valueType: function.values[value].valueType))
             code.emitCopies(returned)
           elif item.results.count > 0:
-            if resultKind.floating(): code.putFloat(resultId, 0)
-            else: code.putInteger(resultId, X0)
+            if resultKind.floating():
+              code.putFloat(resultId, 0)
+            else:
+              if item.op == ir.HostCallOp:
+                # C returns guarantee only the declared scalar width.
+                code.normalize(resultKind, X0)
+              code.putInteger(resultId, X0)
           code.callFloats(savedCalls[instructionIndex], true)
           continue
         of ir.PackOp, ir.VectorAddOp, ir.VectorSubtractOp,

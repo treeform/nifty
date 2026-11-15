@@ -49,6 +49,18 @@ proc stackedHost(i0, i1, i2, i3, i4, i5, i6, i7: int64,
     float64(f0 + f1 + f2 + f3 + f4 + f5 + f6 + f7) +
     float64(small) + float64(extra) + float64(medium) + wide + float64(last)
 
+proc signed8Host(): int8 {.cdecl, noinline, raises: [].} =
+  ## Returns a negative C scalar with unspecified bits above its ABI width.
+  -7
+
+proc signed16Host(): int16 {.cdecl, noinline, raises: [].} =
+  ## Returns a negative C scalar with unspecified bits above its ABI width.
+  -800
+
+proc signed32Host(): int32 {.cdecl, noinline, raises: [].} =
+  ## Returns a negative C scalar with unspecified bits above its ABI width.
+  -90000
+
 var module = IrModule(pointerBytes: 8)
 module.hosts = @[
   IrHost(name: "integerHost", binding: 0, failureMode: NoFailCall,
@@ -257,6 +269,20 @@ for i, value in edgeValues:
 pairEdges.finish()
 module.functions.add(pairEdges)
 
+let signedResultsStart = module.functions.len
+for kind in [Int8Type, Int16Type, Int32Type]:
+  let binding = int32(module.hosts.len)
+  module.hosts.add(IrHost(name: $kind, binding: binding,
+    failureMode: NoFailCall, signature: IrSignature(returns: @[kind])))
+  var returned = newFunction($kind & "HostResult")
+  let
+    narrow = returned.instruction(HostCallOp, [], kind, target = binding)
+    widened = returned.instruction(ConvertOp, [narrow], Int64Type)
+  returned.instructions[^1].conversion = SignExtendConversion
+  discard returned.instruction(StoreOp, [ValueId(2), widened], resultCount = 0)
+  returned.finish()
+  module.functions.add(returned)
+
 var builder = IrBuilder(module: IrModule(pointerBytes: 8))
 let builderLabel = builder.label()
 builder.declareFunctions(["builder"], [builderLabel])
@@ -294,7 +320,8 @@ for target in NativeTarget:
       var
         globalData = 91'i64
         hosts = [cast[pointer](integerHost), cast[pointer](floatHost),
-          cast[pointer](stackedHost)]
+          cast[pointer](stackedHost), cast[pointer](signed8Host),
+          cast[pointer](signed16Host), cast[pointer](signed32Host)]
         ctx = RuntimeContext(globals: globalData.addr, hosts: hosts.addr)
         argument = 40'i64
         answer = 0'i64
@@ -377,6 +404,10 @@ for target in NativeTarget:
       entry(13)(ctx.addr, edgeInput[64].addr, edgeOutput.addr, nil)
       doAssert edgeOutput ==
         [edgeInput[0], edgeInput[1], edgeInput[127], edgeInput[128]]
+      for i, expected in [-7'i64, -800'i64, -90000'i64]:
+        answer = 0
+        entry(signedResultsStart + i)(ctx.addr, nil, answer.addr, nil)
+        doAssert answer == expected
       buffer.release()
       doAssert buffer.entry() == nil
 
