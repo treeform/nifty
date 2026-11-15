@@ -12,6 +12,7 @@ import tempfile
 from snappy_reference import decode, literal, literalBlock, varint
 
 Root = Path(__file__).resolve().parent.parent
+Backends = ('c', 'arm64', 'amd64', 'interp')
 
 
 def cases():
@@ -221,7 +222,7 @@ def main():
   """Compile once per backend/optimization and run the whole batched suite."""
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--compiler', type=Path, default=Root / ('nifty.exe' if os.name == 'nt' else 'nifty'))
-  parser.add_argument('--backend', action='append', choices=('c', 'arm64', 'amd64'))
+  parser.add_argument('--backend', action='append', choices=Backends)
   parser.add_argument('--supersnappy', type=Path, help='Optional Supersnappy checkout')
   parser.add_argument('--corpus', type=Path, help='Additional files for round trips')
   args = parser.parse_args()
@@ -232,7 +233,8 @@ def main():
   sys.path.insert(0, str(Root / 'benchmarks'))
   import run as infrastructure
   host = infrastructure.hostInfo()
-  backends = args.backend or infrastructure.availableBackends(host, args.compiler)
+  backends = args.backend or [backend for backend in
+    infrastructure.availableBackends(host, args.compiler) if backend in Backends]
   tests, raw = cases(), inputs()
   if args.corpus:
     raw.extend(path.read_bytes() for path in sorted(args.corpus.rglob('*')) if path.is_file())
@@ -277,10 +279,12 @@ def main():
                 supported = False
             run([cc, *standard, *(flags if supported else []),
                  csource, '-o', executable, '-lm'])
-          else:
+          elif backend != 'interp':
             run([args.compiler, 'build', source, f'--backend:{backend}', f'--opt:{opt}', '-o', executable])
           prefix = ['/usr/bin/arch', '-x86_64'] if backend == 'amd64' and host['system'] == 'Darwin' and host['physical_architecture'] == 'arm64' else []
-          result = run([*prefix, executable], input=payload)
+          command = ([args.compiler, 'interpret', source, f'--opt:{opt}']
+                     if backend == 'interp' else [*prefix, executable])
+          result = run(command, input=payload)
           assert not result.stderr, result.stderr.decode(errors='replace')
           compressed = checkOutput(result.stdout, tests, raw)
           if interop:
