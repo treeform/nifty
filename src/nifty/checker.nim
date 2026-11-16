@@ -2662,8 +2662,6 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
         it = t
       elif coerceFloatLit(s.init, t):
         it = t
-      elif coerceFloatLit(s.init, t):
-        it = t
       elif it.kind == StringLitType:
         err(s.line, "string literals need a string[N] destination " &
           "(e.g. var s: string[20] = \"hi\")")
@@ -3290,29 +3288,20 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
 
 ## Smallest-Scope Enforcement (Power of 10, rule 6)
 
-proc usesName(e: Expr, name: string): bool =
-  if e.isNil:
-    return false
-  if e.kind == IdentExpr and e.sval == name:
-    return true
-  for k in e.kids:
-    if usesName(k, name):
-      return true
-
 proc stmtUsesName(s: Stmt, name: string): bool =
   if s.kind == WithStmt and s.name == name:
     return true
   for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
-    if usesName(e, name):
+    if containsIdent(e, name):
       return true
   for a in s.args:
-    if usesName(a, name):
+    if containsIdent(a, name):
       return true
   for st in s.body:
     if stmtUsesName(st, name):
       return true
   for br in s.elifs:
-    if usesName(br.cond, name):
+    if containsIdent(br.cond, name):
       return true
     for st in br.body:
       if stmtUsesName(st, name):
@@ -3330,19 +3319,19 @@ proc mayReadFirst(body: seq[Stmt], name: string, written: var bool): bool =
       return false
     case s.kind
     of AssignStmt:
-      if usesName(s.rhs, name):
+      if containsIdent(s.rhs, name):
         return true
       if s.lhs.kind == IdentExpr and s.lhs.sval == name:
         written = true
-      elif usesName(s.lhs, name):
+      elif containsIdent(s.lhs, name):
         return true # a partial write keeps the rest of the old value
     of VarStmt, LetStmt:
-      if usesName(s.init, name):
+      if containsIdent(s.init, name):
         return true
     of IfStmt:
       var allWrote = s.elseBody.len > 0
       for br in s.elifs:
-        if usesName(br.cond, name):
+        if containsIdent(br.cond, name):
           return true
         var w = written
         if mayReadFirst(br.body, name, w):
@@ -3357,19 +3346,19 @@ proc mayReadFirst(body: seq[Stmt], name: string, written: var bool): bool =
       if allWrote:
         written = true
     of WhileStmt:
-      if usesName(s.cond, name):
+      if containsIdent(s.cond, name):
         return true
       var w = written
       if mayReadFirst(s.body, name, w):
         return true # zero iterations possible: body writes don't count
     of ForStmt:
-      if usesName(s.lo, name) or usesName(s.hi, name):
+      if containsIdent(s.lo, name) or containsIdent(s.hi, name):
         return true
       var w = written
       if mayReadFirst(s.body, name, w):
         return true
     of ForEachStmt:
-      if usesName(s.value, name):
+      if containsIdent(s.value, name):
         return true
       var w = written
       if mayReadFirst(s.body, name, w):
@@ -3379,7 +3368,7 @@ proc mayReadFirst(body: seq[Stmt], name: string, written: var bool): bool =
       if mayReadFirst(s.body, name, w):
         return true
     of WithStmt:
-      if s.name == name or usesName(s.lhs, name):
+      if s.name == name or containsIdent(s.lhs, name):
         return true
       if mayReadFirst(s.body, name, written):
         return true
@@ -3387,17 +3376,17 @@ proc mayReadFirst(body: seq[Stmt], name: string, written: var bool): bool =
       if mayReadFirst(s.body, name, written):
         return true
     of ReturnStmt:
-      if usesName(s.value, name):
+      if containsIdent(s.value, name):
         return true
       return false # this path ends without reading
     of BreakStmt:
       return false
     of EchoStmt:
       for a in s.args:
-        if usesName(a, name):
+        if containsIdent(a, name):
           return true
     of DiscardStmt, CallStmt:
-      if usesName(s.value, name):
+      if containsIdent(s.value, name):
         return true
   false
 
@@ -3410,14 +3399,14 @@ proc narrowTarget(u: Stmt, name: string): string =
     "'" & name & "' is only used inside the block at line " &
       $(u.line mod fileLineBase) & "; declare it inside the block"
   of WithStmt:
-    if u.name == name or usesName(u.lhs, name):
+    if u.name == name or containsIdent(u.lhs, name):
       return ""
     "'" & name & "' is only used inside the with block at line " &
       $(u.line mod fileLineBase) & "; declare it there"
   of IfStmt:
     var inBranches = 0
     for br in u.elifs:
-      if usesName(br.cond, name):
+      if containsIdent(br.cond, name):
         return ""
       var found = false
       for st in br.body:
@@ -3437,7 +3426,7 @@ proc narrowTarget(u: Stmt, name: string): string =
       $(u.line mod fileLineBase) & "; declare it in that branch"
   of WhileStmt, ForStmt, ForEachStmt, LoopStmt:
     for e in [u.cond, u.lo, u.hi, u.value]:
-      if usesName(e, name):
+      if containsIdent(e, name):
         return ""
     var w = false
     if mayReadFirst(u.body, name, w):

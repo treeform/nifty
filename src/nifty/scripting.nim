@@ -45,7 +45,6 @@ type
     modules: Table[string, string]
     foreign: seq[UnsafeFfi]
   Global = object
-    name: string
     offset, layout: int
     readonly: bool
   Program* = ref object
@@ -433,7 +432,7 @@ proc compileSource(source: string, host: Host,
               l.lower == g.typ.rlo and l.upper == g.typ.rhi:
             layout = i
         if layout >= 0:
-          let descriptor = Global(name: g.name, offset: int(irGlobal.offset),
+          let descriptor = Global(offset: int(irGlobal.offset),
             layout: layout, readonly: g.name in dataNames)
           if g.name in dataNames: result.inputs[dataNames[g.name]] = descriptor
           else: result.globals[g.name] = descriptor

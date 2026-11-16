@@ -48,19 +48,11 @@ proc interpreterFunctionAddress*(index: int): uint64 =
   ## Encodes a VM function reference for indirect calls.
   uint64(index + 1)
 
-proc width(kind: IrType): int =
-  ## Returns the scalar storage width.
-  case kind
-  of BoolType, CharType, Int8Type, UInt8Type: 1
-  of Int16Type, UInt16Type: 2
-  of Int32Type, UInt32Type, Float32Type: 4
-  else: 8
-
 proc normalize(value: uint64, kind: IrType): uint64 =
   ## Keeps the bit representation canonical at scalar boundaries.
   if kind == BoolType:
     return value and 1
-  let bits = width(kind) * 8
+  let bits = int(byteCount(kind, 8)) * 8
   if bits == 64: value else: value and ((1'u64 shl bits) - 1)
 
 proc signed(kind: IrType): bool =
@@ -69,7 +61,7 @@ proc signed(kind: IrType): bool =
 
 proc signedValue(value: uint64, kind: IrType): int64 =
   ## Sign extends a scalar bit pattern.
-  let shift = 64 - width(kind) * 8
+  let shift = 64 - int(byteCount(kind, 8)) * 8
   cast[int64](value shl shift) shr shift
 
 proc prepareInterpreter*(module: IrModule): IrInterpreterPlan =
@@ -182,7 +174,7 @@ proc convert(value: uint64, source, target: IrType,
         float64(cast[float32](uint32(value)))
       else: cast[float64](value)
     let number = trunc(original)
-    let bits = width(target) * 8
+    let bits = int(byteCount(target, 8)) * 8
     if classify(number) in {fcNan, fcInf, fcNegInf}:
       error("IR interpreter invalid float to integer conversion")
     if signed(target):
@@ -297,14 +289,14 @@ proc interpret*(plan: ptr IrInterpreterPlan, entry: int,
       of LoadOp:
         let address = a + cast[uint64](item.offset)
         if address == 0: error("IR interpreter null load")
-        copyMem(addr value, cast[pointer](address), width(kind))
+        copyMem(addr value, cast[pointer](address), int(byteCount(kind, 8)))
         value = normalize(value, kind)
       of StoreOp:
         let address = a + cast[uint64](item.offset)
         if address == 0: error("IR interpreter null store")
         var stored = b
         copyMem(cast[pointer](address), addr stored,
-          width(operandKind(item.arguments, 1)))
+          int(byteCount(operandKind(item.arguments, 1), 8)))
       of MoveBytesOp, ClearBytesOp:
         budget.spend(int64(item.byteCount))
         if item.byteCount > 0:

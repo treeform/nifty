@@ -320,12 +320,9 @@ proc lookup(ld: Loader, module: SourceModule, name: string): Symbol =
               previous.namespace == symbol.namespace):
           duplicate = true
       if not duplicate: imported.add symbol
-  if local != nil and imported.len == 0:
+  if imported.len == 0:
     module.visible[name] = local
     return local
-  if local == nil and imported.len == 0:
-    module.visible[name] = nil
-    return nil
   if local == nil and imported.len == 1:
     module.visible[name] = imported[0]
     return imported[0]

@@ -106,8 +106,9 @@ proc effectiveIrOptimizations*(requested: set[IrOptimization]):
 
 proc identityAliases(function: IrFunction): seq[ValueId] =
   ## Starts an explicit value substitution table without any replacements.
+  result = newSeq[ValueId](function.values.len)
   for i in 0 ..< function.values.len:
-    result.add(ValueId(i))
+    result[i] = ValueId(i)
 
 proc resolve(aliases: seq[ValueId], value: ValueId): ValueId =
   ## Follows substitutions to their surviving SSA definition.
@@ -527,13 +528,11 @@ proc pure(op: IrOpcode): bool {.raises: [].} =
 proc reuse(function: var IrFunction) =
   ## Reuses identical scalar instructions within one basic block.
   var
-    aliases = newSeq[ValueId](function.values.len)
+    aliases = function.identityAliases()
     instructions: seq[IrInstruction]
     seen = initTable[tuple[op: IrOpcode, kind: IrType, bits: uint64,
       comparison: IrComparison, conversion: IrConversion,
       count: int32, a, b, target, storage: int32, offset: int64], int32]()
-  for i in 0 ..< aliases.len:
-    aliases[i] = ValueId(i)
   for data in function.blocks.mitems:
     let first = instructions.len
     seen.clear()
@@ -571,14 +570,12 @@ proc reuse(function: var IrFunction) =
 proc reuseLoads(function: var IrFunction, hosts: seq[IrHost]) =
   ## Reuses address calculations and ordinary reads until a memory barrier.
   var
-    aliases = newSeq[ValueId](function.values.len)
+    aliases = function.identityAliases()
     instructions: seq[IrInstruction]
     addresses = initTable[tuple[op: IrOpcode, base, target, storage: int32,
       offset: int64], int32]()
     loads = initTable[tuple[address: int32, offset: int64, alignment: int32,
       kind: IrType, storage: int32], int32]()
-  for i in 0 ..< aliases.len:
-    aliases[i] = ValueId(i)
   for data in function.blocks.mitems:
     let first = instructions.len
     addresses.clear()
@@ -1132,7 +1129,7 @@ proc reuseDominating(function: var IrFunction) =
       for j in item.arguments.indices:
         operands[j] = aliases.resolve(operands[j])
       keep[i] = true
-      if not (item.op.pure() or item.op == OffsetAddressOp) or
+      if not item.op.pure() or
           item.op in {ConstantOp, FrameSizeOp} or item.volatile or
           item.results.count != 1 or item.arguments.count > 2:
           continue

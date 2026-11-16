@@ -106,26 +106,9 @@ proc passByPtr(t: Typ): bool =
   ## var parameters pass by pointer, except arrays which already decay.
   t.kind != ArrayType
 
-proc needsDefault(t: Typ): bool =
-  ## Identifies inline union tags which cannot use an all-zero default.
-  if t.isNil or t.opt or t.dynamic:
-    return false
-  case t.kind
-  of UnionType:
-    true
-  of ObjectType:
-    for field in t.fields:
-      if needsDefault(field.typ):
-        return true
-    false
-  of ArrayType:
-    needsDefault(t.elem)
-  else:
-    false
-
 proc initialize(g: var Gen, destination: string, typ: Typ) =
   ## Initializes fresh storage without allocating or exposing empty tags.
-  if needsDefault(typ):
+  if needsDefaultInit(typ):
     g.put "ni_init_" & mangle(typ) & "(" & destination & ");"
   else:
     g.put "memset(" & destination & ", 0, " & $typeSize(typ) & "LL);"
@@ -812,7 +795,7 @@ proc genStmt(g: var Gen, s: Stmt) =
       g.put cDecl("v_" & s.name, s.typ) & ";"
       g.put "memcpy(v_" & s.name & ", " & v & ", " & $typeSize(s.typ) & "LL);"
       return
-    if s.init == nil and needsDefault(s.typ):
+    if s.init == nil and needsDefaultInit(s.typ):
       g.put cDecl("v_" & s.name, s.typ) & ";"
       g.initialize("&v_" & s.name, s.typ)
       return
@@ -1216,7 +1199,7 @@ proc emitTypeDefs(g: var Gen, t: Typ) =
   if hasOwned(t) and (not t.dynamic or t.opt) and t.kind != CStringType:
     if not g.pendingOwners.anyIt(mangle(it) == mangle(t)):
       g.pendingOwners.add t
-  if needsDefault(t) and not g.defaultTypes.anyIt(mangle(it) == mangle(t)):
+  if needsDefaultInit(t) and not g.defaultTypes.anyIt(mangle(it) == mangle(t)):
     g.defaultTypes.add t
   if t.opt:
     let base = deOpt(t)
@@ -1770,11 +1753,11 @@ proc generatePass(m: Module, src: string,
     of UnionType:
       let member = t.members[0]
       g.put "  s->m_tag = " & $member.typeId & "ULL;"
-      if needsDefault(member):
+      if needsDefaultInit(member):
         g.put "  ni_init_" & mangle(member) & "(&s->m_payload.m_" & member.name & ");"
     of ObjectType:
       for field in t.fields:
-        if needsDefault(field.typ):
+        if needsDefaultInit(field.typ):
           g.put "  ni_init_" & mangle(field.typ) & "(&s->m_" & field.name & ");"
     of ArrayType:
       g.put "  for (int64_t i = 0; i < " & $t.len & "LL; ++i)"
@@ -1914,7 +1897,7 @@ proc generatePass(m: Module, src: string,
   g.put "int main(void) {"
   inc g.ind
   for gd in m.globals:
-    if needsDefault(gd.typ):
+    if needsDefaultInit(gd.typ):
       g.initialize("&g_" & gd.name, gd.typ)
   g.put "#ifdef _WIN32"
   g.put "if (_setmode(_fileno(stdout), _O_BINARY) < 0) ni_output_failure();"

@@ -44,9 +44,7 @@ proc exprOps(e: Expr, costs: Table[string, int64]): int64 =
     elif bt.kind == StringType:
       # Appends copy, scans walk: everything is capacity-bounded.
       if e.sval in ["add", "find", "findByte", "contains", "copyRange",
-          "toInt", "addNum"]:
-        result = sadd(result, bt.len)
-      elif e.sval in ["startsWith", "endsWith"]:
+          "toInt", "addNum", "startsWith", "endsWith"]:
         result = sadd(result, bt.len)
   for k in e.kids:
     result = sadd(result, exprOps(k, costs))
@@ -361,10 +359,9 @@ proc buildReport*(m: Module, src: string): string =
 
   # Storage follows the same normalized call DAG as C generation, including
   # standard-library formatting buffers and readonly echo argument captures.
-  var frames: Table[string, int64]
   var deepest: Table[string, tuple[bytes: int64, chain: string]]
   for r in storageRoutines:
-    frames[r.name] = sizeAdd(frameOverhead,
+    let frameBytes = sizeAdd(frameOverhead,
       sizeAdd(localBytes(storage, r.body), block:
         var pb = 0'i64
         for p in r.params:
@@ -378,7 +375,7 @@ proc buildReport*(m: Module, src: string): string =
         let d = deepest[callee]
         if d.bytes > best.bytes:
           best = d
-    deepest[r.name] = (bytes: sizeAdd(frames[r.name], best.bytes, r.line),
+    deepest[r.name] = (bytes: sizeAdd(frameBytes, best.bytes, r.line),
       chain: r.name & (if best.chain.len > 0: " -> " & best.chain else: ""))
 
   lines.add ""

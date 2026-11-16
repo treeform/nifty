@@ -91,7 +91,7 @@ static bool $N_reserve($N *s, int64_t k) {
   if ownsElements:
     g.put "  for (int64_t i = s->m_len; i > k; --i)"
     g.put "    ni_drop_" & child & "(&s->m_data[i - 1]);"
-  if t.kind == SeqType and needsDefault(t.elem):
+  if t.kind == SeqType and needsDefaultInit(t.elem):
     g.put "  for (int64_t i = s->m_len; i < k; ++i)"
     g.put "    ni_init_" & mangle(t.elem) & "(&s->m_data[i]);"
   else:
@@ -105,7 +105,7 @@ static bool $N_reserve($N *s, int64_t k) {
   if ownsElements:
     g.put "  for (int64_t i = s->m_len; i > k; --i)"
     g.put "    ni_drop_" & child & "(&s->m_data[i - 1]);"
-  if t.kind == SeqType and needsDefault(t.elem):
+  if t.kind == SeqType and needsDefaultInit(t.elem):
     g.put "  for (int64_t i = s->m_len; i < k; ++i)"
     g.put "    ni_init_" & mangle(t.elem) & "(&s->m_data[i]);"
   g.put "  s->m_len = k; return true;"
