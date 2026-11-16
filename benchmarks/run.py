@@ -176,6 +176,16 @@ def binaryArchitectures(path):
     header = binary.read(4096)
     if header[:4] == b"\0asm":
       return [wasmArchitecture(header + binary.read())]
+    if header[:2] == b"MZ" and len(header) >= 64:
+      offset = struct.unpack_from("<I", header, 60)[0]
+      if offset > path.stat().st_size - 26:
+        return []
+      binary.seek(offset)
+      pe = binary.read(26)
+      if pe[:4] != b"PE\0\0" or pe[24:26] != b"\x0b\x02":
+        return []
+      machine = struct.unpack_from("<H", pe, 4)[0]
+      return {0x8664: ["amd64"], 0xaa64: ["arm64"]}.get(machine, [])
   cpus = []
   macho = {b"\xcf\xfa\xed\xfe": "<", b"\xce\xfa\xed\xfe": "<",
            b"\xfe\xed\xfa\xcf": ">", b"\xfe\xed\xfa\xce": ">"}

@@ -10,14 +10,28 @@ Build Nifty from the repository root with `nim r tools/build.nim`, then run:
 python benchmarks/run_json.py
 python benchmarks/run_json.py --backend hand-c,c,amd64 --records 128 --repeat 100 --samples 5
 python benchmarks/run_json.py --backend c,arm64 --records 128 --repeat 100 --samples 5
+python benchmarks/run_json.py --backend amd64,wasm64,interp --records 128 --repeat 100 --samples 7
 ```
 
 The default backend list is Hand C, Nifty C, and the physical host's native
-backend. Only JSONdoc is built and displayed. `--backend` selects a subset;
-`--cc` selects the C compiler, respecting `CC` by default. Windows uses
-QueryPerformanceCounter; Linux and macOS use clock_gettime. Native runtime
+backend. Only JSONdoc is built and displayed. `--backend` also accepts other
+executable targets: AMD64 through Rosetta on ARM64 Macs, `wasm64`, and `interp`;
+`--cc` selects the C compiler, respecting `CC` by default. Native and interpreted
+programs use QueryPerformanceCounter on Windows and clock_gettime on Linux
+and macOS. Native runtime
 templates must be available beside the Nifty compiler or through the matching
 `NIFTY_RUNTIME_AMD64` / `NIFTY_RUNTIME_ARM64` environment variable.
+
+WASM64 requires Wasmtime with memory64 support; `NIFTY_WASMTIME` can select
+its executable. It uses WASI's monotonic clock on every host. The report
+records the engine version and hash, and excludes engine compilation and
+startup from workload timing. Generated binaries are checked for the selected
+CPU or memory64 ABI before execution.
+
+The interpreter executes the configured source through `nifty interpret`.
+It creates no program binary and reports compilation as N/A. Source checking,
+optimization, and IR preparation occur before the workload timer in each
+fresh process. Allocation counters still come from a separate C build.
 
 The default input has 128 records and 26,753 bytes, including nested containers,
 all JSON value types, exact number spellings, Unicode escapes, embedded NULs,

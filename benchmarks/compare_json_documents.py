@@ -69,7 +69,7 @@ void jsonAllocationFinish(void) {
 """
 
 
-def prepareSource(source, model, records, repeat, system, allocations=False):
+def prepareSource(source, model, records, repeat, system, allocations=False, backend=None):
     """Only select the workload, import location, and host monotonic clock."""
     library = "jsondoc" if model == "document" else "json"
     old = f'import "../lib/{library}"'
@@ -77,12 +77,12 @@ def prepareSource(source, model, records, repeat, system, allocations=False):
         raise Ray.BenchmarkError("Expected exactly one benchmark library import")
     source = source.replace(old, f'import "lib/{library}"')
     for name, number in (("Records", records), ("Repetitions", repeat),
-                         ("ClockId", getattr(time, "CLOCK_MONOTONIC", 1))):
+                         ("ClockId", 1 if backend == "wasm64" else getattr(time, "CLOCK_MONOTONIC", 1))):
         source, count = re.subn(rf"(?m)^const {name} = [0-9]+$",
                                 f"const {name} = {number}", source)
         if count != 1:
             raise Ray.BenchmarkError("Missing or repeated workload constant: " + name)
-    if system == "Windows":
+    if system == "Windows" and backend != "wasm64":
         old = 'extern "libc":\n  proc clock_gettime(clock: int32, value: var Timespec): int32'
         if source.count(old) != 1:
             raise Ray.BenchmarkError("Expected exactly one POSIX clock declaration")
@@ -97,12 +97,14 @@ def prepareSource(source, model, records, repeat, system, allocations=False):
 
 
 def snapshot(directory, model):
+    """Preserve the complete parser library beside each configured workload."""
     (directory / "lib").mkdir(parents=True, exist_ok=True)
     for name in ModelLibraries[model]:
         (directory / "lib" / name).write_bytes((Root / "lib" / name).read_bytes())
 
 
 def build(options, model, backend, host, env):
+    """Prepare source for interpretation or build and verify a target artifact."""
     directory = options.output / "build" / model / backend
     snapshot(directory, model)
     if backend == "hand-c":
@@ -118,16 +120,26 @@ def build(options, model, backend, host, env):
         (directory / "build.stdout").write_bytes(response.stdout)
         (directory / "build.stderr").write_bytes(response.stderr)
         print(f"Built {model}/{backend} in {elapsed / 1e9:.3f}s", flush=True)
+        architecture = artifactArchitecture(executable, backend, host)
         return dict(model=model, backend=backend, compile_wall_ns=elapsed,
+                    label=Ray.backendLabel("c-straight", host, architecture),
+                    execution_architecture=architecture,
                     build_command=command, executable=str(executable),
                     executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
                     source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
-                    execution_command=[str(executable)], samples=[], warmups=[])
+                    execution_command=Ray.executionCommand(architecture, executable, host, env),
+                    samples=[], warmups=[])
     original = Root / "benchmarks" / ("json_document.nifty" if model == "document" else "json_parser.nifty")
     source = directory / "benchmark.nifty"
     source.write_bytes(prepareSource(original.read_text(encoding="utf-8"), model,
-                                    options.records, options.repeat, host["system"]).encode())
-    executable = directory / ("benchmark.exe" if host["system"] == "Windows" else "benchmark")
+                                    options.records, options.repeat, host["system"], backend=backend).encode())
+    if backend == "interp":
+        result = Ray.interpreterResult(source, options.compiler, host, env, options.opt)
+        result.update(model=model, build_command=None, samples=[])
+        print(f"Prepared {model}/{backend} source (no compilation)", flush=True)
+        return result
+    executable = directory / ("benchmark.wasm" if backend == "wasm64" else
+                              "benchmark.exe" if host["system"] == "Windows" else "benchmark")
     executable.unlink(missing_ok=True)
     command = [str(options.compiler), "build", str(source), "--backend:" + backend,
                "--opt:" + options.opt, "-o", str(executable)]
@@ -135,12 +147,24 @@ def build(options, model, backend, host, env):
     (directory / "build.stdout").write_bytes(result.stdout)
     (directory / "build.stderr").write_bytes(result.stderr)
     print(f"Built {model}/{backend} in {elapsed / 1e9:.3f}s", flush=True)
+    architecture = artifactArchitecture(executable, backend, host)
     return dict(model=model, backend=backend, compile_wall_ns=elapsed,
+                label=Ray.backendLabel(backend, host, architecture),
+                execution_architecture=architecture,
                 build_command=command, executable=str(executable),
                 executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
                 source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
-                execution_command=Ray.executionCommand(backend if backend != "c" else host["physical_architecture"],
-                                                       executable, host, env), samples=[], warmups=[])
+                execution_command=Ray.executionCommand(architecture, executable, host, env),
+                samples=[], warmups=[])
+
+
+def artifactArchitecture(executable, backend, host):
+    """Reject a wrong CPU or WASM memory ABI before collecting timings."""
+    architectures = Ray.binaryArchitectures(executable)
+    expected = host["physical_architecture"] if backend in ("hand-c", "c") else backend
+    if architectures != [expected]:
+        raise Ray.BenchmarkError(f"Unexpected executable architecture for {backend}: {architectures}")
+    return expected
 
 
 def allocations(options, model, host, env, expected):
@@ -174,6 +198,7 @@ def allocations(options, model, host, env, expected):
 
 
 def markdown(report):
+    """Render medians while distinguishing interpretation from compilation."""
     models = list(dict.fromkeys(result["model"] for result in report["results"]))
     comparison = len(models) > 1
     title = "JSON tree versus document" if comparison else "JSON " + models[0]
@@ -190,10 +215,18 @@ def markdown(report):
                "| --- | ---: | ---: | ---: | ---: | ---: |"])
     for result in report["results"]:
         timing = result["timing"]
-        prefix = f"| {result['model']} | {result['backend']}" if comparison else f"| {result['backend']}"
-        lines.append(f"{prefix} | {result['compile_wall_ns']/1e9:.3f} | "
+        label = result.get("label", result["backend"])
+        prefix = f"| {result['model']} | {label}" if comparison else f"| {label}"
+        build_time = "N/A" if result["compile_wall_ns"] is None else f"{result['compile_wall_ns']/1e9:.3f}"
+        lines.append(f"{prefix} | {build_time} | "
                      f"{timing['median']/1e6:.3f} | {timing['min']/1e6:.3f} | {timing['max']/1e6:.3f} | "
                      f"{report['input_bytes']*1e9/1048576/timing['median']:.3f} |")
+    if any(result["backend"] == "interp" for result in report["results"]):
+        lines += ["", "Interpreter compilation is N/A. Parsing, optimization, and IR preparation "
+                  "occur before the workload timer in each fresh process."]
+    if any(result["backend"] == "wasm64" for result in report["results"]):
+        lines += ["", "WASM64 uses Wasmtime with memory64 and the WASI monotonic clock. "
+                  "Engine compilation and startup are outside the workload timer."]
     lines += ["", "Allocation traffic from separate, untimed C builds:", "",
               "| Model | Allocation/reallocation calls | Total requested bytes |",
               "| --- | ---: | ---: |"]
@@ -206,11 +239,13 @@ def markdown(report):
 
 
 def main(arguments=None):
+    """Measure executable targets sequentially and verify every repeated parse."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=("document", "tree", "both"), default="document",
                         help="document is the main benchmark; tree/both are opt-in")
     parser.add_argument("--compiler", type=Path, default=Root / ("nifty.exe" if os.name == "nt" else "nifty"))
-    parser.add_argument("--backend", default=None, help="comma-separated hand-c, c and the host native backend")
+    parser.add_argument("--backend", default=None,
+                        help="comma-separated hand-c,c,arm64,amd64,wasm64,interp")
     parser.add_argument("--records", type=int, default=128)
     parser.add_argument("--repeat", type=int, default=50)
     parser.add_argument("--samples", type=int, default=7)
@@ -240,13 +275,20 @@ def main(arguments=None):
     if not options.cc:
         parser.error("A C compiler is required for the allocation probe")
     backends = (options.backend or "hand-c,c," + host["physical_architecture"]).split(",")
-    if any(backend not in ("hand-c", "c", host["physical_architecture"]) for backend in backends):
-        parser.error("Select hand-c, c or the physical host native backend")
+    if any(backend not in ("hand-c",) + Ray.Backends for backend in backends):
+        parser.error("Select hand-c,c,arm64,amd64,wasm64,interp")
     backends = list(dict.fromkeys(backends))
+    for backend in backends:
+        if backend in ("arm64", "amd64") and backend != host["physical_architecture"] and not (
+                backend == "amd64" and host["system"] == "Darwin" and host["rosetta_available"]):
+            parser.error("Native backend cannot execute on this host: " + backend)
+    if "wasm64" in backends and not Ray.wasmtimeExecutable():
+        parser.error("wasm64 requires Wasmtime; set NIFTY_WASMTIME")
     options.output.mkdir(parents=True, exist_ok=True)
     for name in ("results.json", "results.md"):
         (options.output / name).unlink(missing_ok=True)
     env = dict(os.environ, CC=options.cc)
+    engine = Ray.engineMetadata(backends, env)
     expected = Json.expectedWorkload(options.records)
     inputs = [options.compiler] + [Root / "benchmarks" /
               ("json_document.nifty" if model == "document" else "json_parser.nifty") for model in models]
@@ -283,7 +325,8 @@ def main(arguments=None):
                   compiler=str(options.compiler), cc=Ray.optionalCommand([options.cc, "--version"]),
                   source_sha256={str(path.relative_to(Root)): hashlib.sha256(path.read_bytes()).hexdigest()
                                  for path in [Root / "lib" / name for name in libraries]},
-                  timing_scope=TimingScope, sample_order=rounds, results=variants, allocations=counters)
+                  timing_scope=TimingScope, sample_order=rounds, results=variants, allocations=counters,
+                  wasm_engine=engine)
     (options.output / "input.json").write_bytes(expected["input"])
     (options.output / "results.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8", newline="\n")
     text = markdown(report)
