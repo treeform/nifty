@@ -44,6 +44,7 @@ type
     data: seq[HostData]
     modules: Table[string, string]
     foreign: seq[UnsafeFfi]
+    allowImports, allowExterns: bool
   Global = object
     offset, layout: int
     readonly: bool
@@ -133,7 +134,9 @@ proc ensureFree(host: Host, name: string) =
   for d in host.data:
     if d.name == name: fail("duplicate host name: " & name)
 
-proc initHost*(): Host = Host()
+proc initHost*(allowImports = false, allowExterns = false): Host =
+  ## Creates an isolated host. Imports and externs are off by default.
+  Host(allowImports: allowImports, allowExterns: allowExterns)
 
 proc addData*(host: var Host, name: string, v: Value) =
   host.ensureFree(name)
@@ -203,6 +206,9 @@ proc modulePath(parent, request: string, bare: bool): string =
   parts.join("/")
 
 proc addModule*(host: var Host, name, source: string) =
+  ## Adds a virtual module. Requires a host created with allowImports.
+  if not host.allowImports:
+    fail("imports are disabled for this host: use initHost(allowImports = true)")
   let path = modulePath("", name, not name.endsWith(".nifty") and not name.contains('/'))
   if path.len == 0 or path == "host.nifty": fail("reserved or invalid module path")
   if path in host.modules: fail("duplicate host module: " & path)
@@ -212,6 +218,9 @@ proc allowUnsafeFfi*(host: var Host, library, symbol: string, address: pointer,
     parameters: openArray[IrType], returns: openArray[IrType]) =
   ## Explicit escape hatch. The host resolves and keeps this address alive.
   ## This grants native code the full powers of the embedding process.
+  ## Requires a host created with allowExterns.
+  if not host.allowExterns:
+    fail("externs are disabled for this host: use initHost(allowExterns = true)")
   if address == nil or library.len == 0 or symbol.len == 0:
     fail("unsafe FFI requires a named, non-null host-provided address")
   for previous in host.foreign:
@@ -300,6 +309,7 @@ proc compileSource(source: string, host: Host,
   let resolver: ImportResolver = proc(parent, request: string, bare: bool): ImportSource =
     var path = modulePath(parent, request, bare)
     if path == "host.nifty": return ImportSource(identity: path, source: hostSource)
+    if not host.allowImports: fail("imports are disabled for scripts: " & request)
     if bare and path notin host.modules: path = modulePath("", request, true)
     if path notin host.modules: return
     if path notin seen:
@@ -312,6 +322,8 @@ proc compileSource(source: string, host: Host,
   let mainName = if filename == "host.nifty": "script.nifty" else: filename
   let m = parse(loadTokens("import host\n" & source, mainName, "",
     resolver = resolver, mainLineOffset = -1))
+  if not host.allowExterns and m.externLibs.len > 0:
+    fail("externs are disabled for scripts: " & m.externLibs[0])
   var dataNames: Table[string, string]
   for r in m.routines:
     if r.line div fileLineBase < m.files.len and m.files[r.line div fileLineBase] == "host.nifty":

@@ -86,6 +86,10 @@ the script may access.
 
 ## Imports
 
+Imports are disabled by default. Any `import` in a script fails, and
+`addModule` raises. Create the host with `initHost(allowImports = true)` to
+enable virtual modules.
+
 `host.addModule("maths", source)` provides a virtual `maths.nifty` module.
 `host.addModule("game/helpers.nifty", source)` provides a virtual path. Imports
 use only this map: no current-directory search, standard-library fallback,
@@ -161,7 +165,9 @@ Every script `extern` declaration is rejected by default, including unused
 declarations and declarations inside supplied modules. Registering a safe Nim
 callback never enables FFI.
 
-An application that intentionally trusts native code can call
+Externs are disabled by default. Any `extern` block fails, and
+`allowUnsafeFfi` raises. An application that intentionally trusts native code
+creates the host with `initHost(allowExterns = true)` and then calls
 `allowUnsafeFfi(library, symbol, address, parameters, returns)` on its host. The
 host supplies a non-null resolved address and its exact IR ABI, for example
 `[Int64Type]` parameters and `[Int64Type]` results. Both the library/symbol pair

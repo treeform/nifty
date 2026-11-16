@@ -75,13 +75,56 @@ thread main() =
     discard literal.run(proc(text: string) = output.add text)
     check output == "<literal>\n"
 
+  test "isolated hosts disable imports and externs by default":
+    const
+      ImportScripts = [
+        "import maths\nthread main() =\n  discard 0\n",
+        "import \"maths.nifty\"\nthread main() =\n  discard 0\n"
+      ]
+      ExternScript = "extern \"libc\":\n  proc getpid(): int32\nthread main() =\n  discard 0\n"
+    for host in [initHost(), initHost(allowExterns = true)]:
+      for source in ImportScripts:
+        try:
+          discard compile(source, host)
+          fail()
+        except ScriptError as error:
+          check "imports are disabled" in error.msg
+    for host in [initHost(), initHost(allowImports = true)]:
+      try:
+        discard compile(ExternScript, host)
+        fail()
+      except ScriptError as error:
+        check "externs are disabled" in error.msg
+    try:
+      discard compile(ExternScript)
+      fail()
+    except ScriptError as error:
+      check "externs are disabled" in error.msg
+    var locked = initHost()
+    expect ScriptError: locked.addModule("maths", "const amount = 7\n")
+    expect ScriptError:
+      locked.allowUnsafeFfi("app", "twice", cast[pointer](foreignDouble),
+        [Int64Type], [Int64Type])
+    var modules = initHost(allowImports = true)
+    modules.addModule("maths", "const amount = 7\n")
+    modules.addModule("bad", "extern \"libc\":\n  proc getpid(): int32\n")
+    let runtime = newContext("import maths\nthread main() =\n  echo amount\n", modules)
+    var output = ""
+    discard runtime.run(proc(text: string) = output.add text)
+    check output == "7\n"
+    expect ScriptError: discard compile("import bad\nthread main() =\n  discard 0\n", modules)
+    var foreign = initHost(allowExterns = true)
+    foreign.allowUnsafeFfi("app", "twice", cast[pointer](foreignDouble),
+      [Int64Type], [Int64Type])
+    discard compile("extern \"app\":\n  proc twice(x: int): int\nthread main() =\n  echo twice(21)\n", foreign)
+
   test "FFI is rejected even when unused, renamed or in supplied modules":
     for source in [
       "extern \"libc\":\n  proc exit(code: int32)\nthread main() =\n  discard 0\n",
       "extern \"nifty\":\n  proc kill \"nifty_stdout_stream\"(): int\nthread main() =\n  discard 0\n",
       "extern \"nifty.host\":\n  proc escape(): int\nthread main() =\n  discard 0\n"]:
       expect ScriptError: discard compile(source)
-    var host = initHost()
+    var host = initHost(allowImports = true)
     host.addModule("bad", "extern \"libc\":\n  proc getpid(): int32\n")
     expect ScriptError: discard compile("import bad\nthread main() =\n  discard 0\n", host)
 
@@ -89,7 +132,7 @@ thread main() =
     for request in ["io", "\"https://example.invalid/script.nifty\"",
         "\"C:/Windows/win.ini\"", "\"../secret.nifty\""]:
       expect NiftyError: discard compile("import " & request & "\nthread main() =\n  discard 0\n")
-    var host = initHost()
+    var host = initHost(allowImports = true)
     host.addModule("shared", "const amount = 7\n")
     host.addModule("one", "import shared\n")
     host.addModule("two", "import \"./shared.nifty\"\n")
@@ -104,6 +147,50 @@ thread main() =
     output = ""
     discard nested.run(proc(text: string) = output.add text)
     check output == "9\n"
+
+  test "scripts only run source supplied by the host":
+    # Plant real code on disk, in the standard library override, and next
+    # to the working directory. None of it may reach the script.
+    let
+      planted = getTempDir() / "nifty_planted_code"
+      previousDir = getCurrentDir()
+      previousStdlib = getEnv("NIFTY_STDLIB")
+      evil = "const amount = 666\n"
+    createDir(planted)
+    writeFile(planted / "evil.nifty", evil)
+    writeFile(planted / "io.nifty", evil)
+    writeFile(planted / "_echo.nifty",
+      "proc echoText(value: string) =\n  discard 0\n")
+    putEnv("NIFTY_STDLIB", planted)
+    setCurrentDir(planted)
+    defer:
+      setCurrentDir(previousDir)
+      if previousStdlib.len > 0: putEnv("NIFTY_STDLIB", previousStdlib)
+      else: delEnv("NIFTY_STDLIB")
+      removeDir(planted)
+    var host = initHost(allowImports = true)
+    host.addModule("shared", "const amount = 7\n")
+    for request in ["evil", "io", "console", "\"evil.nifty\"",
+        "\"./evil.nifty\"", "\"" & planted / "evil.nifty" & "\"",
+        "\"" & previousDir / "std" / "io.nifty" & "\"",
+        "\"https://example.invalid/evil.nifty\"",
+        "\"github.com/evil/evil.nifty\""]:
+      try:
+        discard compile(
+          "import " & request & "\nthread main() =\n  echo amount\n", host)
+        fail()
+      except NiftyError as error:
+        check "not provided by the host" in error.msg
+    # Supplied modules cannot reach past the host either.
+    host.addModule("relay", "import evil\n")
+    expect NiftyError:
+      discard compile("import relay\nthread main() =\n  discard 0\n", host)
+    # Echo uses the built-in callbacks, not a planted standard library.
+    let runtime = newContext(
+      "import shared\nthread main() =\n  echo \"amount \", amount\n", host)
+    var output = ""
+    discard runtime.run(proc(text: string) = output.add text)
+    check output == "amount 7\n"
 
   test "host inputs reject direct and indirect mutation":
     var host = initHost()
@@ -167,7 +254,7 @@ thread main() =
     expect ScriptError: discard compile("var lock: Lock\nthread main() =\n  discard 0\n")
 
   test "explicit unsafe FFI requires an exact symbol and ABI":
-    var host = initHost()
+    var host = initHost(allowExterns = true)
     host.allowUnsafeFfi("app", "twice", cast[pointer](foreignDouble),
       [Int64Type], [Int64Type])
     expect ScriptError:
