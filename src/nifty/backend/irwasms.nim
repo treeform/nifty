@@ -417,6 +417,11 @@ proc emitWasmIr*(module: ir.IrModule, runtime: WasmModule,
         if item.op == ir.NegateOp and not floating(kind):
           code.constant(0)
         code.read(operand(0))
+        if item.op == ir.ShiftRightOp and
+            kind in {ir.Int8Type, ir.Int16Type, ir.Int32Type}:
+          # A logical shift consumes the narrow pattern, not its signed i64 view.
+          code.constant((1'i64 shl (byteCount(kind, 8) * 8)) - 1)
+          code.op(0x83)
         if item.arguments.count == 2:
           code.read(operand(1))
         if floating(kind):

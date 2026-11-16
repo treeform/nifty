@@ -1,0 +1,13 @@
+object Box =
+  value: int?
+object Outer =
+  box: Box
+thread main() =
+  var holder: Outer
+  echo holder.box.value.or(3)
+  holder.box.value = 7
+  if holder.box.value.ok:
+    echo holder.box.value.or(0)
+    echo holder.box.value
+  holder.box.value = none
+  echo holder.box.value.or(9)

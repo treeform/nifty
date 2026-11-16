@@ -163,6 +163,11 @@ proc floatLiteral(e: Expr): string =
   else:
     $value & suffix
 
+proc integerLiteral(value: int64): string =
+  ## The positive magnitude of int64.min is not a signed C integer literal.
+  ## Emitting it as unary minus followed by an LL literal requires an extension.
+  if value == low(int64): "INT64_MIN" else: $value & "LL"
+
 proc genExpr(g: var Gen, e: Expr): string =
   if e.wrapOpt and typeSize(e.typ) > arenaThreshold:
     return g.genOrdered(e)
@@ -194,7 +199,7 @@ proc genExpr(g: var Gen, e: Expr): string =
   of NoneExpr:
     "((" & cBase(e.typ) & "){0})"
   of IntExpr:
-    $e.ival & "LL"
+    integerLiteral(e.ival)
   of FloatExpr:
     floatLiteral(e)
   of BoolExpr:
@@ -1786,7 +1791,7 @@ proc generatePass(m: Module, src: string,
   if m.consts.len > 0:
     g.put ""
     for cd in m.consts:
-      g.put "static const int64_t C_" & cd.name & " = " & $cd.value & "LL;"
+      g.put "static const int64_t C_" & cd.name & " = " & integerLiteral(cd.value) & ";"
   if m.globals.len > 0:
     g.put ""
     for gd in m.globals:

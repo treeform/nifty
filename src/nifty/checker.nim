@@ -1820,10 +1820,12 @@ proc checkExpr(c: var Ctx, e: Expr): Typ =
           e.kids[0].kids[0].unwrapOpt:
         e.kids[0] = e.kids[0].kids[0]
         bt = e.kids[0].typ
-      if e.kids[0].kind == IdentExpr and e.kids[0].unwrapOpt:
-        # Already proven: undo the strip, or() still works.
+      if e.kids[0].unwrapOpt:
+        # Presence proofs unwrap identifiers and object fields. or() still
+        # consumes the optional representation, including its presence flag.
         e.kids[0].unwrapOpt = false
-        bt = c.declTypeOf(e.kids[0])
+        bt = if e.kids[0].kind == IdentExpr: c.declTypeOf(e.kids[0])
+          else: optOf(bt)
         e.kids[0].typ = bt
       if bt == nil or not bt.opt:
         err(e.line, "or() needs an optional value")
@@ -2795,9 +2797,10 @@ proc checkStmt(c: var Ctx, s: Stmt, topLevel: bool) =
     discard c.expectVal(s.lhs)
     if s.lhs.kind == UnionProjectExpr:
       s.lhs = s.lhs.kids[0]
-    if s.lhs.kind == IdentExpr and s.lhs.unwrapOpt:
+    if s.lhs.unwrapOpt:
       s.lhs.unwrapOpt = false
-      s.lhs.typ = c.declTypeOf(s.lhs)
+      s.lhs.typ = if s.lhs.kind == IdentExpr: c.declTypeOf(s.lhs)
+        else: optOf(s.lhs.typ)
     let lt = s.lhs.typ
     if pathHasProperty(s.lhs):
       err(s.line, "container properties are read-only; use container methods")

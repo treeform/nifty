@@ -1159,7 +1159,13 @@ proc emitArm64Ir*(module: ir.IrModule,
             let
               side = immediates.sides[instructionIndex]
               literal = immediates.bits[instructionIndex]
-              source = code.integerOperand(operand(1 - side), X12)
+            var source = code.integerOperand(operand(1 - side), X12)
+            if item.op == ir.ShiftRightOp and
+                resultKind in {ir.Int8Type, ir.Int16Type, ir.Int32Type}:
+              # Preserve allocated operands while dropping signed carrier bits.
+              let mask = (1'u64 shl (byteCount(resultKind, 8) * 8)) - 1
+              code.logicalImmediate(Word64, AndOperation, X12, source, mask)
+              source = X12
             integerResult = integerDestination(resultId)
             case item.op
             of ir.AndOp, ir.OrOp, ir.XorOp:
@@ -1186,8 +1192,13 @@ proc emitArm64Ir*(module: ir.IrModule,
               error("Invalid ARM64 immediate operand plan")
             code.normalize(resultKind, integerResult)
           else:
+            var left = code.integerOperand(operand(0), X12)
+            if item.op == ir.ShiftRightOp and
+                resultKind in {ir.Int8Type, ir.Int16Type, ir.Int32Type}:
+              let mask = (1'u64 shl (byteCount(resultKind, 8) * 8)) - 1
+              code.logicalImmediate(Word64, AndOperation, X12, left, mask)
+              left = X12
             let
-              left = code.integerOperand(operand(0), X12)
               word = unsignedWords and resultKind == ir.UInt32Type and
                 item.op in {ir.AddOp, ir.SubtractOp, ir.MultiplyOp,
                   ir.AndOp, ir.OrOp, ir.XorOp, ir.NotOp, ir.NegateOp}

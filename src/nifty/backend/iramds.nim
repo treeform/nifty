@@ -1267,6 +1267,11 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
                   code.putInteger(resultId)
                   continue
             code.integer(operand(0))
+            if item.op == ir.ShiftRightOp and
+                resultKind in {ir.Int8Type, ir.Int16Type, ir.Int32Type}:
+              # Signed narrow registers are sign extended; logical shifts must
+              # discard those carrier bits before shifting the declared value.
+              code.extendInteger(Rax, Rax, byteCount(resultKind, 8), false)
             if item.arguments.count == 2:
               code.integer(operand(1), Rcx)
             case item.op
