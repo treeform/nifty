@@ -58,7 +58,7 @@ Reproduce the WASM row without rerunning the other implementations:
 
 ```sh
 python3 benchmarks/run.py --backend wasm64 --size 256 --samples 7 --repeat 20 --check --output benchmarks/output/wasm-raytrace
-python3 benchmarks/run_json.py --backend wasm64 --records 128 --samples 7 --repeat 100 --output benchmarks/output/wasm-json
+python3 benchmarks/run_json_tree.py --backend wasm64 --records 128 --samples 7 --repeat 100 --output benchmarks/output/wasm-json
 python3 benchmarks/run_snappy.py --backend wasm64 --size 262144 --samples 7 --repeat 100 --output benchmarks/output/wasm-snappy
 ```
 
@@ -71,7 +71,7 @@ Reproduce the interpreter row without rerunning other implementations:
 
 ```sh
 python3 benchmarks/run.py --backend interp --size 256 --samples 7 --repeat 20 --check --timeout 3600 --output benchmarks/output/interp-raytrace
-python3 benchmarks/run_json.py --backend interp --records 128 --samples 7 --repeat 100 --timeout 3600 --output benchmarks/output/interp-json
+python3 benchmarks/run_json_tree.py --backend interp --records 128 --samples 7 --repeat 100 --timeout 3600 --output benchmarks/output/interp-json
 python3 benchmarks/run_snappy.py --backend interp --size 262144 --samples 7 --repeat 100 --timeout 3600 --output benchmarks/output/interp-snappy
 ```
 

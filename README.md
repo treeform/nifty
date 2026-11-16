@@ -11,7 +11,7 @@ aliases, and cached URL sources.
 The [embedding guide](docs/embedding.md) describes Bassy-style Nim hosts,
 capability-based scripting contexts, and execution limits.
 The [document JSON guide](docs/json-document.md) covers the node/byte-pool
-parser and its comparison with the owning-tree parser.
+parser used by the main [JSON benchmark](benchmarks/JSON.md).
 The [FFI guide](docs/ffi.md) covers foreign buffer contracts, opaque handles,
 and checked C-string inputs. The ordinary [console and file library](docs/io.md)
 uses that FFI; [file_io.nifty](examples/file_io.nifty) shows a binary file

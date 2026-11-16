@@ -43,7 +43,7 @@ regression suite was run.
 Reproduce:
 
 ```text
-python benchmarks/compare_json_documents.py --backend hand-c,c,amd64 --records 128 --repeat 100 --samples 5 --output benchmarks/output/json-tuning
+python benchmarks/compare_json_documents.py --model both --backend hand-c,c,amd64 --records 128 --repeat 100 --samples 5 --output benchmarks/output/json-tuning
 ```
 
 Raw samples, source/compiler hashes and exact commands are written to that

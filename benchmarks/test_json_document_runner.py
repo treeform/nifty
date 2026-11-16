@@ -48,7 +48,7 @@ def testComparison():
         return
     with tempfile.TemporaryDirectory(prefix="nifty-json-document-runner-") as temporary:
         output = Path(temporary)
-        report = Compare.main(["--backend", "c", "--records", "2", "--repeat", "2",
+        report = Compare.main(["--model", "both", "--backend", "c", "--records", "2", "--repeat", "2",
                                "--samples", "5", "--compiler", str(compiler), "--cc", cc,
                                "--output", str(output)])
         expected = Compare.Json.expectedWorkload(2)

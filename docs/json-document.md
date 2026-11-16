@@ -74,23 +74,23 @@ fixed records. This favors allocation count, linear construction, and grouped
 cleanup over the smallest possible representation. Individual nodes cannot
 outlive their document.
 
-## Reproduce the comparison
+## Run the main JSON benchmark
 
 Build Nifty, then run:
 
 ```text
-python benchmarks/compare_json_documents.py --records 128 --repeat 50 --samples 7
+python benchmarks/run_json.py --records 128 --repeat 50 --samples 7
 ```
 
-The runner selects C and the physical host's native backend. Select a subset
-with `--backend c` or `--backend c,amd64` / `--backend c,arm64`. Windows uses
+The runner selects Hand C, Nifty C, and the physical host's native backend.
+Select a subset with `--backend c` or `--backend c,amd64` / `--backend c,arm64`. Windows uses
 QueryPerformanceCounter; Linux/macOS use clock_gettime. `--cc` selects the C
 compiler, and `--output` selects the result directory.
-Add `hand-c` to include handwritten C tree and pooled-document references:
-`--backend hand-c,c,amd64`. The document reference uses the same two-pool
-representation and bounded recursive traversal in C.
+The handwritten C document reference uses the same two-pool representation
+and bounded recursive traversal in C. Only the document model is built and
+reported by default, under `benchmarks/output/jsondoc`.
 
-Both parsers receive identical input. Each timed cycle creates a fresh tree or
+All backends receive identical input. Each timed cycle creates a fresh
 document, hashes every decoded value and ordered key, and frees all its
 storage. Input setup and output are excluded. Measured variants rotate across
 samples, and every checksum must match Python's independent JSON oracle.
@@ -100,8 +100,7 @@ source/compiler hashes, and separate allocation probes. Allocation counters
 are never enabled in timed binaries. Requested bytes measure cumulative
 allocation traffic, not peak memory. The document has its own preorder digest
 traversal, so measured differences include traversal and cleanup improvements.
-The initial [Windows AMD64 measurements](json-document-benchmark.md) are recorded
-alongside their workload and validation details.
+See the [benchmark guide](../benchmarks/JSON.md) for commands and output files.
 
 Tests cover independent values and structure, Unicode and embedded NUL, exact
 numbers, duplicate keys, depth limits, moving reallocations, every allocation

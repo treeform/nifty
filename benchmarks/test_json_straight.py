@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 
-import run_json as oracle
+import run_json_tree as oracle
 
 
 def checksum(data):

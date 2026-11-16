@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 
-import run_json as run
+import run_json_tree as run
 
 
 def expectError(action, exception=run.BenchmarkError):

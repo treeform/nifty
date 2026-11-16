@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare JSON tree/document parsing with identical input and checked digests."""
+"""Benchmark JSON documents; the retained tree comparison is opt-in."""
 import argparse
 import hashlib
 import importlib.util
@@ -12,10 +12,19 @@ import sys
 import time
 
 Root = Path(__file__).resolve().parent.parent
-Spec = importlib.util.spec_from_file_location("json_benchmark", Root / "benchmarks/run_json.py")
+Spec = importlib.util.spec_from_file_location("json_oracle", Root / "benchmarks/run_json_tree.py")
 Json = importlib.util.module_from_spec(Spec)
 Spec.loader.exec_module(Json)
 Ray = Json.Ray
+
+TimingScope = ("Each timed cycle parses the complete input, hashes every decoded value "
+               "and ordered key, and releases the parser's storage. Input construction, "
+               "process startup and output are outside the interval. Each sample starts "
+               "a fresh process; first-use execution within the loop remains timed.")
+ModelLibraries = {
+    "document": ("jsondoc.nifty", "jsoncommon.nifty", "jsonstrings.nifty", "jsonnumbers.nifty"),
+    "tree": ("json.nifty", "jsontypes.nifty", "jsoncommon.nifty", "jsonstrings.nifty", "jsonnumbers.nifty"),
+}
 
 WindowsClock = """extern "kernel32":
   proc QueryPerformanceCounter(value: var int64): int32
@@ -87,15 +96,15 @@ def prepareSource(source, model, records, repeat, system, allocations=False):
     return source
 
 
-def snapshot(directory):
+def snapshot(directory, model):
     (directory / "lib").mkdir(parents=True, exist_ok=True)
-    for name in Json.LibraryNames:
+    for name in ModelLibraries[model]:
         (directory / "lib" / name).write_bytes((Root / "lib" / name).read_bytes())
 
 
 def build(options, model, backend, host, env):
     directory = options.output / "build" / model / backend
-    snapshot(directory)
+    snapshot(directory, model)
     if backend == "hand-c":
         for name in ("json_parser_straight.c", "json_document_hand.c"):
             (directory / name).write_bytes((Root / "benchmarks" / name).read_bytes())
@@ -137,7 +146,7 @@ def build(options, model, backend, host, env):
 def allocations(options, model, host, env, expected):
     """Separate instrumented C execution; counters never affect timed binaries."""
     directory = options.output / "allocations" / model
-    snapshot(directory)
+    snapshot(directory, model)
     original = Root / "benchmarks" / ("json_document.nifty" if model == "document" else "json_parser.nifty")
     source, generated = directory / "probe.nifty", directory / "probe.c"
     source.write_bytes(prepareSource(original.read_text(encoding="utf-8"), model,
@@ -165,18 +174,24 @@ def allocations(options, model, host, env, expected):
 
 
 def markdown(report):
-    lines = ["# JSON tree versus document", "",
+    models = list(dict.fromkeys(result["model"] for result in report["results"]))
+    comparison = len(models) > 1
+    title = "JSON tree versus document" if comparison else "JSON " + models[0]
+    lines = ["# " + title, "",
              f"{report['machine']['system']} {report['machine']['physical_architecture']}; "
              f"{report['records']} records, {report['input_bytes']:,} input bytes.", "",
-             Json.TimingScope, "",
+             report.get("timing_scope", TimingScope), "",
              f"{report['samples']} measured samples and {report['warmups']} warmups per variant; "
              f"{report['repeat']} fresh parses per process. Variants rotate within each round.", "",
-             f"Native optimization: {report['opt']}. C: -O2. Build time is one observed build, not a median.", "",
-             "| Model | Backend | Build (s) | Median cycle (ms) | Min (ms) | Max (ms) | MiB/s |",
-             "| --- | --- | ---: | ---: | ---: | ---: | ---: |"]
+             f"Native optimization: {report['opt']}. C: -O2. Build time is one observed build, not a median.", ""]
+    lines += (["| Model | Backend | Build (s) | Median cycle (ms) | Min (ms) | Max (ms) | MiB/s |",
+               "| --- | --- | ---: | ---: | ---: | ---: | ---: |"] if comparison else
+              ["| Backend | Build (s) | Median cycle (ms) | Min (ms) | Max (ms) | MiB/s |",
+               "| --- | ---: | ---: | ---: | ---: | ---: |"])
     for result in report["results"]:
         timing = result["timing"]
-        lines.append(f"| {result['model']} | {result['backend']} | {result['compile_wall_ns']/1e9:.3f} | "
+        prefix = f"| {result['model']} | {result['backend']}" if comparison else f"| {result['backend']}"
+        lines.append(f"{prefix} | {result['compile_wall_ns']/1e9:.3f} | "
                      f"{timing['median']/1e6:.3f} | {timing['min']/1e6:.3f} | {timing['max']/1e6:.3f} | "
                      f"{report['input_bytes']*1e9/1048576/timing['median']:.3f} |")
     lines += ["", "Allocation traffic from separate, untimed C builds:", "",
@@ -192,6 +207,8 @@ def markdown(report):
 
 def main(arguments=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", choices=("document", "tree", "both"), default="document",
+                        help="document is the main benchmark; tree/both are opt-in")
     parser.add_argument("--compiler", type=Path, default=Root / ("nifty.exe" if os.name == "nt" else "nifty"))
     parser.add_argument("--backend", default=None, help="comma-separated hand-c, c and the host native backend")
     parser.add_argument("--records", type=int, default=128)
@@ -201,8 +218,10 @@ def main(arguments=None):
     parser.add_argument("--opt", choices=("none", "speed"), default="speed")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc" if os.name == "nt" else "cc"))
     parser.add_argument("--timeout", type=float, default=900)
-    parser.add_argument("--output", type=Path, default=Root / "benchmarks/output/json-document")
+    parser.add_argument("--output", type=Path)
     options = parser.parse_args(arguments)
+    models = ("tree", "document") if options.model == "both" else (options.model,)
+    libraries = tuple(dict.fromkeys(name for model in models for name in ModelLibraries[model]))
     for name, low, high in (("records", 1, 4096), ("repeat", 1, 1000),
                             ("samples", 5, 1000), ("warmups", 1, 1000)):
         if not low <= getattr(options, name) <= high:
@@ -215,11 +234,12 @@ def main(arguments=None):
     options.compiler = options.compiler.expanduser().resolve()
     if not options.compiler.is_file():
         parser.error("Compiler does not exist")
-    options.output = options.output.expanduser().resolve()
+    options.output = (options.output or Root / "benchmarks/output" /
+                      {"document": "jsondoc", "tree": "jsontree", "both": "json-comparison"}[options.model]).expanduser().resolve()
     options.cc = shutil.which(options.cc)
     if not options.cc:
         parser.error("A C compiler is required for the allocation probe")
-    backends = (options.backend or "c," + host["physical_architecture"]).split(",")
+    backends = (options.backend or "hand-c,c," + host["physical_architecture"]).split(",")
     if any(backend not in ("hand-c", "c", host["physical_architecture"]) for backend in backends):
         parser.error("Select hand-c, c or the physical host native backend")
     backends = list(dict.fromkeys(backends))
@@ -228,14 +248,14 @@ def main(arguments=None):
         (options.output / name).unlink(missing_ok=True)
     env = dict(os.environ, CC=options.cc)
     expected = Json.expectedWorkload(options.records)
-    inputs = [options.compiler, Root / "benchmarks/json_parser.nifty",
-              Root / "benchmarks/json_document.nifty"]
+    inputs = [options.compiler] + [Root / "benchmarks" /
+              ("json_document.nifty" if model == "document" else "json_parser.nifty") for model in models]
     if "hand-c" in backends:
         inputs += [Root / "benchmarks/json_parser_straight.c", Root / "benchmarks/json_document_hand.c"]
-    inputs += [Root / "lib" / name for name in Json.LibraryNames]
+    inputs += [Root / "lib" / name for name in libraries]
     fingerprints = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
     variants = [build(options, model, backend, host, env)
-                for backend in backends for model in ("tree", "document")]
+                for backend in backends for model in models]
     rounds = []
     for index in range(options.warmups + options.samples):
         offset = index % len(variants)
@@ -251,18 +271,19 @@ def main(arguments=None):
             result["warmups" if index < options.warmups else "samples"].append(parsed)
     for result in variants:
         result["timing"] = Ray.summarize([sample["elapsed_ns"] / options.repeat for sample in result["samples"]])
-    counters = {model: allocations(options, model, host, env, expected) for model in ("tree", "document")}
+    counters = {model: allocations(options, model, host, env, expected) for model in models}
     if any(hashlib.sha256(path.read_bytes()).hexdigest() != digest for path, digest in fingerprints.items()):
         raise Ray.BenchmarkError("Compiler or input sources changed during the comparison")
-    report = dict(schema="nifty-json-document-comparison-v1", machine=host,
+    schema = "nifty-json-document-comparison-v1" if len(models) > 1 else f"nifty-json-{models[0]}-benchmark-v1"
+    report = dict(schema=schema, model=options.model, machine=host,
                   records=options.records, repeat=options.repeat, samples=options.samples,
                   warmups=options.warmups, opt=options.opt, input_bytes=expected["input_bytes"],
                   input_sha256=expected["input_sha256"], checksum=expected["checksum"],
                   compiler_sha256=hashlib.sha256(options.compiler.read_bytes()).hexdigest(),
                   compiler=str(options.compiler), cc=Ray.optionalCommand([options.cc, "--version"]),
                   source_sha256={str(path.relative_to(Root)): hashlib.sha256(path.read_bytes()).hexdigest()
-                                 for path in [Root / "lib" / name for name in Json.LibraryNames]},
-                  timing_scope=Json.TimingScope, sample_order=rounds, results=variants, allocations=counters)
+                                 for path in [Root / "lib" / name for name in libraries]},
+                  timing_scope=TimingScope, sample_order=rounds, results=variants, allocations=counters)
     (options.output / "input.json").write_bytes(expected["input"])
     (options.output / "results.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8", newline="\n")
     text = markdown(report)

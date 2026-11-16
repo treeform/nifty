@@ -6,8 +6,8 @@ driver, input, owned tree representation, allocator, and cleanup as
 `hand-c` (`c-straight` is also accepted). It does not invoke Nifty or regenerate assembly during a run.
 
 ```sh
-python3 benchmarks/run_json.py --backend hand-asm,hand-c --repeat 100
-python3 benchmarks/run_json.py --samples 7 --repeat 100 --wall
+python3 benchmarks/run_json_tree.py --backend hand-asm,hand-c --repeat 100
+python3 benchmarks/run_json_tree.py --samples 7 --repeat 100 --wall
 python3 benchmarks/test_json_hand_asm.py
 python3 benchmarks/test_json_hand_asm.py --suite /path/to/JSONTestSuite/test_parsing
 ```
@@ -111,7 +111,7 @@ assembly trampoline also checks callee-saved integer registers, the low
 halves of SIMD registers, frame-pointer preservation, and stack restoration
 across parsing, checksumming, and cleanup.
 
-Results are written under `benchmarks/output/json`. Each report preserves
+Results are written under `benchmarks/output/jsontree`. Each report preserves
 the input, raw samples, exact build commands, C driver and assembly
 snapshots, provenance manifest, hashes, and execution architecture. Use a
 separate `--output` directory when comparing an alternate listing.

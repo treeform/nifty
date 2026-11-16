@@ -39,7 +39,7 @@ not eliminate the remaining backend optimization work.
 Reproduce with:
 
 ```text
-python benchmarks/compare_json_documents.py --backend c,amd64 --records 128 --repeat 100 --samples 9
+python benchmarks/compare_json_documents.py --model both --backend c,amd64 --records 128 --repeat 100 --samples 9
 ```
 
 The default output directory is `benchmarks/output/json-document`; it contains
