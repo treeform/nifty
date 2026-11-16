@@ -34,6 +34,41 @@ thread main() =              # one OS thread, starts at program start
   echo "total: ", total
 ```
 
+## Scripting untrusted code
+
+Nifty can be embedded in a Nim program as a scripting language for untrusted
+code. The host passes a source string to an isolated VM, which checks it,
+compiles it, and runs it.
+
+The isolated VM disables `import` and `extern`. A script can only use the
+language itself and the host functions it is given. It cannot open files,
+make network calls, or call into C.
+
+Safety comes from the checker, not from runtime traps:
+
+- Every index, division, and integer range is proven safe before the
+  script runs.
+- Recursion is rejected, so stack and arena use is bounded.
+- Shared globals must be accessed under a lock.
+- Allocation failure is reported to the script as a value.
+
+There are two backends:
+
+| Backend | Isolation |
+|---|---|
+| WASM64 | The checker plus the WASM engine. A checker bug stays inside linear memory. |
+| Native AMD64 / ARM64 | The checker only. The code runs in the host process with no runtime guard. |
+
+Use WASM64 when the extra layer matters more than speed.
+
+The VM is created with `initHost()`. Imports and externs are off by
+default. They can be turned on with `initHost(allowImports = true)` and
+`initHost(allowExterns = true)` for trusted code only. See
+[docs/embedding.md](docs/embedding.md).
+
+The compiler also runs in the host process, so a depth limit for deeply
+nested source matters. Use `maxSyntaxDepth` in the script limits.
+
 ## Usage
 
 ```
