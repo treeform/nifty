@@ -1,5 +1,7 @@
 # Raytracer benchmark
 
+Other workloads: [JSON documents](JSON.md) and [line-only path filling](PATH_FILL.md).
+
 `raytracer.nifty` renders the fixed scene ported from Nimkey's raytracer.
 The runner uses Python 3 and its standard library. Build the Nifty compiler
 and the runtime templates first using `nim r tools/build.nim` from the repo

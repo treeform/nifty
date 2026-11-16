@@ -1,0 +1,152 @@
+# An original line-only A: eight outer edges and a triangular counter.
+# Coordinates use a 64 by 64 design grid; no fonts, curves, or asset loading.
+const ImageSize = 128
+const Repetitions = 256
+const ClockId = 1
+const EdgeCount = 11
+const SubSize = ImageSize * 4
+const PixelCount = ImageSize * ImageSize
+const MaxChecksum = PixelCount * PixelCount * 16
+
+object Edge =
+  x: 0 .. 65535
+  y: 0 .. 65535
+  dx: -65535 .. 65535
+  dy: -65535 .. 65535
+
+object Timespec =
+  sec: int64
+  nsec: int64
+
+extern "libc":
+  proc clock_gettime(clock: int32, value: var Timespec): int32
+
+func edge(x0, y0, x1, y1: 0 .. 64): Edge =
+  # Endpoints are listed in ascending y order; horizontal edges are retained.
+  var result: Edge
+  result.x = x0 * ImageSize
+  result.y = y0 * ImageSize
+  result.dx = (x1 - x0) * ImageSize
+  result.dy = (y1 - y0) * ImageSize
+  return result
+
+proc glyph(): array[EdgeCount, Edge] =
+  var edges: array[EdgeCount, Edge]
+  edges[0] = edge(25, 4, 4, 60)
+  edges[1] = edge(25, 4, 39, 4)
+  edges[2] = edge(39, 4, 60, 60)
+  edges[3] = edge(60, 60, 47, 60)
+  edges[4] = edge(42, 46, 47, 60)
+  edges[5] = edge(42, 46, 22, 46)
+  edges[6] = edge(22, 46, 17, 60)
+  edges[7] = edge(17, 60, 4, 60)
+  edges[8] = edge(32, 17, 26, 35)
+  edges[9] = edge(32, 17, 38, 35)
+  edges[10] = edge(38, 35, 26, 35)
+  return edges
+
+proc fill(pixels: var array[PixelCount, uint8], edges: array[EdgeCount, Edge], phase: 0 .. 15): bool =
+  # Sixteen quarter-pixel translations keep consecutive fills observable.
+  let shiftX = (phase % 4) * 16
+  let shiftY = (phase / 4) * 16
+  for i in 0 ..< PixelCount:
+    pixels[i] = 0
+  for row in 0 ..< SubSize:
+    let sampleY = row * 16 + 8 - shiftY
+    var crossings: array[EdgeCount, 0 .. SubSize]
+    var count: 0 .. EdgeCount = 0
+    for i in 0 ..< EdgeCount:
+      let e = edges[i]
+      # Top-inclusive, bottom-exclusive avoids counting shared vertices twice.
+      if e.dy > 0 and sampleY >= e.y and sampleY < e.y + e.dy:
+        # ceil((intersection - sample-center offset) / sample spacing).
+        # Integer arithmetic gives identical edge decisions on every backend.
+        let numerator = (e.x + shiftX) * e.dy + (sampleY - e.y) * e.dx + 8 * e.dy - 1
+        let denominator = 16 * e.dy
+        if denominator <= 0:
+          return false
+        let first = numerator / denominator
+        var clipped: 0 .. SubSize = 0
+        if first >= SubSize:
+          clipped = SubSize
+        elif first > 0:
+          clipped = first
+        if count < EdgeCount:
+          crossings[count] = clipped
+          count = count + 1
+    if count % 2 != 0:
+      return false
+    for i in 1 ..< EdgeCount:
+      if i < count:
+        let key = crossings[i]
+        var j: -1 .. EdgeCount - 2 = i - 1
+        while j >= 0 and crossings[j] > key:
+          crossings[j + 1] = crossings[j]
+          j = j - 1
+        crossings[j + 1] = key
+    for pair in 0 ..< EdgeCount / 2:
+      if pair * 2 + 1 < count:
+        let left = crossings[pair * 2]
+        let right = crossings[pair * 2 + 1]
+        for sampleX in left ..< right:
+          let pixel = (row / 4) * ImageSize + sampleX / 4
+          if pixel >= 0 and pixel < PixelCount:
+            let previous = pixels[pixel]
+            if previous < 16:
+              pixels[pixel] = previous + 1
+            else:
+              return false
+  return true
+
+func digest(pixels: array[PixelCount, uint8]): 0 .. MaxChecksum =
+  # A cheap position-weighted read consumes every pixel inside the timer.
+  var checksum: 0 .. MaxChecksum = 0
+  for i in 0 ..< PixelCount:
+    let coverage = pixels[i]
+    if coverage <= 16:
+      let term = coverage * (i + 1)
+      let next = checksum + term
+      if next <= MaxChecksum:
+        checksum = next
+  return checksum
+
+proc run() =
+  let edges = glyph()
+  var pixels: array[PixelCount, uint8]
+  var checksums: array[Repetitions, 0 .. MaxChecksum]
+  var started: Timespec
+  var finished: Timespec
+  let startStatus = clock_gettime(ClockId, started)
+  for repetition in 0 ..< Repetitions:
+    if not fill(pixels, edges, repetition % 16):
+      echo "fill_error"
+      return
+    checksums[repetition] = digest(pixels)
+  let finishStatus = clock_gettime(ClockId, finished)
+  echo "NIFTY_PATH_FILL_V1"
+  echo "size ", ImageSize
+  echo "repeat ", Repetitions
+  echo "start_sec ", started.sec
+  echo "start_nsec ", started.nsec
+  echo "end_sec ", finished.sec
+  echo "end_nsec ", finished.nsec
+  echo "clock_status ", startStatus, " ", finishStatus
+  for repetition in 0 ..< Repetitions:
+    echo "fill_checksum ", repetition, " ", checksums[repetition]
+  # Exact coverage for all translation phases, checked outside the timer.
+  var encoded: string
+  for phase in 0 ..< 16:
+    if not fill(pixels, edges, phase):
+      echo "fill_error"
+      return
+    encoded.clear()
+    for i in 0 ..< PixelCount:
+      let coverage = pixels[i]
+      if coverage <= 16:
+        if not encoded.addByte(97 + coverage):
+          echo "output_error"
+          return
+    echo "coverage ", phase, " ", encoded
+
+thread main() =
+  run()
