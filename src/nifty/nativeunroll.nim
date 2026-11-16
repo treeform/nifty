@@ -116,6 +116,15 @@ proc unrollNative*(source: Module,
   var constants = initTable[string, int64]()
   for item in source.consts:
     constants[item.name] = item.value
+  var locals = initTable[BindingId, Expr]()
+  proc remember(item: Stmt, added: var seq[BindingId]) =
+    ## Only immutable scalar literals can be substituted without evaluation.
+    if item.kind == LetStmt and item.binding > 0 and item.typ != nil and
+        not item.typ.opt and item.typ.kind in {IntType, BoolType} and
+        item.init != nil and item.init.kind in {IntExpr, BoolExpr} and
+        not item.init.wrapOpt and not item.init.unwrapOpt:
+      locals[item.binding] = item.init
+      added.add(item.binding)
   var
     routines = initTable[string, Routine]()
     expandedCosts = initTable[string, int]()
@@ -182,13 +191,24 @@ proc unrollNative*(source: Module,
       true
     else: false
   proc expression(value: Expr, name: string, literal: int64): Expr =
-    ## Substitutes only the checked loop binding and preserves typed flags.
+    ## Substitutes checked scalar bindings and preserves each use's type.
     if value.isNil:
       return nil
     new(result)
     result[] = value[]
     result.kids = @[]
-    if value.kind == IdentExpr and value.typ != nil and value.typ.kind == IntType and
+    if value.kind == IdentExpr and value.symKind == LocalSym and
+        value.binding in locals and value.typ != nil and
+        not value.typ.opt and not value.unwrapOpt:
+      let literal = locals[value.binding]
+      result.kind = literal.kind
+      result.ival = literal.ival
+      result.bval = literal.bval
+      result.sval = ""
+      result.rlo = literal.rlo
+      result.rhi = literal.rhi
+      result.rnz = literal.rnz
+    elif value.kind == IdentExpr and value.typ != nil and value.typ.kind == IntType and
         not value.typ.opt and not value.unwrapOpt and
         ((name.len > 0 and value.sval == name and value.symKind == LocalSym) or
          (value.symKind == ConstSym and value.sval in constants)):
@@ -250,11 +270,19 @@ proc unrollNative*(source: Module,
         body: copyBody(branch.body, name, literal)))
   proc copyBody(body: seq[Stmt], name: string, literal: int64): seq[Stmt] =
     ## Copies a statement sequence without sharing mutable AST nodes.
+    var localBindings: seq[BindingId]
+    defer:
+      for binding in localBindings: locals.del(binding)
     for item in body:
-      result.add(copyStatement(item, name, literal))
+      let copied = copyStatement(item, name, literal)
+      result.add(copied)
+      remember(copied, localBindings)
   var growth = 0
   proc transform(body: seq[Stmt]): seq[Stmt] =
     ## Selects bounded loops and leaves unsupported ranges on their old path.
+    var localBindings: seq[BindingId]
+    defer:
+      for binding in localBindings: locals.del(binding)
     for item in body:
       var first, last: int64
       var count = -1
@@ -298,6 +326,7 @@ proc unrollNative*(source: Module,
         for i in 0 ..< copied.elifs.len:
           copied.elifs[i].body = transform(item.elifs[i].body)
         result.add(copied)
+        remember(copied, localBindings)
   for routine in source.routines:
     var copied: Routine
     new(copied)

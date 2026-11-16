@@ -1,0 +1,38 @@
+proc touched(calls: var 0 .. 10): int =
+  let previous = calls
+  if previous < 10:
+    calls = previous + 1
+  return 2
+
+func widened(value: uint8): int =
+  return value
+
+thread main() =
+  let seed = 1 + 1
+  let count = seed + 1
+  for i in 0 ..< count:
+    let doubled = i * 2
+    echo doubled
+  let enabled = not false
+  if enabled:
+    echo count
+  block:
+    let amount = 5
+    echo amount
+  block:
+    let amount = 9
+    echo amount
+  var changing: 0 .. 10 = 1
+  let saved = changing
+  changing = 2
+  echo saved
+  echo changing
+  var calls: 0 .. 10 = 0
+  let once = touched(calls)
+  echo once
+  echo once
+  echo calls
+  let byte: uint8 = 255
+  echo widened(byte)
+  let optional: int? = count
+  echo optional.or(0)

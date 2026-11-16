@@ -40,4 +40,29 @@ try:
 except NiftyError:
   rejected = true
 doAssert rejected, "Source checking must happen before dead-branch removal"
+block:
+  const text = staticRead(currentSourcePath.parentDir / "native/ast_locals.nifty")
+  let original = checkedModule(text, "ast_locals.nifty")
+  let before = generate(original, "ast_locals.nifty")
+  let folded = unrollNative(original)
+  doAssert generate(original, "ast_locals.nifty") == before
+  let body = folded.routines[^1].body
+  doAssert body[1].init.kind == IntExpr and body[1].init.ival == 3
+  doAssert body[2].kind == BlockStmt and body[2].body.len == 3
+  for index, iteration in body[2].body:
+    doAssert iteration.body[1].args[0].kind == IntExpr
+    doAssert iteration.body[1].args[0].ival == int64(index * 2)
+  doAssert body[4].kind == BlockStmt
+  doAssert body[4].body[0].args[0].ival == 3
+  doAssert body[5].body[1].args[0].ival == 5
+  doAssert body[6].body[1].args[0].ival == 9
+  # Mutable reads and evaluated initializers are not constant bindings.
+  doAssert body[8].init.kind == IdentExpr
+  doAssert body[10].args[0].kind == IdentExpr
+  doAssert body[13].init.kind == CallExpr
+  doAssert body[14].args[0].kind == IdentExpr
+  doAssert body[18].args[0].kids[0].kind == IntExpr
+  doAssert body[18].args[0].kids[0].typ.width == 1
+  doAssert body[19].init.wrapOpt
+
 echo "Checked AST literal, branch, scope and effect folding passed"

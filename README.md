@@ -52,6 +52,8 @@ nim c -d:release -o:nifty src/nifty.nim
 
 `--opt:speed` (the default) folds checked integer and Boolean literals, removes
 constant branches, and expands small constant loops before C or IR generation.
+Immutable local integer and Boolean literals propagate through later uses,
+including chained `let` declarations and constant loop bounds.
 Source checking still happens first, including in branches that are removed.
 IR optimization remains available after lowering to catch constants exposed by
 inlining. AMD64 and ARM64 also share exact unsigned constant-division reduction
