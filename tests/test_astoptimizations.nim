@@ -65,4 +65,31 @@ block:
   doAssert body[18].args[0].kids[0].typ.width == 1
   doAssert body[19].init.wrapOpt
 
-echo "Checked AST literal, branch, scope and effect folding passed"
+block:
+  const text = staticRead(currentSourcePath.parentDir / "native/ast_ranges.nifty")
+  let original = checkedModule(text, "ast_ranges.nifty")
+  let before = generate(original, "ast_ranges.nifty")
+  let folded = unrollNative(original)
+  doAssert generate(original, "ast_ranges.nifty") == before
+  let classified = folded.routines[1].body[0]
+  doAssert classified.kind == BlockStmt
+  doAssert classified.body[0].value.ival == 3
+  for index in [2, 3, 4]:
+    let returned = folded.routines[index].body[0].value
+    doAssert returned.kind == BoolExpr and returned.bval
+  # Overlapping ranges remain conditional; zero exclusion and nested guards fold.
+  doAssert folded.routines[5].body[0].kind == IfStmt
+  let nonzero = folded.routines[6].body[0].elifs[0].body[0].value
+  doAssert nonzero.kind == BoolExpr and not nonzero.bval
+  let narrowed = folded.routines[7].body[0].elifs[0].body[0].value
+  doAssert narrowed.kind == BoolExpr and narrowed.bval
+  let main = folded.routines[^1].body
+  # A known result cannot discard the call that produces it.
+  let sampled = main[7].elifs[0].cond
+  doAssert sampled.kind == BinExpr and sampled.kids[0].kind == CallExpr
+  doAssert main[9].kind == BlockStmt and main[11].kind == BlockStmt
+  let loop = main[13]
+  doAssert loop.kind == WhileStmt and loop.cond.kind == BinExpr
+  doAssert loop.body[0].kind == BlockStmt
+
+echo "Checked AST literals, locals, ranges, scopes and effects passed"

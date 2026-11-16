@@ -82,6 +82,57 @@ proc foldLiteral(value: Expr) =
   value.kids = @[]
   value.sval = ""
 
+proc rangeOperand(value: Expr): bool =
+  ## Restricts discarded evaluation to checked scalar reads and arithmetic.
+  if value.isNil or value.typ.isNil or value.typ.kind != IntType or
+      value.typ.opt or value.wrapOpt or value.unwrapOpt or value.rlo > value.rhi:
+    return false
+  case value.kind
+  of IntExpr: true
+  of IdentExpr: value.symKind in {ConstSym, LocalSym, ParamSym}
+  of NegExpr: rangeOperand(value.kids[0])
+  of BinExpr:
+    value.sval in ["+", "-", "*"] and
+      rangeOperand(value.kids[0]) and rangeOperand(value.kids[1])
+  else: false
+
+proc foldRangeComparison(value: Expr) =
+  ## Uses facts proved at each expression's original evaluation point.
+  if value.isNil or value.kind != BinExpr or value.typ.isNil or
+      value.typ.kind != BoolType or value.typ.opt or value.wrapOpt or
+      value.unwrapOpt or not rangeOperand(value.kids[0]) or
+      not rangeOperand(value.kids[1]):
+    return
+  let
+    a = value.kids[0]
+    b = value.kids[1]
+  var yes, no: bool
+  case value.sval
+  of "<":
+    yes = a.rhi < b.rlo
+    no = a.rlo >= b.rhi
+  of "<=":
+    yes = a.rhi <= b.rlo
+    no = a.rlo > b.rhi
+  of ">":
+    yes = a.rlo > b.rhi
+    no = a.rhi <= b.rlo
+  of ">=":
+    yes = a.rlo >= b.rhi
+    no = a.rhi < b.rlo
+  of "==", "!=":
+    yes = a.rlo == a.rhi and b.rlo == b.rhi and a.rlo == b.rlo
+    no = a.rhi < b.rlo or b.rhi < a.rlo or
+      (a.rnz and b.rlo == 0 and b.rhi == 0) or
+      (b.rnz and a.rlo == 0 and a.rhi == 0)
+    if value.sval == "!=": swap(yes, no)
+  else: return
+  if yes or no:
+    value.kind = BoolExpr
+    value.bval = yes
+    value.kids = @[]
+    value.sval = ""
+
 proc simplifyBranches(body: seq[Stmt]) =
   ## Retains a lexical scope for selected bodies so owner drops remain local.
   for item in body:
@@ -223,6 +274,7 @@ proc unrollNative*(source: Module,
       for child in value.kids:
         result.kids.add(expression(child, name, literal))
     foldLiteral(result)
+    foldRangeComparison(result)
   proc nodes(value: Expr): int =
     ## Counts expression nodes without expanding calls.
     if value.isNil:

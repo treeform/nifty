@@ -1,0 +1,63 @@
+proc sampled(calls: var 0 .. 10): 0 .. 255 =
+  let previous = calls
+  if previous < 10:
+    calls = previous + 1
+  return 255
+
+func classified(value: 0 .. 255): int =
+  if value < 0:
+    return 1
+  elif value >= 256:
+    return 2
+  elif value <= 255:
+    return 3
+  else:
+    return 4
+
+func separated(left: -10 .. -1, right: 0 .. 10): bool =
+  return left < right and left != right and right > left and right >= left
+
+func bounded(value: 0 .. 255): bool =
+  return value + 1 <= 256
+
+func singleton(value: 7 .. 7): bool =
+  return value == 7
+
+func overlapping(value: 0 .. 255): int =
+  if value < 100:
+    return 5
+  return 6
+
+func nonzero(value: int): bool =
+  if value != 0:
+    return value == 0
+  return false
+
+func narrowed(value: int): bool =
+  if value >= 0 and value < 10:
+    return value >= 0 and value <= 9
+  return false
+
+thread main() =
+  echo classified(0), " ", classified(255)
+  echo separated(-1, 0), " ", separated(-10, 10)
+  echo bounded(0), " ", bounded(255), " ", singleton(7)
+  echo overlapping(99), " ", overlapping(100)
+  echo nonzero(-9223372036854775807 - 1), " ", nonzero(0), " ", nonzero(9223372036854775807)
+  echo narrowed(-1), " ", narrowed(0), " ", narrowed(9), " ", narrowed(10)
+  var calls: 0 .. 10 = 0
+  if sampled(calls) < 256:
+    echo calls
+  var value: 0 .. 255 = 1
+  if value < 256:
+    echo value
+  value = 255
+  if value < 100:
+    echo -1
+  else:
+    echo value
+  var i: 0 .. 3 = 0
+  while i < 3:
+    if i >= 0 and i < 3:
+      echo i
+    i = i + 1

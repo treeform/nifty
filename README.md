@@ -54,6 +54,9 @@ nim c -d:release -o:nifty src/nifty.nim
 constant branches, and expands small constant loops before C or IR generation.
 Immutable local integer and Boolean literals propagate through later uses,
 including chained `let` declarations and constant loop bounds.
+Integer comparisons also fold when the checker's ranges or nonzero facts prove
+the result and evaluating their operands has no effects. Calls retain their
+evaluation even when their declared result range would settle a comparison.
 Source checking still happens first, including in branches that are removed.
 IR optimization remains available after lowering to catch constants exposed by
 inlining. AMD64 and ARM64 also share exact unsigned constant-division reduction
