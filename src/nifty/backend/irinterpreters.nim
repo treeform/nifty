@@ -2,6 +2,27 @@
 import std/math
 import irs, irchecks, common, context, floatroundings
 
+const
+  ScalarWidths = block:
+    var widths: array[IrType, int]
+    for kind in IrType:
+      widths[kind] = int(byteCount(kind, 8))
+      doAssert widths[kind] in [1, 2, 4, 8]
+    widths
+  ScalarMasks = block:
+    var masks: array[IrType, uint64]
+    for kind in IrType:
+      masks[kind] =
+        if kind == BoolType: 1'u64
+        elif ScalarWidths[kind] == 8: high(uint64)
+        else: (1'u64 shl (ScalarWidths[kind] * 8)) - 1
+    masks
+  ScalarShifts = block:
+    var shifts: array[IrType, int]
+    for kind in IrType:
+      shifts[kind] = 64 - ScalarWidths[kind] * 8
+    shifts
+
 type
   ExecutionLimitError* = object of CatchableError
   ExecutionBudget* = object
@@ -48,21 +69,38 @@ proc interpreterFunctionAddress*(index: int): uint64 =
   ## Encodes a VM function reference for indirect calls.
   uint64(index + 1)
 
-proc normalize(value: uint64, kind: IrType): uint64 =
+proc normalize(value: uint64, kind: IrType): uint64 {.inline.} =
   ## Keeps the bit representation canonical at scalar boundaries.
-  if kind == BoolType:
-    return value and 1
-  let bits = int(byteCount(kind, 8)) * 8
-  if bits == 64: value else: value and ((1'u64 shl bits) - 1)
+  value and ScalarMasks[kind]
 
 proc signed(kind: IrType): bool =
   ## Identifies signed integer types.
   kind in {Int8Type, Int16Type, Int32Type, Int64Type}
 
-proc signedValue(value: uint64, kind: IrType): int64 =
+proc signedValue(value: uint64, kind: IrType): int64 {.inline.} =
   ## Sign extends a scalar bit pattern.
-  let shift = 64 - int(byteCount(kind, 8)) * 8
+  let shift = ScalarShifts[kind]
   cast[int64](value shl shift) shr shift
+
+proc loadScalar(address: uint64, kind: IrType): uint64 {.inline.} =
+  ## Copies an unaligned scalar with a constant-sized native transfer.
+  result = 0
+  case ScalarWidths[kind]
+  of 1: copyMem(addr result, cast[pointer](address), 1)
+  of 2: copyMem(addr result, cast[pointer](address), 2)
+  of 4: copyMem(addr result, cast[pointer](address), 4)
+  else: copyMem(addr result, cast[pointer](address), 8)
+  if kind == BoolType:
+    result = result and 1
+
+proc storeScalar(address, value: uint64, kind: IrType) {.inline.} =
+  ## Writes only the scalar's bytes, including at unaligned addresses.
+  var bits = value
+  case ScalarWidths[kind]
+  of 1: copyMem(cast[pointer](address), addr bits, 1)
+  of 2: copyMem(cast[pointer](address), addr bits, 2)
+  of 4: copyMem(cast[pointer](address), addr bits, 4)
+  else: copyMem(cast[pointer](address), addr bits, 8)
 
 proc prepareInterpreter*(module: IrModule): IrInterpreterPlan =
   ## Verifies IR and prepares stable, aligned slot layouts.
@@ -87,7 +125,7 @@ proc prepareInterpreter*(module: IrModule): IrInterpreterPlan =
         int(data.terminator.arguments.count + data.terminator.results.count))
     result.frames.add(frame)
 
-proc compare[T](a, b: T, comparison: IrComparison): bool =
+proc compare[T](a, b: T, comparison: IrComparison): bool {.inline.} =
   ## Evaluates scalar comparisons with the host's ordered float semantics.
   case comparison
   of EqualComparison: a == b
@@ -175,7 +213,7 @@ proc convert(value: uint64, source, target: IrType,
         float64(cast[float32](uint32(value)))
       else: cast[float64](value)
     let number = trunc(original)
-    let bits = int(byteCount(target, 8)) * 8
+    let bits = ScalarWidths[target] * 8
     if classify(number) in {fcNan, fcInf, fcNegInf}:
       error("IR interpreter invalid float to integer conversion")
     if signed(target):
@@ -290,14 +328,11 @@ proc interpret*(plan: ptr IrInterpreterPlan, entry: int,
       of LoadOp:
         let address = a + cast[uint64](item.offset)
         if address == 0: error("IR interpreter null load")
-        copyMem(addr value, cast[pointer](address), int(byteCount(kind, 8)))
-        value = normalize(value, kind)
+        value = loadScalar(address, kind)
       of StoreOp:
         let address = a + cast[uint64](item.offset)
         if address == 0: error("IR interpreter null store")
-        var stored = b
-        copyMem(cast[pointer](address), addr stored,
-          int(byteCount(operandKind(item.arguments, 1), 8)))
+        storeScalar(address, b, operandKind(item.arguments, 1))
       of MoveBytesOp, ClearBytesOp:
         budget.spend(int64(item.byteCount))
         if item.byteCount > 0:

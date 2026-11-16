@@ -203,6 +203,52 @@ block:
   discard function.run([cast[uint64](bytes.addr)])
   doAssert bytes == [1'u8, 1, 2, 3, 4, 5, 6, 7]
 
+for (kind, width, raw, expected) in [
+    (BoolType, 1, 0xfe'u64, 0'u64),
+    (BoolType, 1, 0xff'u64, 1'u64),
+    (CharType, 1, 0xe7'u64, 0xe7'u64),
+    (Int8Type, 1, 0x80'u64, 0x80'u64),
+    (UInt8Type, 1, 0xff'u64, 0xff'u64),
+    (Int16Type, 2, 0x8001'u64, 0x8001'u64),
+    (UInt16Type, 2, 0xfedc'u64, 0xfedc'u64),
+    (Int32Type, 4, 0x80000001'u64, 0x80000001'u64),
+    (UInt32Type, 4, 0xfedcba98'u64, 0xfedcba98'u64),
+    (Int64Type, 8, 0x8000000000000001'u64, 0x8000000000000001'u64),
+    (UInt64Type, 8, 0xfedcba9876543210'u64, 0xfedcba9876543210'u64),
+    (AddressType, 8, 0x123456789abcdef0'u64, 0x123456789abcdef0'u64),
+    (Float32Type, 4, 0x7fc01234'u64, 0x7fc01234'u64),
+    (Float32Type, 4, 0x80000000'u64, 0x80000000'u64),
+    (Float64Type, 8, 0x7ff8000000001234'u64, 0x7ff8000000001234'u64),
+    (Float64Type, 8, 0x8000000000000000'u64, 0x8000000000000000'u64)]:
+  # Unaligned scalar loads preserve payload bits and clear unused high bits;
+  # stores touch exactly their width, including normalized boolean bytes.
+  var source, destination: array[4, uint64]
+  for word in source.mitems:
+    word = 0xa5a5a5a5a5a5a5a5'u64
+  for word in destination.mitems:
+    word = 0xa5a5a5a5a5a5a5a5'u64
+  let
+    sourceBytes = cast[ptr UncheckedArray[byte]](addr source[0])
+    destinationBytes = cast[ptr UncheckedArray[byte]](addr destination[0])
+  for i in 0 ..< width:
+    sourceBytes[1 + i] = byte((raw shr (i * 8)) and 0xff)
+  let original = source
+  var function = routine([AddressType, AddressType], [kind])
+  discard function.emit(ConstantOp, [], UInt64Type, bits = high(uint64))
+  let value = function.emit(LoadOp, [ValueId(0)], kind)
+  function.instructions[^1].offset = 1
+  discard function.emit(StoreOp, [ValueId(1), value], kind, count = 0)
+  function.instructions[^1].offset = 1
+  function.finish([value])
+  doAssert function.run([cast[uint64](addr source[0]),
+    cast[uint64](addr destination[0])]) == @[expected]
+  for i in 0 ..< sizeof(destination):
+    let expectedByte = if i >= 1 and i <= width:
+        byte((expected shr ((i - 1) * 8)) and 0xff)
+      else: 0xa5'u8
+    doAssert destinationBytes[i] == expectedByte
+  doAssert source == original
+
 proc host(context: pointer, id: int, arguments: openArray[uint64],
     returns: var openArray[uint64]) {.nimcall, gcsafe.} =
   ## Records the host index and uses the caller context in a result.

@@ -23,6 +23,12 @@ API double mixed(int8_t a, double b, uint16_t c, float d,
  double q, double r, double s, double t, double u) {
  return a+b+c+d+e+f+g+h+i+j+k+l+m+n+o+p+q+r+s+t+u;
 }
+API double mixed16(int8_t a, double b, uint16_t c, float d,
+ int64_t e, double f, uint64_t g, float h, int32_t i, double j,
+ uint32_t k, float l, int16_t m, double n, uint8_t o, float p) {
+ return a+b+c+d+e+f+g+h+i+j+k+l+m+n+o+p;
+}
+API uint64_t noArgs(void) { return 42; }
 API int8_t signed8(int8_t x) { return x; }
 API int16_t signed16(int16_t x) { return x; }
 API int32_t signed32(int32_t x) { return x; }
@@ -72,6 +78,7 @@ if hadOverride:
 else:
   delEnv("NIFTY_LIBFFI")
 doAssert foreignAvailable()
+doAssert invoke("noArgs", @[], @[UInt64Type], @[])[0] == 42'u64
 let kinds = @[Int8Type, Float64Type, UInt16Type, Float32Type,
   Int64Type, Float64Type, UInt64Type, Float32Type, Int32Type,
   Float64Type, UInt32Type, Float32Type, Int16Type, Float64Type,
@@ -88,6 +95,9 @@ for i, kind in kinds:
     else: uint64(i + 1)
 let mixed = invoke("mixed", kinds, @[Float64Type], values)
 doAssert cast[float64](mixed[0]) == expected
+let mixed16 = invoke("mixed16", kinds[0 .. 15], @[Float64Type],
+  values[0 .. 15])
+doAssert cast[float64](mixed16[0]) == 136.0
 for (name, kind) in [("signed8", Int8Type), ("signed16", Int16Type),
     ("signed32", Int32Type)]:
   doAssert invoke(name, @[kind], @[kind], @[uint64.high])[0] == uint64.high

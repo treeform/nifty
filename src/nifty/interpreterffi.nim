@@ -133,15 +133,26 @@ proc callForeign*(call: ptr ForeignCall, arguments: openArray[uint64],
       returns.len != ord(call.hasReturn):
     raise newException(InterpreterFfiError,
       "C extern argument or return count does not match signature")
-  var
-    values = newSeq[uint64](arguments.len)
-    pointers = newSeq[pointer](arguments.len)
-    output: uint64
-  for i, bits in arguments:
-    values[i] = bits
-    pointers[i] = addr values[i]
-  let addresses = if pointers.len == 0: nil else: addr pointers[0]
-  call.invoke(addr call.storage.cif[0], call.address, addr output, addresses)
+  const StackArguments = 16
+  var output: uint64
+  if arguments.len <= StackArguments:
+    var
+      values: array[StackArguments, uint64]
+      pointers: array[StackArguments, pointer]
+    for i, bits in arguments:
+      values[i] = bits
+      pointers[i] = addr values[i]
+    let addresses = if arguments.len == 0: nil else: addr pointers[0]
+    call.invoke(addr call.storage.cif[0], call.address, addr output, addresses)
+  else:
+    var
+      values = newSeq[uint64](arguments.len)
+      pointers = newSeq[pointer](arguments.len)
+    for i, bits in arguments:
+      values[i] = bits
+      pointers[i] = addr values[i]
+    call.invoke(addr call.storage.cif[0], call.address, addr output,
+      addr pointers[0])
   if call.hasReturn:
     returns[0] = case call.returnKind
       of Int8Type: cast[uint64](int64(cast[int8](uint8(output))))
