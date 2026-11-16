@@ -181,7 +181,7 @@ proc buildNativeProgram*(plan: NativePlan,
     raise newException(NiftyError,
       "native compilation requires the host operating system ABI")
   result.platform = platform
-  result.plan = optimizeNative(plan, optimization)
+  result.plan = optimizeNative(plan, optimization, fastMultiplyHigh = true)
   result.image = emitNative(result.plan.module, target)
   result.validateNative()
 

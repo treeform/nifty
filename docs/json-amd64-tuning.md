@@ -32,6 +32,25 @@ The compiler changes are general operations, with no JSON-specific handling:
   correction. The correction handles the complete uint64 domain, including
   values near the maximum; no floating-point approximation is used.
 
+That division transformation now lives in shared IR rather than the AMD64
+emitter. AMD64 and ARM64 select their native unsigned multiply-high instruction;
+WASM and the interpreter keep non-power-of-two division by default. The timing
+table above records the original experiment, before this refactoring.
+
+A focused Windows check of the shared-IR and checked-AST changes used the
+document benchmark only: 128 records, 30 parses per process, one warmup and
+five measured samples. Compared with commit `8922b00`, median cycles were:
+
+| Backend | Before (ms) | After (ms) |
+| --- | ---: | ---: |
+| Nifty C | 0.232 | 0.210 |
+| Nifty AMD64 | 0.486 | 0.447 |
+
+These short runs indicate no regression, rather than a stable speedup claim.
+Every checksum matched; allocation traffic remained 14 calls and 557,264
+requested bytes per document. Raw local results are in
+`benchmarks/output/lift-before/` and `benchmarks/output/lift-after/`.
+
 The remaining AMD64/C gap is still visible. These measurements establish an
 improvement on this JSON workload, not a general performance guarantee.
 

@@ -51,8 +51,9 @@ proc emit(function: var IrFunction, instructions: var seq[IrInstruction],
       count: int32(inputs.len))))
   function.operands.add(inputs)
 
-proc reduceDivisions*(function: var IrFunction) {.raises: [].} =
-  ## Replaces nonzero power-of-two divisors with exact typed scalar work.
+proc reduceDivisions*(function: var IrFunction,
+    fastMultiplyHigh = false) {.raises: [].} =
+  ## Uses shifts for powers of two and exact reciprocals on capable targets.
   var candidates = false
   for item in function.instructions:
     if item.op in {DivideOp, RemainderOp} and
@@ -92,6 +93,36 @@ proc reduceDivisions*(function: var IrFunction) {.raises: [].} =
         magnitude = if negative: (0'u64 - bits) and mask else: bits
         input = old.operands[item.arguments.first]
         output = ValueId(item.results.first)
+      if fastMultiplyHigh and kind == UInt64Type and bits > 1 and
+          (bits and (bits - 1)) != 0:
+        # floor(2^64/d) gives a quotient at most one too small. The residual
+        # needs one unsigned correction; CSE can share the work for / and %.
+        let
+          reciprocal = function.emit(instructions, ConstantOp, kind, [],
+            item.location, uint64.high div bits)
+          divisorValue = function.emit(instructions, ConstantOp, kind, [],
+            item.location, bits)
+          estimate = function.emit(instructions, MultiplyHighOp, kind,
+            [input, reciprocal], item.location)
+          product = function.emit(instructions, MultiplyOp, kind,
+            [estimate, divisorValue], item.location)
+          residual = function.emit(instructions, SubtractOp, kind,
+            [input, product], item.location)
+          correction = function.emit(instructions, CompareOp, BoolType,
+            [residual, divisorValue], item.location)
+        instructions[^1].comparison = GreaterEqualComparison
+        if item.op == RemainderOp:
+          let adjusted = function.emit(instructions, SubtractOp, kind,
+            [residual, divisorValue], item.location)
+          discard function.emit(instructions, SelectOp, kind,
+            [correction, adjusted, residual], item.location, output = output)
+        else:
+          let increment = function.emit(instructions, ConvertOp, kind,
+            [correction], item.location)
+          instructions[^1].conversion = ZeroExtendConversion
+          discard function.emit(instructions, AddOp, kind,
+            [estimate, increment], item.location, output = output)
+        continue
       if magnitude == 0 or (magnitude and (magnitude - 1)) != 0:
         instructions.add(item)
         continue

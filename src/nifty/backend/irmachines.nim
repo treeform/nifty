@@ -1065,6 +1065,12 @@ proc emitArm64Ir*(module: ir.IrModule,
           let source = code.floatOperand(operand(0), scratchFloat)
           floatResult = floatDestination(resultId)
           code.vectorExtract(floatResult, source, int(item.target))
+        of ir.MultiplyHighOp:
+          let
+            left = code.integerOperand(operand(0), X12)
+            right = code.integerOperand(operand(1), X13)
+          integerResult = integerDestination(resultId)
+          code.multiplyHigh(integerResult, left, right)
         of ir.SelectOp:
           let comparison = selections.comparisons[instructionIndex]
           var

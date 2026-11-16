@@ -183,7 +183,7 @@ def markdown(report):
              report.get("timing_scope", TimingScope), "",
              f"{report['samples']} measured samples and {report['warmups']} warmups per variant; "
              f"{report['repeat']} fresh parses per process. Variants rotate within each round.", "",
-             f"Native optimization: {report['opt']}. C: -O2. Build time is one observed build, not a median.", ""]
+             f"Nifty optimization: {report['opt']}. C: -O2. Build time is one observed build, not a median.", ""]
     lines += (["| Model | Backend | Build (s) | Median cycle (ms) | Min (ms) | Max (ms) | MiB/s |",
                "| --- | --- | ---: | ---: | ---: | ---: | ---: |"] if comparison else
               ["| Backend | Build (s) | Median cycle (ms) | Min (ms) | Max (ms) | MiB/s |",

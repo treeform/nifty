@@ -412,6 +412,11 @@ proc verifyIr*(module: IrModule) {.raises: [BackendError].} =
           require(operandType(arguments, 0) == operandType(arguments, 1) and
             function.values[results.first].valueType ==
               operandType(arguments, 0), "binary type mismatch")
+        of MultiplyHighOp:
+          require(operandType(arguments, 0) == UInt64Type and
+            operandType(arguments, 1) == UInt64Type and
+            function.values[results.first].valueType == UInt64Type,
+            "multiply-high requires uint64 operands and result")
         of SelectOp:
           require(operandType(arguments, 0) == BoolType,
             "select condition must be boolean")

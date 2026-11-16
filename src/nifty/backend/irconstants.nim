@@ -175,6 +175,7 @@ proc evaluate(function: IrFunction, instruction: IrInstruction,
   of AddOp: value = a + b
   of SubtractOp: value = a - b
   of MultiplyOp: value = a * b
+  of MultiplyHighOp: value = multiplyHigh(a, b)
   of NegateOp: value = 0'u64 - a
   of AndOp: value = a and b
   of OrOp: value = a or b

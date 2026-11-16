@@ -1,0 +1,40 @@
+const Start = 2
+
+proc visited(calls: var 0 .. 10): bool =
+  let previous = calls
+  if previous < 10:
+    calls = previous + 1
+  return true
+
+proc choose(flag: bool): int =
+  if false:
+    return 100
+  elif flag:
+    return 3 * 4
+  elif 2 + 3 == 5:
+    return -17 / 5
+  else:
+    return 200
+
+thread main() =
+  echo (3 + 4) * 5
+  echo -17 % 5
+  echo choose(true)
+  echo choose(false)
+  for i in Start ..< Start + 3:
+    if i * 2 == 6:
+      echo 99
+    else:
+      echo i + 10
+  var calls: 0 .. 10 = 0
+  if visited(calls) and false:
+    echo 999
+  echo calls
+  if true:
+    var text: string
+    discard text.add("scoped")
+    echo text
+  else:
+    echo "unused"
+  let optional: int? = 7 + 8
+  echo optional.or(0)

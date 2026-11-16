@@ -25,7 +25,8 @@ type
     CallOp, HostCallOp, FieldAddressOp,
     IndirectCallOp, FrameSizeOp, SelectOp,
     PackOp, ExtractOp, VectorAddOp, VectorSubtractOp, VectorMultiplyOp,
-    VectorDivideOp, VectorSumOp
+    VectorDivideOp, VectorSumOp,
+    MultiplyHighOp # Upper 64 bits of an unsigned 64-by-64 product.
 
   IrStorageKind* = enum
     ScalarStorage, PointerStorage, ArrayStorage, StructStorage, OpaqueStorage
@@ -193,7 +194,7 @@ const
     "saddr",
     "gaddr", "offset", "load", "store", "memmove", "memzero",
     "call", "hcall", "faddr", "icall", "framesize", "select",
-    "pack", "extract", "vadd", "vsub", "vmul", "vdiv", "vsum"
+    "pack", "extract", "vadd", "vsub", "vmul", "vdiv", "vsum", "umulhi"
   ]
   ComparisonNames: array[IrComparison, string] = [
     "eq", "ne", "lt", "le", "gt", "ge"
@@ -462,6 +463,15 @@ proc dumpDeclarations*(module: IrModule): string =
       host.signature.returnStorage) & " binding " & $host.binding & "\n")
   if module.globals.len > 0 or module.hosts.len > 0:
     result.add("\n")
+
+proc multiplyHigh*(a, b: uint64): uint64 {.raises: [].} =
+  ## Portable upper product; all partial sums fit in an unsigned 64-bit word.
+  let
+    mask = 0xffffffff'u64
+    low = (a and mask) * (b and mask)
+    middle = (a shr 32) * (b and mask) + (low shr 32)
+    cross = (a and mask) * (b shr 32) + (middle and mask)
+  (a shr 32) * (b shr 32) + (middle shr 32) + (cross shr 32)
 
 proc dumpModule*(module: IrModule): string =
   ## Prints complete data declarations followed by every function body.

@@ -410,6 +410,40 @@ proc emitWasmIr*(module: ir.IrModule, runtime: WasmModule,
         code.op(0x92 + (if kind == ir.Float64Type: 14 else: 0))
         code.read(operand(0))
         code.op(0x98 + (if kind == ir.Float64Type: 14 else: 0))
+      of ir.MultiplyHighOp:
+        # Portable limb expansion. Constant division only chooses this on
+        # targets with a native high-product instruction, not on WASM.
+        template limb(index: int, high: bool) =
+          code.read(operand(index))
+          code.constant(if high: 32 else: 0xffffffff'i64)
+          code.op(if high: 0x88 else: 0x83)
+        template middle() =
+          limb(0, true)
+          limb(1, false)
+          code.op(0x7e)
+          limb(0, false)
+          limb(1, false)
+          code.op(0x7e)
+          code.constant(32)
+          code.op(0x88)
+          code.op(0x7c)
+        limb(0, true)
+        limb(1, true)
+        code.op(0x7e)
+        middle()
+        code.constant(32)
+        code.op(0x88)
+        code.op(0x7c)
+        limb(0, false)
+        limb(1, true)
+        code.op(0x7e)
+        middle()
+        code.constant(0xffffffff'i64)
+        code.op(0x83)
+        code.op(0x7c)
+        code.constant(32)
+        code.op(0x88)
+        code.op(0x7c)
       of ir.AddOp, ir.SubtractOp, ir.MultiplyOp, ir.DivideOp,
           ir.RemainderOp, ir.AndOp, ir.OrOp, ir.XorOp, ir.NotOp,
           ir.NegateOp, ir.SqrtOp, ir.ShiftLeftOp, ir.ShiftRightOp,

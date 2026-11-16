@@ -1,4 +1,4 @@
-## Expands small checked constant ranges before native IR construction.
+## Folds checked literals and branches, and expands small constant ranges.
 import std/[sets, tables]
 import types, semantics
 
@@ -11,9 +11,101 @@ proc defaultNativeUnrollConfig*(): NativeUnrollConfig =
   ## Bounds duplicated transitive helper work independently in each routine.
   NativeUnrollConfig(maxIterations: 32, maxBodyNodes: 100, maxGrowth: 1024)
 
+proc foldLiteral(value: Expr) =
+  ## Only evaluates literal integer/boolean operands; calls and reads stay put.
+  if value.isNil or value.typ.isNil or value.typ.opt or value.unwrapOpt or
+      value.typ.kind notin {IntType, BoolType}:
+    return
+  var integer: int64
+  var boolean: bool
+  if value.kind == NegExpr and value.kids[0].kind == IntExpr:
+    if value.kids[0].ival == low(int64): return
+    integer = -value.kids[0].ival
+  elif value.kind == NotExpr and value.kids[0].kind == BoolExpr:
+    boolean = not value.kids[0].bval
+  elif value.kind == BinExpr:
+    let left = value.kids[0]
+    let right = value.kids[1]
+    if left.typ.opt or right.typ.opt: return
+    if left.kind == BoolExpr and value.sval in ["and", "or"]:
+      if value.sval == "and" and not left.bval:
+        boolean = false
+      elif value.sval == "or" and left.bval:
+        boolean = true
+      elif right.kind == BoolExpr:
+        boolean = right.bval
+      else:
+        return
+    elif left.kind == IntExpr and right.kind == IntExpr:
+      let a = left.ival
+      let b = right.ival
+      case value.sval
+      of "+":
+        if (b > 0 and a > high(int64) - b) or
+            (b < 0 and a < low(int64) - b): return
+        integer = a + b
+      of "-":
+        if (b < 0 and a > high(int64) + b) or
+            (b > 0 and a < low(int64) + b): return
+        integer = a - b
+      of "*":
+        if a > 0:
+          if (b > 0 and a > high(int64) div b) or
+              (b < 0 and b < low(int64) div a): return
+        elif a < 0:
+          if (b > 0 and a < low(int64) div b) or
+              (b < 0 and a < high(int64) div b): return
+        integer = a * b
+      of "/", "%":
+        if b == 0 or (a == low(int64) and b == -1): return
+        integer = if value.sval == "/": a div b else: a mod b
+      of "==": boolean = a == b
+      of "!=": boolean = a != b
+      of "<": boolean = a < b
+      of "<=": boolean = a <= b
+      of ">": boolean = a > b
+      of ">=": boolean = a >= b
+      else: return
+    else:
+      return
+  else:
+    return
+  if value.typ.kind == BoolType:
+    value.kind = BoolExpr
+    value.bval = boolean
+  else:
+    value.kind = IntExpr
+    value.ival = integer
+    value.rlo = integer
+    value.rhi = integer
+    value.rnz = integer != 0
+  value.kids = @[]
+  value.sval = ""
+
+proc simplifyBranches(body: seq[Stmt]) =
+  ## Retains a lexical scope for selected bodies so owner drops remain local.
+  for item in body:
+    simplifyBranches(item.body)
+    simplifyBranches(item.elseBody)
+    for branch in item.elifs:
+      simplifyBranches(branch.body)
+    if item.kind != IfStmt: continue
+    var branches: seq[Elif]
+    for branch in item.elifs:
+      if branch.cond.kind != BoolExpr:
+        branches.add(branch)
+      elif branch.cond.bval:
+        item.elseBody = branch.body
+        break
+    item.elifs = branches
+    if branches.len == 0:
+      item.kind = BlockStmt
+      item.body = item.elseBody
+      item.elseBody = @[]
+
 proc unrollNative*(source: Module,
     config = defaultNativeUnrollConfig()): Module =
-  ## Copies checked syntax and exposes literal induction values to shared IR.
+  ## Copies checked syntax and simplifies it before C or native lowering.
   source.requireChecked()
   new(result)
   result[] = source[]
@@ -96,17 +188,21 @@ proc unrollNative*(source: Module,
     new(result)
     result[] = value[]
     result.kids = @[]
-    if name.len > 0 and value.kind == IdentExpr and value.sval == name and
-        value.symKind == LocalSym:
+    if value.kind == IdentExpr and value.typ != nil and value.typ.kind == IntType and
+        not value.typ.opt and not value.unwrapOpt and
+        ((name.len > 0 and value.sval == name and value.symKind == LocalSym) or
+         (value.symKind == ConstSym and value.sval in constants)):
+      let number = if value.symKind == ConstSym: constants[value.sval] else: literal
       result.kind = IntExpr
-      result.ival = literal
+      result.ival = number
       result.sval = ""
-      result.rlo = literal
-      result.rhi = literal
-      result.rnz = literal != 0
+      result.rlo = number
+      result.rhi = number
+      result.rnz = number != 0
     else:
       for child in value.kids:
         result.kids.add(expression(child, name, literal))
+    foldLiteral(result)
   proc nodes(value: Expr): int =
     ## Counts expression nodes without expanding calls.
     if value.isNil:
@@ -167,8 +263,8 @@ proc unrollNative*(source: Module,
           bodyNodes(item.body, hasBreak)
         else: 0
       if item.kind == ForStmt and config.maxIterations >= 0 and
-          size <= config.maxBodyNodes and constant(item.lo, first) and
-          constant(item.hi, last):
+          size <= config.maxBodyNodes and constant(expression(item.lo, "", 0), first) and
+          constant(expression(item.hi, "", 0), last):
         if last < first or (last == first and not item.inclusive):
           count = 0
         else:
@@ -211,6 +307,7 @@ proc unrollNative*(source: Module,
       copied.params.add(parameter)
     growth = 0
     copied.body = transform(routine.body)
+    simplifyBranches(copied.body)
     result.routines.add(copied)
   prepareSemantics(result)
   result.semantics.locks = source.semantics.locks

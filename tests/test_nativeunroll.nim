@@ -220,18 +220,21 @@ thread other() =
   doAssert expanded.mode(expanded.routines[0].params[0].binding) ==
     ReadBorrowMode
   doAssert iterations[0].body[0].binding != iterations[1].body[0].binding
-  for iteration in iterations:
+  for index, iteration in iterations:
     let
       owner = iteration.body[0].binding
       call = iteration.body[1].value
-      branch = iteration.body[2].elifs[0]
-      returned = branch.body[0]
+      selected = iteration.body[2]
     doAssert iteration.bodyScope > 0
-    doAssert branch.scope > 0
+    doAssert selected.kind == BlockStmt and selected.bodyScope > 0
     doAssert expanded.mode(owner) == OwnerMode
     doAssert call.kids[0].binding == owner
     doAssert expanded.semantics.scopes[iteration.bodyScope].drops == @[owner]
-    doAssert returned.drops == @[owner]
+    if index == 0:
+      doAssert selected.body.len == 0
+    else:
+      doAssert selected.body[0].kind == ReturnStmt
+      doAssert selected.body[0].drops == @[owner]
 
 for path in walkFiles("tests/scripts/*.nifty"):
   if path.extractFilename.startsWith("_"):

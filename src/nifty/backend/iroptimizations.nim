@@ -517,7 +517,7 @@ proc mergeBlocks(function: var IrFunction) =
 
 proc pure(op: IrOpcode): bool {.raises: [].} =
   ## Identifies scalar operations whose checks were already made explicit.
-  op in {ConstantOp, AddOp, SubtractOp, MultiplyOp, DivideOp, RemainderOp,
+  op in {ConstantOp, AddOp, SubtractOp, MultiplyOp, MultiplyHighOp, DivideOp, RemainderOp,
     NegateOp, AndOp, OrOp, XorOp, NotOp, ShiftLeftOp, ShiftRightOp,
     ArithmeticRightOp, CompareOp, SelectOp, ConvertOp, SqrtOp, FloorOp, RoundOp,
     FieldAddressOp,
@@ -1147,7 +1147,7 @@ proc reuseDominating(function: var IrFunction) =
       if seen.hasKey(key):
         let candidate = seen.getOrDefault(key)
         if owners[int32(candidate)] == owner or
-            item.op in {MultiplyOp, DivideOp, RemainderOp, SqrtOp}:
+            item.op in {MultiplyOp, MultiplyHighOp, DivideOp, RemainderOp, SqrtOp}:
             aliases[item.results.first] = candidate
             keep[i] = false
       else:
@@ -1182,7 +1182,7 @@ proc settleBranches(function: var IrFunction) =
         break
 
 proc optimizeIr*(module: var IrModule,
-    passes = DefaultIrOptimizations) =
+    passes = DefaultIrOptimizations, fastMultiplyHigh = false) =
   ## Runs explicit shared IR passes and verifies the resulting graph.
   verifyIr(module)
   materializeMemory(module)
@@ -1248,7 +1248,7 @@ proc optimizeIr*(module: var IrModule,
       of HoistIrInvariants: function.hoistLoops()
       of FoldIrConstants:
         function.foldConstants(FoldIrConversions in selected)
-      of ReduceIrDivisions: function.reduceDivisions()
+      of ReduceIrDivisions: function.reduceDivisions(fastMultiplyHigh)
       of RemoveIrIdentities: function.removeIdentities()
       of SimplifyIrParameters: function.simplifyParameters()
       of MergeIrParameters: function.mergeParameters()
@@ -1269,14 +1269,14 @@ proc optimizeIr*(module: var IrModule,
     verifyIr(module)
   if PromoteIrArguments in selected and
       promoteArguments(module, PromoteIrWideArguments in selected):
-    optimizeIr(module, selected - ModuleIrOptimizations)
+    optimizeIr(module, selected - ModuleIrOptimizations, fastMultiplyHigh)
   if PromoteIrReturns in selected and
       promoteReturns(module, PromoteIrRecordReturns in selected):
-    optimizeIr(module, selected - ModuleIrOptimizations)
+    optimizeIr(module, selected - ModuleIrOptimizations, fastMultiplyHigh)
   if ForwardIrFields in selected and forwardMemory(module):
-    optimizeIr(module, selected - ModuleIrOptimizations)
+    optimizeIr(module, selected - ModuleIrOptimizations, fastMultiplyHigh)
   if CacheIrArguments in selected and cacheArguments(module):
-    optimizeIr(module, selected - ModuleIrOptimizations)
+    optimizeIr(module, selected - ModuleIrOptimizations, fastMultiplyHigh)
   # Later simplifications can expose memory aliases missed by the first sweep.
   # Each successful cleanup removes instructions, so iteration is bounded.
   if {ForwardIrStores, ReuseIrLoads} * selected != {}:
@@ -1300,7 +1300,7 @@ proc optimizeIr*(module: var IrModule,
         RematerializeIrConstants, VectorizeIrFloatPairs,
         VectorizeIrFloatDivisions, FoldIrFloatSums, SinkIrLoads, FoldIrBranches,
         RemoveIrContextLoads, HoistIrAddresses, SettleIrBranches, OrderIrBlocks,
-        PruneIrProcedures, PreserveIrFloatParameters, ReuseIrAddresses})
+        PruneIrProcedures, PreserveIrFloatParameters, ReuseIrAddresses}, fastMultiplyHigh)
   if PreserveIrFloatParameters in selected:
     for function in module.functions.mitems:
       if function.preserveFloatParameters():

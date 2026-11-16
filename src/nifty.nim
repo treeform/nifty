@@ -18,18 +18,24 @@ proc checkedModule*(src, moduleName: string, dir = "",
   result = parse(loadTokens(src, moduleName, dir, portableIo))
   check(result)
 
-proc compileToC*(src: string, moduleName: string, dir = ""): string =
+proc compileToC*(src: string, moduleName: string, dir = "",
+    optimization = SpeedOptimization): string =
   ## Compile nifty source text (plus its imports) to a C translation unit.
-  let m = checkedModule(src, moduleName, dir)
+  var m = checkedModule(src, moduleName, dir)
+  if optimization == SpeedOptimization:
+    m = unrollNative(m)
   lastExternLibs = @[]
   for lib in m.externLibs:
     if lib notin ["libc", "nifty"]:
       lastExternLibs.add lib
   generate(m, moduleName)
 
-proc reportFor*(src: string, moduleName: string, dir = ""): string =
+proc reportFor*(src: string, moduleName: string, dir = "",
+    optimization = SpeedOptimization): string =
   ## Report static storage and distinguish runtime heap and work costs.
-  let m = checkedModule(src, moduleName, dir)
+  var m = checkedModule(src, moduleName, dir)
+  if optimization == SpeedOptimization:
+    m = unrollNative(m)
   buildReport(m, moduleName)
 
 proc compileToWasm*(src: string, moduleName = "input", dir = "",
@@ -72,7 +78,7 @@ options:
   --offline                       use cached URL imports without network access
   --update-imports                refresh URL imports and update nifty.lock
   --backend:c|arm64|amd64|wasm64|interp  backend (interpreter aliases interp)
-  --opt:none|speed                IR optimization (default: speed)
+  --opt:none|speed                AST and IR optimization (default: speed)
   -o path                         output path
   --emit-c                        write reference C from the checked AST
   --emit-ir                       write selected native IR without running
@@ -153,7 +159,7 @@ options:
     try:
       let source = readFile(srcPath)
       if backend == "c":
-        stdout.write reportFor(source, modName, srcPath.parentDir)
+        stdout.write reportFor(source, modName, srcPath.parentDir, optimization)
       else:
         var checked = checkedModule(source, modName, srcPath.parentDir,
           portableIo = backend == "wasm64")
@@ -186,7 +192,7 @@ options:
     if backend == "wasm64":
       validateWasmOutput(bin, srcPath)
     if backend == "c":
-      let cCode = compileToC(source, modName, srcPath.parentDir)
+      let cCode = compileToC(source, modName, srcPath.parentDir, optimization)
       let cPath = if emission == "--emit-c" and outPath.len > 0:
           outPath
         else: base & ".c"
@@ -213,7 +219,8 @@ options:
         if backend == "wasm64":
           validateWasmOutput(path, srcPath)
         writeFile(path, optimizeNative(plan, optimization,
-          specializeMath = backend != "wasm64").module.dumpModule())
+          specializeMath = backend != "wasm64",
+          fastMultiplyHigh = backend in ["arm64", "amd64"]).module.dumpModule())
         echo path
         quit(0)
       if backend == "wasm64":

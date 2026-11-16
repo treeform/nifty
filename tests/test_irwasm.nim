@@ -156,6 +156,24 @@ let
 division.storeResult(quotient)
 discard division.execute(int64.low)
 
+var highProduct = moduleForTest()
+var differences = highProduct.functions[1].constant(UInt64Type, 0)
+for (a, b, expected) in [
+    (0'u64, uint64.high, 0'u64),
+    (uint64.high, uint64.high, uint64.high - 1),
+    (0x8000000000000000'u64, 2'u64, 1'u64),
+    (0xffffffff'u64, 0xffffffff'u64, 0'u64),
+    (0x12345678abcdef01'u64, 0xfedcba9876543210'u64, 0x121fa00ae87b192d'u64)]:
+  let
+    left = highProduct.functions[1].constant(UInt64Type, a)
+    right = highProduct.functions[1].constant(UInt64Type, b)
+    upper = highProduct.functions[1].emit(MultiplyHighOp, [UInt64Type], [left, right])[0]
+    wanted = highProduct.functions[1].constant(UInt64Type, expected)
+    difference = highProduct.functions[1].emit(XorOp, [UInt64Type], [upper, wanted])[0]
+  differences = highProduct.functions[1].emit(OrOp, [UInt64Type], [differences, difference])[0]
+highProduct.storeResult(differences)
+discard highProduct.execute(0)
+
 var narrow = moduleForTest()
 let
   byteValue = narrow.functions[1].constant(UInt8Type, 511)

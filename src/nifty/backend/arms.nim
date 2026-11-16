@@ -325,6 +325,12 @@ proc signedDivide*(assembler: var Assembler, width: Width,
       (left.number shl 5) or destination.number
   )
 
+proc multiplyHigh*(assembler: var Assembler,
+    destination, left, right: Register) {.raises: [].} =
+  ## UMULH: upper half of an unsigned 64-by-64 product.
+  assembler.emit(0x9BC07C00'u32 or (right.number shl 16) or
+    (left.number shl 5) or destination.number)
+
 proc andRegister*(assembler: var Assembler, width: Width,
     destination, left, right: Register, shift = 0) {.raises: [].} =
   ## Computes a bitwise conjunction.

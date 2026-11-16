@@ -31,7 +31,8 @@ The runner rotates variants through one warmup and seven measured processes
 by default, with 50 complete cycles per process. Every repeated checksum must
 match Python's independent JSON oracle before results are published.
 `--records`, `--repeat`, `--samples`, and `--warmups` adjust the workload.
-`--opt none` disables native speed optimizations; C uses `-O2` in both modes.
+`--opt none` disables Nifty's AST and IR speed optimizations; the external C
+compiler uses `-O2` in both modes.
 
 Results go to `benchmarks/output/jsondoc` by default, independently of other
 benchmarks. Use `--output` to choose another directory:

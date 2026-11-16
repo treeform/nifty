@@ -124,6 +124,7 @@ proc scalar(op: IrOpcode, a, b: uint64, kind: IrType): uint64 =
   of AddOp: result = a + b
   of SubtractOp: result = a - b
   of MultiplyOp: result = a * b
+  of MultiplyHighOp: result = multiplyHigh(a, b)
   of NegateOp: result = 0'u64 - a
   of AndOp: result = a and b
   of OrOp: result = a or b

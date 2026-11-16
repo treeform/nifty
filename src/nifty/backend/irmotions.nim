@@ -3,7 +3,7 @@ import std/algorithm, irs
 proc movable(instruction: IrInstruction, addresses: bool): bool =
   ## Selects pure scalar and vector operations without guarded preconditions.
   case instruction.op
-  of ConstantOp, AddOp, SubtractOp, MultiplyOp, NegateOp,
+  of ConstantOp, AddOp, SubtractOp, MultiplyOp, MultiplyHighOp, NegateOp,
       AndOp, OrOp, XorOp, NotOp, CompareOp, SelectOp, FloorOp, RoundOp,
       PackOp, ExtractOp, VectorAddOp, VectorSubtractOp, VectorMultiplyOp,
       VectorSumOp:

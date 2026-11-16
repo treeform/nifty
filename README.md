@@ -50,6 +50,15 @@ nim c -d:release -o:nifty src/nifty.nim
 ./nifty report examples/queue.nifty  # static RAM / stack / ops report
 ```
 
+`--opt:speed` (the default) folds checked integer and Boolean literals, removes
+constant branches, and expands small constant loops before C or IR generation.
+Source checking still happens first, including in branches that are removed.
+IR optimization remains available after lowering to catch constants exposed by
+inlining. AMD64 and ARM64 also share exact unsigned constant-division reduction
+using a multiply-high operation; WASM and the interpreter retain division for
+non-power-of-two constants. `--opt:none` skips these AST and IR optimizations;
+the external C compiler still uses `-O2`.
+
 ## Tests
 
 Gold master style: each `tests/*/name.nifty` is paired with a `name.txt`
