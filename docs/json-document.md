@@ -86,6 +86,9 @@ The runner selects C and the physical host's native backend. Select a subset
 with `--backend c` or `--backend c,amd64` / `--backend c,arm64`. Windows uses
 QueryPerformanceCounter; Linux/macOS use clock_gettime. `--cc` selects the C
 compiler, and `--output` selects the result directory.
+Add `hand-c` to include handwritten C tree and pooled-document references:
+`--backend hand-c,c,amd64`. The document reference uses the same two-pool
+representation and bounded recursive traversal in C.
 
 Both parsers receive identical input. Each timed cycle creates a fresh tree or
 document, hashes every decoded value and ordered key, and frees all its

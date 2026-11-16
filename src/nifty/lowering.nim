@@ -409,6 +409,38 @@ proc methodCall(g: var Lower, e: Expr): ValueId =
     receiverType: g.layout(bt), resultType: g.layout(e.typ))
   let args = g.packed(e.kids[1 .. ^1], host)
   let output = if e.typ.isNil: g.null else: g.allocType(e.typ)
+  when not defined(nimkeyNoIrInlineAppends):
+    let directByte = bt.kind == StringType and bt.dynamic and e.sval == "addByte"
+    let directItem = bt.kind == SeqType and bt.dynamic and
+      e.sval in ["add", "push"] and not hasOwned(bt.elem)
+    if directByte or directItem:
+      # Reserved-capacity appends store the payload and update the length.
+      # Keep the existing fallible runtime operation for growth/owned items.
+      let count = g.load(receiver)
+      let capacity = g.load(g.offset(receiver, 8))
+      let fast = g.blockId
+      let slow = g.blockId
+      let done = g.blockId
+      g.branch(g.compare(LessComparison, count, capacity), fast, slow)
+      g.current = fast
+      let displacement = if directByte: count else:
+        g.binary(MultiplyOp, count, g.constant(g.size(bt.elem)))
+      let destination = g.emit(IrInstruction(op: OffsetAddressOp),
+        [g.data(receiver, bt), displacement], AddressType)
+      if directByte:
+        let value = g.load(args, scalar(e.kids[1].typ))
+        g.store(destination, g.convert(value, UInt8Type))
+      else:
+        g.copy(destination, g.read(args, e.kids[1].typ), bt.elem)
+      g.store(receiver, g.emit(IrInstruction(op: AddOp),
+        [count, g.constant(1)], Int64Type))
+      g.store(output, g.constant(1, BoolType))
+      g.jump(done)
+      g.current = slow
+      g.hostCall(host, receiver, args, output)
+      g.jump(done)
+      g.current = done
+      return g.read(output, e.typ)
   g.hostCall(host, receiver, args, output)
   if e.typ.isNil: NoValue else: g.read(output, e.typ)
 
@@ -744,7 +776,15 @@ proc expression(g: var Lower, e: Expr): ValueId =
         else:
           raise newException(NiftyError,
             "Internal compiler error: unsupported native operator " & e.sval)
-      result = g.binary(op, a, b)
+      if op in {DivideOp, RemainderOp} and e.typ.kind == IntType and
+          e.kids[0].typ.width == 0 and e.kids[1].typ.width == 0 and
+          e.kids[0].rlo >= 0 and e.kids[0].rhi > 0 and e.kids[1].rlo > 0:
+        # Checked nonnegative operands have identical unsigned semantics.
+        # Retain that proof in the IR instead of paying signed divide guards.
+        result = g.convert(g.binary(op, g.convert(a, UInt64Type),
+          g.convert(b, UInt64Type)), Int64Type)
+      else:
+        result = g.binary(op, a, b)
   of CallExpr:
     if e.sval in ["float32", "float64"]:
       result = g.convert(g.expression(e.kids[0]), scalar(e.typ))

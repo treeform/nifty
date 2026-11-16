@@ -503,6 +503,45 @@ proc condition(code: var XAssembler, comparison: ir.IrComparison,
     code.binary(if comparison == ir.NotEqualComparison: 0x09 else: 0x21,
       Rax, Rdx)
 
+proc constantInteger(function: ir.IrFunction, definitions: seq[int],
+    value: ir.ValueId, bits: var uint64): bool =
+  ## Follows exact bitcasts to a scalar literal without reevaluating operands.
+  var current = int32(value)
+  for step in 0 ..< function.values.len:
+    let index = definitions[current]
+    if index < 0: return false
+    let item = function.instructions[index]
+    if item.op == ir.ConstantOp:
+      bits = item.bits
+      return true
+    if item.op != ir.ConvertOp or item.conversion != ir.BitcastConversion:
+      return false
+    current = int32(function.operands[item.arguments.first])
+
+proc constantQuotient(code: var XAssembler, divisor: uint64,
+    remainder: bool) =
+  ## For non-power-of-two d, m=floor(2^64/d)=UINT64_MAX/d.
+  ## high(n*m) underestimates floor(n/d) by at most one. The residual is
+  ## nonnegative and one unsigned comparison corrects either result exactly.
+  ## R8 is a reserved scratch, just like RAX/RCX/RDX.
+  code.move(R8, Rax)
+  code.loadImmediate(Rcx, cast[int64](uint64.high div divisor))
+  code.multiplyWide(Rcx)
+  code.loadImmediate(Rcx, cast[int64](divisor))
+  code.move(Rax, Rdx)
+  code.multiply(Rax, Rcx)
+  code.subtract(R8, Rax)
+  if remainder:
+    code.move(Rax, R8)
+    code.subtract(Rax, Rcx)
+    code.compare(R8, Rcx)
+    code.conditionalMove(R8, Rax, AboveEqual)
+    code.move(Rax, R8)
+  else:
+    code.compare(R8, Rcx)
+    code.setCondition(Rax, AboveEqual)
+    code.add(Rax, Rdx)
+
 proc quotient(code: var XAssembler, unsigned, remainder: bool) =
   ## Avoids the AMD64 signed-overflow trap while preserving wrapping division.
   let
@@ -564,6 +603,13 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
   code.epilogue()
   for index, function in module.functions:
     let contexts = contextAliases(function, module.pointerBytes)
+    var definitions = newSeq[int](function.values.len)
+    for definition in definitions.mitems: definition = -1
+    for blockData in function.blocks:
+      for position in blockData.instructions.indices:
+        let instruction = function.instructions[position]
+        if instruction.results.count == 1:
+          definitions[instruction.results.first] = position
     if function.trapBody():
       result.frameBytes[index] = 8
       code.place(entries[index])
@@ -1211,6 +1257,15 @@ proc emitAmd64Ir*(module: ir.IrModule, maxBytes: int,
               code.normalize(resultKind, target)
               code.putInteger(resultId, target)
               continue
+            when not defined(nimkeyNoAmdConstantDivisions):
+              if item.op in {ir.DivideOp, ir.RemainderOp} and resultKind == ir.UInt64Type:
+                var divisor: uint64
+                if constantInteger(function, definitions, operand(1), divisor) and
+                    divisor > 1 and (divisor and (divisor - 1)) != 0:
+                  code.integer(operand(0))
+                  code.constantQuotient(divisor, item.op == ir.RemainderOp)
+                  code.putInteger(resultId)
+                  continue
             code.integer(operand(0))
             if item.arguments.count == 2:
               code.integer(operand(1), Rcx)

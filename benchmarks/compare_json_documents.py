@@ -96,6 +96,24 @@ def snapshot(directory):
 def build(options, model, backend, host, env):
     directory = options.output / "build" / model / backend
     snapshot(directory)
+    if backend == "hand-c":
+        for name in ("json_parser_straight.c", "json_document_hand.c"):
+            (directory / name).write_bytes((Root / "benchmarks" / name).read_bytes())
+        source = directory / ("json_document_hand.c" if model == "document" else "json_parser_straight.c")
+        executable = directory / ("benchmark.exe" if host["system"] == "Windows" else "benchmark")
+        command = [options.cc] + Ray.StraightCFlags + [
+            f"-DRECORDS={options.records}", f"-DREPETITIONS={options.repeat}",
+            f"-DCLOCK_ID={getattr(time, 'CLOCK_MONOTONIC', 1)}", str(source), "-o", str(executable)]
+        if host["system"] == "Windows": command.append("-static")
+        response, elapsed = Ray.runCommand(command, options.timeout, env)
+        (directory / "build.stdout").write_bytes(response.stdout)
+        (directory / "build.stderr").write_bytes(response.stderr)
+        print(f"Built {model}/{backend} in {elapsed / 1e9:.3f}s", flush=True)
+        return dict(model=model, backend=backend, compile_wall_ns=elapsed,
+                    build_command=command, executable=str(executable),
+                    executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+                    source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                    execution_command=[str(executable)], samples=[], warmups=[])
     original = Root / "benchmarks" / ("json_document.nifty" if model == "document" else "json_parser.nifty")
     source = directory / "benchmark.nifty"
     source.write_bytes(prepareSource(original.read_text(encoding="utf-8"), model,
@@ -175,7 +193,7 @@ def markdown(report):
 def main(arguments=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", type=Path, default=Root / ("nifty.exe" if os.name == "nt" else "nifty"))
-    parser.add_argument("--backend", default=None, help="comma-separated c and the host native backend")
+    parser.add_argument("--backend", default=None, help="comma-separated hand-c, c and the host native backend")
     parser.add_argument("--records", type=int, default=128)
     parser.add_argument("--repeat", type=int, default=50)
     parser.add_argument("--samples", type=int, default=7)
@@ -202,8 +220,8 @@ def main(arguments=None):
     if not options.cc:
         parser.error("A C compiler is required for the allocation probe")
     backends = (options.backend or "c," + host["physical_architecture"]).split(",")
-    if any(backend not in ("c", host["physical_architecture"]) for backend in backends):
-        parser.error("Select c or the physical host native backend")
+    if any(backend not in ("hand-c", "c", host["physical_architecture"]) for backend in backends):
+        parser.error("Select hand-c, c or the physical host native backend")
     backends = list(dict.fromkeys(backends))
     options.output.mkdir(parents=True, exist_ok=True)
     for name in ("results.json", "results.md"):
@@ -212,6 +230,8 @@ def main(arguments=None):
     expected = Json.expectedWorkload(options.records)
     inputs = [options.compiler, Root / "benchmarks/json_parser.nifty",
               Root / "benchmarks/json_document.nifty"]
+    if "hand-c" in backends:
+        inputs += [Root / "benchmarks/json_parser_straight.c", Root / "benchmarks/json_document_hand.c"]
     inputs += [Root / "lib" / name for name in Json.LibraryNames]
     fingerprints = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
     variants = [build(options, model, backend, host, env)
@@ -225,7 +245,8 @@ def main(arguments=None):
             response, wall = Ray.runCommand(result["execution_command"], options.timeout, env)
             if response.stderr:
                 raise Ray.BenchmarkError(response.stderr.decode("utf-8", "replace"))
-            parsed = Json.parseOutput(response.stdout, options.records, options.repeat, expected)
+            data = response.stdout.replace(b"\r\n", b"\n") if result["backend"] == "hand-c" else response.stdout
+            parsed = Json.parseOutput(data, options.records, options.repeat, expected)
             parsed["wall_ns"] = wall
             result["warmups" if index < options.warmups else "samples"].append(parsed)
     for result in variants:

@@ -1,0 +1,32 @@
+object Pair =
+  left: int
+  right: int
+
+thread main() =
+  var text: string
+  for i in 0 ..< 256:
+    discard text.addByte(i)
+  echo text.len == 256 and text.get(255).or(0) == 255
+  text.clear()
+  discard text.addByte(0)
+  echo text.len == 1 and text.get(0).or(255) == 0
+  var pairs: seq[Pair]
+  for i in 0 ..< 20:
+    discard pairs.add(Pair(i, i))
+  if pairs.len > 8:
+    echo pairs[8].left == 8 and pairs[8].right == 8
+  if pairs.len > 0:
+    let first = pairs[0]
+    discard pairs.add(first)
+  if pairs.len == 21:
+    echo pairs[20].left == 0 and pairs[20].right == 0
+  var small: seq[uint8]
+  for i in 0 ..< 256:
+    discard small.add(i)
+  if small.len == 256:
+    echo small[255] == 255
+  var floats: seq[float32]
+  for i in 0 ..< 20:
+    discard floats.add(1.25)
+  if floats.len == 20:
+    echo floats[19] == 1.25

@@ -198,6 +198,13 @@ proc multiply*(assembler: var XAssembler, destination, source: XRegister)
   assembler.emit(0x0F, 0xAF)
   assembler.registers(destination.ord, source.ord)
 
+proc multiplyWide*(assembler: var XAssembler, source: XRegister)
+    {.raises: [].} =
+  ## Produces the unsigned 128-bit RDX:RAX product of RAX and source.
+  assembler.rex(true, 4, source.ord)
+  assembler.emit(0xF7)
+  assembler.registers(4, source.ord)
+
 proc addImmediate*(assembler: var XAssembler, destination: XRegister,
     value: int32) {.raises: [].} =
   ## Adds a sign-extended 32-bit immediate.
