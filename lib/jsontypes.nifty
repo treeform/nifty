@@ -1,10 +1,6 @@
+import jsoncommon
+
 # JSON numbers retain their exact decimal spelling, including large exponents.
-const JsonNumberError = 2
-const JsonSyntaxError = 3
-const JsonUnicodeError = 4
-const JsonAllocationError = 5
-const JsonDepthError = 6
-const JsonDefaultDepth = 512
 
 object NullNode =
   discard
@@ -29,18 +25,6 @@ object ObjNode =
   fields: seq[JsonField]
 
 type JsonNode = NullNode or BoolNode or NumNode or StrNode or ArrNode or ObjNode
-
-object JsonError =
-  offset: int
-  code: int
-  message: string[128]
-
-# Records an error without allocating memory.
-proc jsonFail(error: var JsonError, offset: int, code: int, message: string[128]): bool =
-  error.offset = offset
-  error.code = code
-  error.message = message
-  return false
 
 # Copies a JSON value through the language's explicit owning operations.
 proc jsonCopy(output: var JsonNode, source: JsonNode): bool =

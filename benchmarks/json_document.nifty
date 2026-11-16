@@ -1,0 +1,133 @@
+import "../lib/jsondoc"
+
+const Records = 128
+const Repetitions = 10
+const ClockId = 6
+
+object Timespec =
+  sec: int64
+  nsec: int64
+
+object ParseResult =
+  ok: bool
+  checksum: int
+  error: JsonError
+
+extern "libc":
+  proc clock_gettime(clock: int32, value: var Timespec): int32
+
+func feed(checksum: int, byte: int): int =
+  if checksum >= 0 and checksum < 1000000007 and byte >= 0 and byte <= 255:
+    return (checksum * 257 + byte) % 1000000007
+  return -1
+
+func documentDigestText(bytes: string, begin: int, limit: int, checksum: int): int =
+  if begin < 0 or limit < begin or limit > bytes.len:
+    return -1
+  var value = checksum
+  for i in begin ..< limit:
+    if i >= 0 and i < bytes.len:
+      value = feed(value, bytes[i])
+  return feed(value, 0)
+
+proc digestDocument(doc: JsonDocument): int =
+  # Preorder nodes stream directly into the original typed-tree checksum.
+  # End indices emit container delimiters without recursive owning values.
+  var ends: seq[int]
+  var value = 0
+  for id in 0 ..< doc.nodes.len:
+    for close in 0 ..< doc.nodes.len:
+      if ends.len == 0:
+        break
+      let top = ends.len - 1
+      if top >= 0 and top < ends.len:
+        if ends[top] != id:
+          break
+        if ends.len > 0:
+          discard ends.pop()
+        value = feed(value, 255)
+    if id >= 0 and id < doc.nodes.len:
+      let node = doc.nodes[id]
+      # Object keys live after the retained input prefix; zero means no key.
+      if node.nameOffset > 0:
+        value = documentDigestText(doc.bytes, node.nameOffset, node.nameLimit, value)
+      value = feed(value, node.kind + 1)
+      if node.kind == JsonDocBool:
+        if node.boolean:
+          value = feed(value, 1)
+        else:
+          value = feed(value, 0)
+      elif node.kind == JsonDocNumber or node.kind == JsonDocString:
+        value = documentDigestText(doc.bytes, node.offset, node.limit, value)
+      elif node.kind == JsonDocArray or node.kind == JsonDocObject:
+        if node.after <= id or node.after > doc.nodes.len:
+          return -1
+        if not ends.add(node.after):
+          return -1
+  for close in 0 ..< doc.nodes.len:
+    if ends.len == 0:
+      break
+    if ends.len > 0:
+      discard ends.pop()
+    value = feed(value, 255)
+  return value
+
+proc parseAndConsume(input: string): ParseResult =
+  # The complete document and digest stack are destroyed inside the cycle.
+  var doc: JsonDocument
+  var result: ParseResult
+  result.checksum = -1
+  result.ok = parseJsonDocument(input, doc, result.error)
+  if result.ok:
+    result.checksum = digestDocument(doc)
+  return result
+
+proc run() =
+  var input: string
+  if not input.add("["):
+    echo "setup_error opening"
+    return
+  for i in 0 ..< Records:
+    if i > 0:
+      if not input.add(","):
+        echo "setup_error comma"
+        return
+    if not input.add("{\"name\":\"Nifty\\nJSON\",\"unicode\":\"\\u00e9\\uD83D\\uDE03\",\"nul\":\"a\\u0000b\",\"integer\":9007199254740993,\"fraction\":-12.50e+2,\"enabled\":true,\"disabled\":false,\"nothing\":null,\"nested\":[1,\"x\",{\"k\":false},[]],\"empty\":{}}"):
+      echo "setup_error record"
+      return
+  if not input.add("]"):
+    echo "setup_error closing"
+    return
+  var started: Timespec
+  var finished: Timespec
+  var results: array[Repetitions, ParseResult]
+  let startStatus = clock_gettime(ClockId, started)
+  for repetition in 0 ..< Repetitions:
+    results[repetition] = parseAndConsume(input)
+  let finishStatus = clock_gettime(ClockId, finished)
+  var successes = 0
+  var batchChecksum = 0
+  echo "NIFTY_JSON_V1"
+  echo "records ", Records
+  echo "repeat ", Repetitions
+  echo "input_bytes ", input.len
+  echo "start_sec ", started.sec
+  echo "start_nsec ", started.nsec
+  echo "end_sec ", finished.sec
+  echo "end_nsec ", finished.nsec
+  echo "clock_status ", startStatus, " ", finishStatus
+  for repetition in 0 ..< Repetitions:
+    if results[repetition].ok:
+      successes = successes + 1
+  echo "successes ", successes
+  for repetition in 0 ..< Repetitions:
+    if not results[repetition].ok:
+      echo "parse_error ", repetition, " ", results[repetition].error.offset, " ", results[repetition].error.code, " ", results[repetition].error.message
+    echo "parse_checksum ", repetition, " ", results[repetition].checksum
+    let checksum = results[repetition].checksum
+    if batchChecksum >= 0 and batchChecksum <= 9223372035854775800 and checksum >= 0 and checksum < 1000000007:
+      batchChecksum = batchChecksum + checksum
+  echo "batch_checksum ", batchChecksum
+
+thread main() =
+  run()

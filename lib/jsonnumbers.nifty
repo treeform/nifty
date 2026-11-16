@@ -1,4 +1,4 @@
-import jsontypes
+import jsoncommon
 
 func jsonNumberDigit(value: int): bool =
   # Test the ASCII decimal digit range.

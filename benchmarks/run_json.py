@@ -23,7 +23,8 @@ RecordText = (r'{"name":"Nifty\nJSON","unicode":"\u00e9\uD83D\uDE03",'
               r'"nul":"a\u0000b","integer":9007199254740993,'
               r'"fraction":-12.50e+2,"enabled":true,"disabled":false,'
               r'"nothing":null,"nested":[1,"x",{"k":false},[]],"empty":{}}')
-LibraryNames = ("json.nifty", "jsontypes.nifty", "jsonstrings.nifty", "jsonnumbers.nifty")
+LibraryNames = ("json.nifty", "jsontypes.nifty", "jsoncommon.nifty",
+                "jsonstrings.nifty", "jsonnumbers.nifty", "jsondoc.nifty")
 TimingScope = ("Each timed cycle parses the complete input, consumes the decoded "
                "tree into a checksum, and releases every tree allocation. Input "
                "construction, process startup, and output are outside the interval. "

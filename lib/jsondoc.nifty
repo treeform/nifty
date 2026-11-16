@@ -1,0 +1,246 @@
+import jsoncommon
+import jsonstrings
+import jsonnumbers
+
+const JsonDocNull = 0
+const JsonDocBool = 1
+const JsonDocNumber = 2
+const JsonDocString = 3
+const JsonDocArray = 4
+const JsonDocObject = 5
+
+# Nodes are plain records, stored in preorder. 'after' skips a whole subtree.
+# Text/name ranges address the document's single byte pool, never pointers.
+object JsonDocNode =
+  kind: 0 .. 5
+  boolean: bool
+  offset: int
+  limit: int
+  nameOffset: int
+  nameLimit: int
+  after: int
+
+object JsonDocument =
+  nodes: seq[JsonDocNode]
+  bytes: string
+  root: int
+
+object JsonDocFrame =
+  node: int
+  state: int
+  nameOffset: int
+  nameLimit: int
+
+proc clearJsonDocument(doc: var JsonDocument) =
+  doc.nodes.clear()
+  doc.bytes.clear()
+  doc.root = -1
+
+# Explicitly release both buffers; ordinary scope exit does the same cleanup.
+proc releaseJsonDocument(doc: var JsonDocument) =
+  doc = JsonDocument()
+  doc.root = -1
+
+# Input is retained once at the start of bytes. Numbers refer to this prefix;
+# decoded strings and object keys append after it. No node owns allocations.
+proc jsonDocumentBody(text: string, doc: var JsonDocument, error: var JsonError, maxDepth: int): bool =
+  if not doc.bytes.add(text):
+    return jsonFail(error, 0, JsonAllocationError, "Cannot retain JSON input")
+  var frames: seq[JsonDocFrame]
+  var position = 0
+  var rootDone = false
+  for step in 0 ..< text.len:
+    if position < 0 or position >= text.len:
+      break
+    let byte = text[position]
+    if byte == 32 or byte == 9 or byte == 10 or byte == 13:
+      if position >= 9223372036854775807:
+        return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+      position = position + 1
+    else:
+      if rootDone and frames.len == 0:
+        return jsonFail(error, position, JsonSyntaxError, "Trailing JSON content")
+      var state = -1
+      if frames.len > 0:
+        let top = frames.len - 1
+        if top >= 0 and top < frames.len:
+          state = frames[top].state
+      var consumed = false
+      if frames.len > 0:
+        let top = frames.len - 1
+        if top < 0 or top >= frames.len:
+          return jsonFail(error, position, JsonSyntaxError, "Invalid JSON stack")
+        if (state == 0 or state == 2) and byte == 93 or (state == 3 or state == 7) and byte == 125:
+          let id = frames[top].node
+          if id < 0 or id >= doc.nodes.len:
+            return jsonFail(error, position, JsonSyntaxError, "Invalid JSON node")
+          doc.nodes[id].after = doc.nodes.len
+          if not frames.resize(top):
+            return jsonFail(error, position, JsonAllocationError, "Cannot close JSON frame")
+          if position >= 9223372036854775807:
+            return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+          position = position + 1
+          consumed = true
+        elif state == 2 or state == 7:
+          if byte != 44:
+            return jsonFail(error, position, JsonSyntaxError, "Expected comma or container end")
+          if state == 2:
+            frames[top].state = 1
+          else:
+            frames[top].state = 4
+          if position >= 9223372036854775807:
+            return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+          position = position + 1
+          consumed = true
+        elif state == 3 or state == 4:
+          if byte != 34:
+            return jsonFail(error, position, JsonSyntaxError, "Expected object key")
+          let begin = doc.bytes.len
+          let next = jsonAppendString(text, position, doc.bytes, error)
+          if not next.ok:
+            return false
+          position = next
+          if top >= 0 and top < frames.len:
+            var updated = frames[top]
+            updated.state = 5
+            updated.nameOffset = begin
+            updated.nameLimit = doc.bytes.len
+            frames[top] = updated
+          consumed = true
+        elif state == 5:
+          if byte != 58:
+            return jsonFail(error, position, JsonSyntaxError, "Expected colon")
+          frames[top].state = 6
+          if position >= 9223372036854775807:
+            return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+          position = position + 1
+          consumed = true
+      if not consumed:
+        var node: JsonDocNode
+        var open = false
+        if byte == 91 or byte == 123:
+          if frames.len >= maxDepth:
+            return jsonFail(error, position, JsonDepthError, "JSON nesting depth exceeded")
+          open = true
+          if byte == 91:
+            node.kind = JsonDocArray
+          else:
+            node.kind = JsonDocObject
+          if position >= 9223372036854775807:
+            return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+          position = position + 1
+        elif byte == 34:
+          let begin = doc.bytes.len
+          let next = jsonAppendString(text, position, doc.bytes, error)
+          if not next.ok:
+            return false
+          node.kind = JsonDocString
+          node.offset = begin
+          node.limit = doc.bytes.len
+          position = next
+        elif byte == 45 or byte >= 48 and byte <= 57:
+          let end = jsonScanNumber(text, position, error)
+          if end < 0:
+            return false
+          node.kind = JsonDocNumber
+          node.offset = position
+          node.limit = end
+          position = end
+        elif jsonLiteral(text, position, "true"):
+          node.kind = JsonDocBool
+          node.boolean = true
+          if position > 9223372036854775803:
+            return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+          position = position + 4
+        elif jsonLiteral(text, position, "false"):
+          node.kind = JsonDocBool
+          if position > 9223372036854775802:
+            return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+          position = position + 5
+        elif jsonLiteral(text, position, "null"):
+          node.kind = JsonDocNull
+          if position > 9223372036854775803:
+            return jsonFail(error, position, JsonSyntaxError, "JSON offset overflow")
+          position = position + 4
+        else:
+          return jsonFail(error, position, JsonSyntaxError, "Expected JSON value")
+        let id = doc.nodes.len
+        if id < 0 or id >= 9223372036854775807:
+          return jsonFail(error, position, JsonAllocationError, "Too many JSON nodes")
+        node.after = id + 1
+        if frames.len > 0:
+          let top = frames.len - 1
+          if top < 0 or top >= frames.len:
+            return jsonFail(error, position, JsonSyntaxError, "Invalid JSON stack")
+          node.nameOffset = frames[top].nameOffset
+          node.nameLimit = frames[top].nameLimit
+          if frames[top].state == 0 or frames[top].state == 1:
+            frames[top].state = 2
+          else:
+            frames[top].state = 7
+        else:
+          doc.root = id
+          rootDone = true
+        if not doc.nodes.add(node):
+          return jsonFail(error, position, JsonAllocationError, "Cannot grow JSON nodes")
+        if open:
+          var frame: JsonDocFrame
+          frame.node = id
+          if node.kind == JsonDocObject:
+            frame.state = 3
+          if not frames.add(frame):
+            return jsonFail(error, position, JsonAllocationError, "Cannot grow JSON stack")
+  if not rootDone or frames.len != 0:
+    return jsonFail(error, position, JsonSyntaxError, "Incomplete JSON input")
+  return true
+
+proc parseJsonDocumentWithDepth(text: string, doc: var JsonDocument, error: var JsonError, maxDepth: int): bool =
+  clearJsonDocument(doc)
+  error.offset = 0
+  error.code = 0
+  error.message = ""
+  if maxDepth < 0:
+    return jsonFail(error, 0, JsonDepthError, "Invalid JSON nesting limit")
+  if jsonDocumentBody(text, doc, error, maxDepth):
+    return true
+  clearJsonDocument(doc)
+  if error.code == 0:
+    return jsonFail(error, 0, JsonSyntaxError, "Invalid JSON input")
+  return false
+
+proc parseJsonDocument(text: string, doc: var JsonDocument, error: var JsonError): bool =
+  return parseJsonDocumentWithDepth(text, doc, error, JsonDefaultDepth)
+
+func jsonDocumentFirst(doc: JsonDocument, parent: int): int? =
+  if parent >= 0 and parent < doc.nodes.len:
+    if doc.nodes[parent].kind == JsonDocArray or doc.nodes[parent].kind == JsonDocObject:
+      if parent < 9223372036854775807:
+        let child = parent + 1
+        if child >= 0 and child < doc.nodes.len and child < doc.nodes[parent].after:
+          return child
+  return none
+
+func jsonDocumentNext(doc: JsonDocument, parent: int, child: int): int? =
+  if parent >= 0 and parent < doc.nodes.len and child >= 0 and child < doc.nodes.len:
+    if child > parent and child < doc.nodes[parent].after:
+      let next = doc.nodes[child].after
+      if next > child and next < doc.nodes.len and next < doc.nodes[parent].after:
+        return next
+  return none
+
+proc jsonDocumentText(doc: JsonDocument, id: int, output: var string): bool =
+  if id >= 0 and id < doc.nodes.len:
+    if doc.nodes[id].kind == JsonDocString or doc.nodes[id].kind == JsonDocNumber:
+      let begin = doc.nodes[id].offset
+      let limit = doc.nodes[id].limit
+      if begin >= 0 and limit >= begin and limit <= doc.bytes.len:
+        return output.copyRange(doc.bytes, begin, limit)
+  return false
+
+proc jsonDocumentName(doc: JsonDocument, id: int, output: var string): bool =
+  if id >= 0 and id < doc.nodes.len:
+    let begin = doc.nodes[id].nameOffset
+    let limit = doc.nodes[id].nameLimit
+    if begin > 0 and limit >= begin and limit <= doc.bytes.len:
+      return output.copyRange(doc.bytes, begin, limit)
+  return false

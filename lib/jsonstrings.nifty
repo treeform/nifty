@@ -1,4 +1,4 @@
-import jsontypes
+import jsoncommon
 
 func jsonStringHex(byte: int): int =
   # Returns one hexadecimal digit, or minus one.
@@ -210,4 +210,12 @@ proc jsonScanString(text: string, start: int, output: var string, error: var Jso
   let next = jsonStringScanBody(text, start, output, error)
   if not next.ok:
     output.clear()
+  return next
+
+# Appends one decoded string to a document's byte pool, keeping prior spans.
+proc jsonAppendString(text: string, start: int, output: var string, error: var JsonError): int? =
+  let saved = output.len
+  let next = jsonStringScanBody(text, start, output, error)
+  if not next.ok:
+    discard output.setLen(saved)
   return next

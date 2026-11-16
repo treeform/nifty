@@ -35,23 +35,6 @@ proc jsonAttach(frame: var JsonFrame, child: JsonNode): bool =
     frame.state = 7
   return true
 
-# Checks a literal without constructing temporary strings.
-func jsonLiteral(text: string, start: int, literal: string[5]): bool =
-  if start < 0 or start > text.len:
-    return false
-  if literal.len > text.len - start:
-    return false
-  var cursor = start
-  for i in 0 ..< literal.len:
-    if cursor < 0 or cursor >= text.len:
-      return false
-    if text[cursor] != literal[i]:
-      return false
-    if cursor >= 9223372036854775807:
-      return false
-    cursor = cursor + 1
-  return true
-
 # Parses with an explicit stack; every step consumes at least one byte.
 # Closing containers copies subtrees, costing O(depth * input size).
 proc jsonParseBody(text: string, output: var JsonNode, error: var JsonError, maxDepth: int): bool =

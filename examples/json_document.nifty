@@ -1,0 +1,26 @@
+import "../lib/jsondoc"
+
+proc example() =
+  var input: string
+  discard input.add("{\"name\":\"Nifty\",\"items\":[1,true,null],\"exact\":9007199254740993}")
+  var doc: JsonDocument
+  var error: JsonError
+  if not parseJsonDocument(input, doc, error):
+    echo error.offset, ": ", error.message
+    return
+  var child = jsonDocumentFirst(doc, doc.root)
+  for step in 0 ..< doc.nodes.len:
+    if not child.ok:
+      break
+    let id = child.or(-1)
+    var name: string
+    if jsonDocumentName(doc, id, name):
+      if id >= 0 and id < doc.nodes.len:
+        echo name, " kind=", doc.nodes[id].kind
+    child = jsonDocumentNext(doc, doc.root, id)
+  # Drop the document in one operation, including all descendant nodes/text.
+  releaseJsonDocument(doc)
+  echo doc.nodes.len, " ", doc.bytes.len
+
+thread main() =
+  example()

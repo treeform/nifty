@@ -1,0 +1,34 @@
+# Shared errors and token boundaries for both JSON representations.
+const JsonNumberError = 2
+const JsonSyntaxError = 3
+const JsonUnicodeError = 4
+const JsonAllocationError = 5
+const JsonDepthError = 6
+const JsonDefaultDepth = 512
+
+object JsonError =
+  offset: int
+  code: int
+  message: string[128]
+
+proc jsonFail(error: var JsonError, offset: int, code: int, message: string[128]): bool =
+  error.offset = offset
+  error.code = code
+  error.message = message
+  return false
+
+func jsonLiteral(text: string, start: int, literal: string[5]): bool =
+  if start < 0 or start > text.len:
+    return false
+  if literal.len > text.len - start:
+    return false
+  var cursor = start
+  for i in 0 ..< literal.len:
+    if cursor < 0 or cursor >= text.len:
+      return false
+    if text[cursor] != literal[i]:
+      return false
+    if cursor >= 9223372036854775807:
+      return false
+    cursor = cursor + 1
+  return true
