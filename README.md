@@ -66,8 +66,10 @@ default. They can be turned on with `initHost(allowImports = true)` and
 `initHost(allowExterns = true)` for trusted code only. See
 [docs/embedding.md](docs/embedding.md).
 
-The compiler also runs in the host process, so a depth limit for deeply
-nested source matters. Use `maxSyntaxDepth` in the script limits.
+The compiler also runs in the host process, so every resource a script can
+grow has a default cap: 1 MB of source, 250,000 tokens, 10,000 globals,
+10,000 routines, 10,000 types, 10,000 consts and a syntax depth of 64. All of
+them can be changed in the script limits.
 
 ## Usage
 
