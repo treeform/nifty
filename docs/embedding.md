@@ -144,9 +144,19 @@ Pass a modified `defaultLimits()` to `compile` or `newContext`:
 | Live owned allocations | 4,096 |
 | Syntax/type depth | 64 |
 | Generated IR instructions and blocks | 200,000 |
+| Tokens (`maxTokens`) | 250,000 |
+| Globals (`maxGlobals`) | 10,000 |
+| Routines, including generic instances (`maxRoutines`) | 10,000 |
+| Types: objects, aliases, unions (`maxTypes`) | 10,000 |
+| Consts (`maxConsts`) | 10,000 |
 
 Source also has limits on expression size, source lines, and imported module
-count. Work counts IR instructions and terminators, byte operations, bridge
+count. Token, global, routine, type and const counts are checked before the
+checker runs, so an oversized script is rejected before it can use much
+compiler time or memory. They cover the script and its imported modules.
+Functions and data added by the host do not count against them. The routine
+count is checked again after generic instances are made. Each of these may be
+raised up to 100,000 (tokens up to 4,000,000). Work counts IR instructions and terminators, byte operations, bridge
 string copies, allocations, conservative container traversal costs, and each
 callback's declared `workUnits`. Callback work is charged before entering Nim.
 Memory includes globals, the arena, interpreter frames, allocation records,

@@ -3684,14 +3684,14 @@ proc directExpr(e: Expr, globals: Table[string, Typ], rname: string,
   if e.isNil:
     return
   if e.kind == IdentExpr and e.sval in globals:
-    direct.mgetOrPut(e.sval, initHashSet[string]()).incl rname
+    direct.mgetOrPut(e.sval, initHashSet[string](2)).incl rname
   for k in e.kids:
     directExpr(k, globals, rname, direct)
 
 proc directStmt(s: Stmt, globals: Table[string, Typ], rname: string,
     direct: var Table[string, HashSet[string]]) =
   if s.kind == WithStmt and s.name in globals:
-    direct.mgetOrPut(s.name, initHashSet[string]()).incl rname
+    direct.mgetOrPut(s.name, initHashSet[string](2)).incl rname
   for e in [s.init, s.lhs, s.rhs, s.cond, s.lo, s.hi, s.value]:
     directExpr(e, globals, rname, direct)
   for a in s.args:
@@ -4080,8 +4080,14 @@ proc check*(m: Module) =
   var curRecvs: HashSet[string]
 
   proc note(g: string, held: HashSet[string]) =
+    ## Keeps the locks held at every access to a global.
+    ## Empty sets are left unallocated, since most globals see no lock.
     if g in acc:
-      acc[g] = acc[g] * held
+      if acc[g].len > 0:
+        if held.len == 0:
+          acc[g] = default(HashSet[string])
+        else:
+          acc[g] = acc[g] * held
     else:
       acc[g] = held
     for lk in held:
@@ -4111,21 +4117,24 @@ proc check*(m: Module) =
   proc mergeCallee(callee: string, held: HashSet[string], line: int) =
     if callee in access:
       for g, ls in access[callee]:
-        note(g, held + ls)
+        if held.len == 0:
+          note(g, ls)
+        else:
+          note(g, held + ls)
       for g in writes[callee]:
         wr.incl g
     if routineEcho.getOrDefault(callee, false):
       noteEcho(held)
-    for lk in routineLocks.getOrDefault(callee, initHashSet[string]()):
+    for lk in routineLocks.getOrDefault(callee):
       curLocks.incl lk
-    for ch in routineSends.getOrDefault(callee, initHashSet[string]()):
+    for ch in routineSends.getOrDefault(callee):
       if held.len > 0:
         for hl in held:
           err(line, "'" & callee & "' may block sending on channel '" &
             ch & "' and lock '" & hl & "' is held here; blocking while " &
             "holding a lock can deadlock")
       curSends.incl ch
-    for ch in routineRecvs.getOrDefault(callee, initHashSet[string]()):
+    for ch in routineRecvs.getOrDefault(callee):
       if held.len > 0:
         for hl in held:
           err(line, "'" & callee & "' may block receiving on channel '" &
@@ -4207,19 +4216,20 @@ proc check*(m: Module) =
 
   for r in m.routines:
     acc = initTable[string, HashSet[string]]()
-    wr = initHashSet[string]()
+    wr = default(HashSet[string])
     curEcho = false
-    curLocks = initHashSet[string]()
-    curSends = initHashSet[string]()
-    curRecvs = initHashSet[string]()
+    curLocks = default(HashSet[string])
+    curSends = default(HashSet[string])
+    curRecvs = default(HashSet[string])
     for st in r.body:
-      scanS(st, initHashSet[string]())
-    access[r.name] = acc
-    writes[r.name] = wr
+      scanS(st, default(HashSet[string]))
+    # Move, not copy: these tables hold one entry per global.
+    access[r.name] = move acc
+    writes[r.name] = move wr
     routineEcho[r.name] = curEcho
-    routineLocks[r.name] = curLocks
-    routineSends[r.name] = curSends
-    routineRecvs[r.name] = curRecvs
+    routineLocks[r.name] = move curLocks
+    routineSends[r.name] = move curSends
+    routineRecvs[r.name] = move curRecvs
   c.routineLocks = routineLocks
   c.routineWrites = writes
   for rname, accTab in access:
