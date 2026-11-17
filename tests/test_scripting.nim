@@ -234,6 +234,79 @@ thread main() =
     let deep = initRuntime(compile("proc inner() =\n  echo 1\nthread main() =\n  inner()\n", limits = limits))
     expect ExecutionLimitError: discard deep.run()
 
+  test "declaration and token counts are capped":
+    proc rejects(source: string, limits: Limits, text: string) =
+      ## Checks that compiling fails with the named limit.
+      var message = ""
+      try:
+        discard compile(source, limits = limits)
+      except ScriptError as e:
+        message = e.msg
+      check text in message
+    proc globals(n: int): string =
+      ## Builds a script that declares n globals.
+      for i in 0 ..< n:
+        result.add "var g" & $i & ": int\n"
+      result.add "thread main() =\n  echo 1\n"
+    let defaults = defaultLimits()
+    check defaults.maxSourceBytes == 1024 * 1024
+    check defaults.maxGlobals == 10_000
+    check defaults.maxRoutines == 10_000
+    check defaults.maxTypes == 10_000
+    check defaults.maxConsts == 10_000
+    check defaults.maxTokens == 250_000
+    rejects(globals(10_001), defaults, "script global limit exceeded")
+    var limits = defaultLimits()
+    limits.maxGlobals = 3
+    discard compile(globals(3), limits = limits)
+    rejects(globals(4), limits, "script global limit exceeded")
+    limits = defaultLimits()
+    limits.maxRoutines = 2
+    discard compile("func a(): int =\n  return 1\n" &
+      "thread main() =\n  echo a()\n", limits = limits)
+    rejects("func a(): int =\n  return 1\nfunc b(): int =\n  return 2\n" &
+      "thread main() =\n  echo a(), b()\n", limits,
+      "script routine limit exceeded")
+    # Generic instances replace their template after checking, so a
+    # template with two instances passes the parse count but not this one.
+    limits.maxRoutines = 2
+    rejects("func g(x: $T): int =\n  return 1\n" &
+      "thread main() =\n  echo g(1), g(true)\n", limits,
+      "script routine limit exceeded")
+    limits = defaultLimits()
+    limits.maxTypes = 1
+    discard compile("object A =\n  x: int\nvar a: A\n" &
+      "thread main() =\n  echo a.x\n", limits = limits)
+    rejects("object A =\n  x: int\nobject B =\n  y: int\n" &
+      "var a: A\nvar b: B\nthread main() =\n  echo a.x, b.y\n", limits,
+      "script type limit exceeded")
+    limits = defaultLimits()
+    limits.maxConsts = 1
+    discard compile("const A = 1\nthread main() =\n  echo A\n",
+      limits = limits)
+    rejects("const A = 1\nconst B = 2\nthread main() =\n  echo A, B\n",
+      limits, "script const limit exceeded")
+    limits = defaultLimits()
+    limits.maxTokens = 20
+    discard compile("thread main() =\n  echo 1\n", limits = limits)
+    rejects(globals(4), limits, "script token limit exceeded")
+    # Host functions and data are trusted and do not use the script budget.
+    var host = initHost()
+    for i in 0 ..< 5:
+      host.addData("d" & $i, i)
+      host.addFunction("f" & $i, 1,
+        proc(args: openArray[int64]): int64 = args[0])
+    limits = defaultLimits()
+    limits.maxGlobals = 1
+    limits.maxRoutines = 1
+    discard compile("var g: int\nthread main() =\n  echo f0(d1)\n",
+      host, limits)
+    for bad in [0, 100_001]:
+      limits = defaultLimits()
+      limits.maxGlobals = bad
+      rejects("thread main() =\n  echo 1\n", limits,
+        "invalid scripting limits")
+
   test "callbacks cannot reenter the same runtime; exceptions recover":
     var host = initHost()
     var runtime: Runtime

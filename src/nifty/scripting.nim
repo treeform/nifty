@@ -24,6 +24,7 @@ type
   Limits* = object
     maxSourceBytes*, maxWork*, maxMemoryBytes*, maxOutputBytes*: int64
     maxCallDepth*, maxAllocations*, maxSyntaxDepth*, maxCodeInstructions*: int
+    maxTokens*, maxGlobals*, maxRoutines*, maxTypes*, maxConsts*: int
   HostFunction = object
     name: string
     parameters: seq[ValueKind]
@@ -82,7 +83,8 @@ proc defaultLimits*(): Limits =
   Limits(maxSourceBytes: 1024 * 1024, maxWork: 10_000_000,
     maxMemoryBytes: 64 * 1024 * 1024, maxOutputBytes: 1024 * 1024,
     maxCallDepth: 64, maxAllocations: 4096, maxSyntaxDepth: 64,
-    maxCodeInstructions: 200_000)
+    maxCodeInstructions: 200_000, maxTokens: 250_000, maxGlobals: 10_000,
+    maxRoutines: 10_000, maxTypes: 10_000, maxConsts: 10_000)
 
 proc value*(number: SomeInteger): Value =
   Value(kind: IntValue, integer: int64(number))
@@ -112,7 +114,12 @@ proc validate(limits: Limits) =
       limits.maxOutputBytes < 0 or limits.maxCallDepth <= 0 or
       limits.maxCallDepth > 1024 or limits.maxAllocations <= 0 or
       limits.maxAllocations > 65536 or limits.maxSyntaxDepth <= 0 or
-      limits.maxSyntaxDepth > 128 or limits.maxCodeInstructions <= 0:
+      limits.maxSyntaxDepth > 128 or limits.maxCodeInstructions <= 0 or
+      limits.maxTokens <= 0 or limits.maxTokens > 4_000_000 or
+      limits.maxGlobals <= 0 or limits.maxGlobals > 100_000 or
+      limits.maxRoutines <= 0 or limits.maxRoutines > 100_000 or
+      limits.maxTypes <= 0 or limits.maxTypes > 100_000 or
+      limits.maxConsts <= 0 or limits.maxConsts > 100_000:
     fail("invalid scripting limits")
 
 proc validName(name: string) =
@@ -266,7 +273,8 @@ proc echoFloat(value: float64) =
   discard 0
 """
 
-proc checkSource(source: string, limits: Limits, filename: string) =
+proc checkSource(source: string, limits: Limits, filename: string): int =
+  ## Prescans source before parsing and returns its token count.
   if int64(source.len) > limits.maxSourceBytes: fail("script source limit exceeded")
   # Source positions encode file identity in the high digits. Do not allow
   # a long file to impersonate the trusted host module's source positions.
@@ -280,7 +288,10 @@ proc checkSource(source: string, limits: Limits, filename: string) =
     srcFiles = previousFiles
     symbolNames = previousNames
   var depth, expressionDepth, lineTokens: int
-  for token in lexer.tokenize(source):
+  let tokens = lexer.tokenize(source)
+  if tokens.len > limits.maxTokens: fail("script token limit exceeded")
+  result = tokens.len
+  for token in tokens:
     case token.kind
     of IndentToken:
       inc depth
@@ -299,10 +310,11 @@ proc compileSource(source: string, host: Host,
     limits = defaultLimits(), filename = "script.nifty"): Program =
   ## Compiles checked source using only the modules and capabilities supplied.
   limits.validate()
-  checkSource(source, limits, filename)
+  # Host prelude tokens are trusted and do not count against the script.
+  var totalTokens = checkSource(source, limits, filename)
   var totalSource = int64(source.len)
   let hostSource = host.prelude()
-  checkSource(hostSource, limits, "host.nifty")
+  discard checkSource(hostSource, limits, "host.nifty")
   totalSource += int64(hostSource.len)
   if totalSource > limits.maxSourceBytes: fail("script source limit exceeded")
   var seen = initHashSet[string]()
@@ -316,7 +328,8 @@ proc compileSource(source: string, host: Host,
       seen.incl path
       totalSource += int64(host.modules[path].len)
       if totalSource > limits.maxSourceBytes: fail("script source limit exceeded")
-      checkSource(host.modules[path], limits, path)
+      totalTokens += checkSource(host.modules[path], limits, path)
+      if totalTokens > limits.maxTokens: fail("script token limit exceeded")
       if seen.len > 128: fail("script module limit exceeded")
     ImportSource(identity: path, source: host.modules[path])
   let mainName = if filename == "host.nifty": "script.nifty" else: filename
@@ -324,6 +337,28 @@ proc compileSource(source: string, host: Host,
     resolver = resolver, mainLineOffset = -1))
   if not host.allowExterns and m.externLibs.len > 0:
     fail("externs are disabled for scripts: " & m.externLibs[0])
+  proc fromHost(line: int): bool =
+    ## Reports whether a declaration comes from the trusted host prelude.
+    line div fileLineBase < m.files.len and
+      m.files[line div fileLineBase] == "host.nifty"
+  # Count declarations before the checker, which scales with all of them.
+  var globals, routines, types, consts: int
+  for g in m.globals:
+    if not fromHost(g.line):
+      inc globals
+  for r in m.routines:
+    if not fromHost(r.line):
+      inc routines
+  for t in m.types:
+    if not fromHost(t.line):
+      inc types
+  for c in m.consts:
+    if not fromHost(c.line):
+      inc consts
+  if globals > limits.maxGlobals: fail("script global limit exceeded")
+  if routines > limits.maxRoutines: fail("script routine limit exceeded")
+  if types > limits.maxTypes: fail("script type limit exceeded")
+  if consts > limits.maxConsts: fail("script const limit exceeded")
   var dataNames: Table[string, string]
   for r in m.routines:
     if r.line div fileLineBase < m.files.len and m.files[r.line div fileLineBase] == "host.nifty":
@@ -360,6 +395,12 @@ proc compileSource(source: string, host: Host,
       roots += r.instances
   if roots != 1: fail("scripts require exactly one thread entry (run on the host thread)")
   check(m)
+  # Generic instances are created by the checker, so count routines again.
+  routines = 0
+  for r in m.routines:
+    if not r.hostBinding and not r.observer:
+      inc routines
+  if routines > limits.maxRoutines: fail("script routine limit exceeded")
   var routineTab: Table[string, Routine]
   for r in m.routines: routineTab[r.name] = r
   proc dataRoot(e: Expr): bool =
