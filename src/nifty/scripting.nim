@@ -352,7 +352,8 @@ proc compileSource(source: string, host: Host,
     body.add Stmt(kind: DiscardStmt, line: g.line,
       value: Expr(kind: IdentExpr, sval: g.name, line: g.line))
   if body.len > 0:
-    m.routines.add Routine(kind: ProcRoutine, name: observer, line: 1, body: body)
+    m.routines.add Routine(kind: ProcRoutine, name: observer, line: 1,
+      body: body, observer: true)
   var roots = 0
   for r in m.routines:
     if r.kind == ThreadRoutine:
@@ -432,22 +433,28 @@ proc compileSource(source: string, host: Host,
   if instructions > limits.maxCodeInstructions: fail("script code size limit exceeded")
   if result.plan.lockOffsets.len > 0 or result.plan.channelOffsets.len > 0:
     fail("scripts cannot create OS synchronization")
+  # Index globals and layouts once; scripts may declare many globals.
+  # Later entries win, matching a scan without an early exit.
+  var
+    offsets: Table[string, int]
+    layouts: Table[(TypKind, int64, bool, int64, bool, int64, int64), int]
+  for irGlobal in result.plan.module.globals:
+    offsets[irGlobal.name] = int(irGlobal.offset)
+  # All host/global layouts are canonicalized by the lowering pass.
+  for i, l in result.plan.layouts:
+    layouts[(l.kind, l.bytes, l.dynamic, l.capacity, l.optional,
+      l.lower, l.upper)] = i
   for g in m.globals:
-    for irGlobal in result.plan.module.globals:
-      if irGlobal.name == g.name:
-        var layout = -1
-        # All host/global layouts are canonicalized by the lowering pass.
-        for i, l in result.plan.layouts:
-          if l.kind == g.typ.kind and
-              l.bytes == typeSize(g.typ) and l.dynamic == g.typ.dynamic and
-              l.capacity == g.typ.len and l.optional == g.typ.opt and
-              l.lower == g.typ.rlo and l.upper == g.typ.rhi:
-            layout = i
-        if layout >= 0:
-          let descriptor = Global(offset: int(irGlobal.offset),
-            layout: layout, readonly: g.name in dataNames)
-          if g.name in dataNames: result.inputs[dataNames[g.name]] = descriptor
-          else: result.globals[g.name] = descriptor
+    if g.name notin offsets:
+      continue
+    let key = (g.typ.kind, typeSize(g.typ), g.typ.dynamic,
+      int64(g.typ.len), g.typ.opt, g.typ.rlo, g.typ.rhi)
+    if key notin layouts:
+      continue
+    let descriptor = Global(offset: offsets[g.name],
+      layout: layouts[key], readonly: g.name in dataNames)
+    if g.name in dataNames: result.inputs[dataNames[g.name]] = descriptor
+    else: result.globals[g.name] = descriptor
   result.interpreter = prepareInterpreter(result.plan.module)
 
 proc compile*(source: string, host: Host = initHost(),

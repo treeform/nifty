@@ -1,8 +1,15 @@
 ## Recursive-descent parser: tokens -> Module AST.
 ## Named type shapes support forward references; routines retain source order.
 
-import std/[strutils, tables, sequtils]
+import std/[strutils, tables, sequtils, sets]
 import common, lexer, types
+
+const
+  MaxNesting* = 128
+    ## Deepest block, type, or expression nesting the parser accepts.
+    ## Later passes recurse over the tree, so this bounds host stack use.
+  MaxTypeNodes* = 65536
+    ## Largest type the parser accepts, counted with shared parts unfolded.
 
 type
   Parser = object
@@ -16,6 +23,9 @@ type
     aliases: Table[string, Typ]
     allowTypeVar: bool           # $names legal (generic parameter lists only)
     symbolicExpr: bool           # Scan clause boundaries in deferred generic bodies.
+    depth: int                   # Current recursive parse nesting.
+    scope: SymbolScope           # Names shared with generic routines.
+    exprs: int                   # Current parseExpr nesting.
 
 proc peek(p: Parser): Token =
   p.toks[p.pos]
@@ -29,6 +39,27 @@ proc atOp(p: Parser, s: string): bool =
 
 proc atIdent(p: Parser, s: string): bool =
   p.peek.kind == IdentToken and p.peek.text == s
+
+proc enter(p: var Parser) =
+  ## Enters one nesting level, rejecting source nested too deeply.
+  inc p.depth
+  if p.depth > MaxNesting:
+    err(p.peek.line, "nesting is too deep (limit " & $MaxNesting & ")")
+
+proc leave(p: var Parser) =
+  ## Leaves one nesting level.
+  dec p.depth
+
+proc exprHeight(root: Expr): int =
+  ## Returns the height of an expression tree without recursing.
+  var stack = @[(e: root, h: 1)]
+  while stack.len > 0:
+    let item = stack.pop()
+    if item.e.isNil:
+      continue
+    result = max(result, item.h)
+    for kid in item.e.kids:
+      stack.add (e: kid, h: item.h + 1)
 
 proc expectOp(p: var Parser, s: string) =
   if not p.atOp(s):
@@ -280,7 +311,9 @@ proc parseTypeCore(p: var Parser): Typ =
 
 proc parseType(p: var Parser): Typ =
   let line = p.peek.line
+  p.enter()
   result = p.parseTypeCore()
+  p.leave()
   if p.atOp("?"):
     discard p.next
     if result.kind notin {IntType, ObjectType, UnionType, StringType,
@@ -374,9 +407,11 @@ proc parsePostfix(p: var Parser): Expr =
 proc parseUnary(p: var Parser): Expr =
   if p.atOp("-"):
     let line = p.next.line
-    Expr(kind: NegExpr, line: line, kids: @[p.parseUnary()])
+    p.enter()
+    result = Expr(kind: NegExpr, line: line, kids: @[p.parseUnary()])
+    p.leave()
   else:
-    p.parsePostfix()
+    result = p.parsePostfix()
 
 proc parseMul(p: var Parser): Expr =
   result = p.parseUnary()
@@ -402,9 +437,11 @@ proc parseCmp(p: var Parser): Expr =
 proc parseNot(p: var Parser): Expr =
   if p.atIdent("not"):
     let line = p.next.line
-    Expr(kind: NotExpr, line: line, kids: @[p.parseNot()])
+    p.enter()
+    result = Expr(kind: NotExpr, line: line, kids: @[p.parseNot()])
+    p.leave()
   else:
-    p.parseCmp()
+    result = p.parseCmp()
 
 proc parseAnd(p: var Parser): Expr =
   result = p.parseNot()
@@ -414,11 +451,19 @@ proc parseAnd(p: var Parser): Expr =
       kids: @[result, p.parseNot()])
 
 proc parseExpr(p: var Parser): Expr =
+  let line = p.peek.line
+  p.enter()
+  inc p.exprs
   result = p.parseAnd()
   while p.atIdent("or"):
     discard p.next
     result = Expr(kind: BinExpr, line: result.line, sval: "or",
       kids: @[result, p.parseAnd()])
+  dec p.exprs
+  p.leave()
+  # Operator chains build deep trees without parser recursion.
+  if p.exprs == 0 and exprHeight(result) > MaxNesting:
+    err(line, "expression is too deep (limit " & $MaxNesting & ")")
 
 proc parseStmt(p: var Parser): Stmt
 proc parseBody(p: var Parser): seq[Stmt]
@@ -508,6 +553,8 @@ proc parseStmt(p: var Parser): Stmt =
   let t = p.peek
   if t.kind != IdentToken:
     err(t.line, "statement expected")
+  p.enter()
+  defer: p.leave()
   case t.text
   of "if":
     discard p.next
@@ -652,6 +699,9 @@ proc parseModule(p: var Parser): Module =
       if name in p.consts:
         err(t.line, "duplicate const: '" & name & "'")
       p.consts[name] = v
+      if p.scope != nil:
+        p.scope.consts[name] = v
+        p.scope.order[name] = p.scope.order.len
       result.consts.add ConstDef(name: name, value: v, line: t.line)
       p.expectNewline()
     of "var":
@@ -856,8 +906,10 @@ proc parseModule(p: var Parser): Module =
           else: discard
           discard p.next
         r.toks = p.toks[startPos ..< p.pos]
-        r.constsSnap = p.consts
-        r.typesSnap = p.types
+        # One shared scope keeps many generics from copying every name.
+        if p.scope != nil:
+          r.scope = p.scope
+          r.constCount = p.scope.order.len
       else:
         if p.atOp(":"):
           discard p.next
@@ -894,45 +946,134 @@ proc predeclare(p: var Parser) =
     p.types[name] = Typ(kind: ObjectType, name: name)
   p.predeclared = true
 
-proc resolveAlias(p: var Parser, name: string, visiting: var seq[string],
-    finished: var seq[string]) =
-  ## Resolve structural aliases without accepting recursive alias graphs.
-  if name in finished or name notin p.aliases:
+proc aliasDependencies(aliases: Table[string, Typ], t: Typ,
+    names: var seq[string]) =
+  ## Collects the aliases a structural alias needs resolved first.
+  if t.isNil:
     return
-  if name in visiting:
-    err(0, "recursive type alias: '" & name & "'")
-  visiting.add name
-  let aliases = p.aliases
-  proc dependencies(t: Typ): seq[string] =
-    if t.isNil:
-      return
-    if t.name in aliases:
-      return @[t.name]
-    if t.kind notin {ObjectType, UnionType}:
-      result.add dependencies(t.elem)
-      result.add dependencies(t.val)
-  for dependency in dependencies(p.aliases[name]):
-    p.resolveAlias(dependency, visiting, finished)
-  for optional in p.optionals:
-    if optional.source.kind in {IntType, ObjectType, UnionType, StringType, OpaqueType}:
-      optional.target[] = optional.source[]
-      optional.target.opt = true
-  p.types[name][] = p.aliases[name][]
-  discard visiting.pop()
-  finished.add name
+  if t.name in aliases:
+    names.add t.name
+    return
+  if t.kind notin {ObjectType, UnionType}:
+    aliasDependencies(aliases, t.elem, names)
+    aliasDependencies(aliases, t.val, names)
+
+proc refreshOptional(optional: tuple[source, target: Typ]) =
+  ## Copies a finished source into its optional view.
+  if optional.source.kind in {IntType, ObjectType, UnionType, StringType,
+      OpaqueType}:
+    optional.target[] = optional.source[]
+    optional.target.opt = true
+
+proc resolveAliases(p: var Parser) =
+  ## Resolves structural aliases without recursion or table copies.
+  ## Rejects recursive alias graphs.
+  var
+    states: Table[string, int]
+    bySource: Table[pointer, seq[int]]
+  for i, optional in p.optionals:
+    refreshOptional(optional)
+    bySource.mgetOrPut(cast[pointer](optional.source), @[]).add i
+  for root in p.aliases.keys.toSeq:
+    if states.getOrDefault(root) != 0:
+      continue
+    var
+      first: seq[string]
+      stack: seq[tuple[name: string, deps: seq[string], next: int]]
+    aliasDependencies(p.aliases, p.aliases[root], first)
+    states[root] = 1
+    stack.add (root, first, 0)
+    while stack.len > 0:
+      let top = stack.high
+      if stack[top].next < stack[top].deps.len:
+        let name = stack[top].deps[stack[top].next]
+        inc stack[top].next
+        case states.getOrDefault(name)
+        of 0:
+          var deps: seq[string]
+          aliasDependencies(p.aliases, p.aliases[name], deps)
+          states[name] = 1
+          stack.add (name, deps, 0)
+        of 1:
+          err(0, "recursive type alias: '" & name & "'")
+        else:
+          discard
+      else:
+        let name = stack[top].name
+        p.types[name][] = p.aliases[name][]
+        # Optional views of this alias now see its final shape.
+        for i in bySource.getOrDefault(cast[pointer](p.types[name])):
+          refreshOptional(p.optionals[i])
+        states[name] = 2
+        stack.setLen(top)
+
+proc checkTypeShape(root: Typ, line: int,
+    shapes: var Table[pointer, tuple[height, nodes: int]]) =
+  ## Bounds type height and unfolded size before recursive passes run.
+  ## Uses an explicit stack, and growable cycles count once.
+  if root.isNil or cast[pointer](root) in shapes:
+    return
+  var
+    active: HashSet[pointer]
+    stack: seq[tuple[t: Typ, kids: seq[Typ], next: int]]
+  proc kidsOf(t: Typ): seq[Typ] =
+    ## Lists the types nested directly inside one type.
+    for kid in [t.elem, t.val]:
+      if not kid.isNil:
+        result.add kid
+    for field in t.fields:
+      if not field.typ.isNil:
+        result.add field.typ
+    for member in t.members:
+      if not member.isNil:
+        result.add member
+  active.incl cast[pointer](root)
+  stack.add (root, kidsOf(root), 0)
+  while stack.len > 0:
+    if stack.len > MaxNesting:
+      err(line, "type nesting is too deep (limit " & $MaxNesting & ")")
+    let top = stack.high
+    if stack[top].next < stack[top].kids.len:
+      let kid = stack[top].kids[stack[top].next]
+      inc stack[top].next
+      let key = cast[pointer](kid)
+      if key notin shapes and key notin active:
+        active.incl key
+        stack.add (kid, kidsOf(kid), 0)
+    else:
+      var height, nodes: int
+      for kid in stack[top].kids:
+        let key = cast[pointer](kid)
+        if key in shapes:
+          height = max(height, shapes[key].height)
+          nodes = min(nodes + shapes[key].nodes, MaxTypeNodes + 1)
+        else:
+          nodes = min(nodes + 1, MaxTypeNodes + 1)
+      inc height
+      inc nodes
+      if height > MaxNesting:
+        err(line, "type nesting is too deep (limit " & $MaxNesting & ")")
+      if nodes > MaxTypeNodes:
+        err(line, "type is too large (limit " & $MaxTypeNodes & " nodes)")
+      let key = cast[pointer](stack[top].t)
+      shapes[key] = (height, nodes)
+      active.excl key
+      stack.setLen(top)
 
 proc finishTypes(p: var Parser, m: Module) =
   ## Resolve aliases before checking nominal members and finite layouts.
-  var visiting: seq[string]
-  var finished: seq[string]
-  let names = p.aliases.keys.toSeq
-  for name in names:
-    p.resolveAlias(name, visiting, finished)
+  p.resolveAliases()
   for optional in p.optionals:
     if optional.source.kind notin {IntType, ObjectType, UnionType, StringType, OpaqueType}:
       err(0, "only ints, objects, unions, strings, and opaque handles can be optional")
     optional.target[] = optional.source[]
     optional.target.opt = true
+  # Later passes walk types recursively, often without memoization.
+  var shapes: Table[pointer, tuple[height, nodes: int]]
+  for definition in m.types:
+    checkTypeShape(definition.typ, definition.line, shapes)
+  for pending in p.pendingSizes:
+    checkTypeShape(pending.typ, pending.line, shapes)
   for definition in m.types:
     let typ = definition.typ
     if typ.kind == UnionType:
@@ -992,9 +1133,11 @@ proc finishTypes(p: var Parser, m: Module) =
 
 proc parse*(toks: seq[Token]): Module =
   ## Parse a token stream into a Module AST.
-  var p = Parser(toks: toks)
+  var p = Parser(toks: toks, scope: SymbolScope())
   p.predeclare()
   result = p.parseModule()
+  # Type names are fixed by predeclare, so generics share the final table.
+  p.scope.types = p.types
   p.finishTypes(result)
   result.files.add(srcFiles)
   if toks.len > 0:

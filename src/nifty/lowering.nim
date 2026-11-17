@@ -1,5 +1,5 @@
 ## Lowers checked Nifty syntax to explicit native SSA and storage.
-import std/[tables, sets]
+import std/tables
 import types, common, semantics, nativeplans, nativeirtypes, nativecontainers,
   echolowering, backend/irs
 
@@ -1247,20 +1247,39 @@ proc lowerNative*(checked: Module, filename = "",
     for patch in g.patches:
       g.plan.module.functions[fn].instructions[patch].offset =
         int64(g.frames[fn])
-  var totals = newSeq[int](g.frames.len)
-  var visiting = initHashSet[int]()
-  proc total(fn: int): int =
+  var
+    totals = newSeq[int](g.frames.len)
+    states = newSeq[uint8](g.frames.len)
+  proc total(root: int): int =
     ## Computes the maximum arena path through the acyclic call graph.
-    if fn in visiting:
-      raise newException(NiftyError,
-        "Internal compiler error: recursive native arena call graph")
-    if totals[fn] > 0: return totals[fn]
-    visiting.incl(fn)
-    var child = 0
-    for callee in g.calls[fn]: child = max(child, total(callee))
-    visiting.excl(fn)
-    result = int(sizeAdd(g.frames[fn], child))
-    totals[fn] = result
+    ## An explicit stack keeps long call chains off the host stack.
+    if states[root] == 0:
+      var stack = @[(fn: root, next: 0)]
+      states[root] = 1
+      while stack.len > 0:
+        let
+          top = stack.len - 1
+          fn = stack[top].fn
+        if stack[top].next < g.calls[fn].len:
+          let callee = g.calls[fn][stack[top].next]
+          inc stack[top].next
+          case states[callee]
+          of 0:
+            states[callee] = 1
+            stack.add (fn: callee, next: 0)
+          of 1:
+            raise newException(NiftyError,
+              "Internal compiler error: recursive native arena call graph")
+          else:
+            discard
+        else:
+          var child = 0
+          for callee in g.calls[fn]:
+            child = max(child, totals[callee])
+          totals[fn] = int(sizeAdd(g.frames[fn], child))
+          states[fn] = 2
+          stack.setLen(top)
+    totals[root]
   for i, r in source.routines:
     if r.kind == ThreadRoutine:
       g.plan.threads.add(ThreadPlan(name: r.name, count: r.instances,

@@ -57,6 +57,8 @@ type
     moduleViews: Table[string, string] # Scoped overload views -> source spelling.
 
 const
+  MaxInstances* = 1024
+    ## Generic instances per program; nested generics can double per level.
   IntLow = low(int64)
   IntHigh = high(int64)
 
@@ -3744,18 +3746,32 @@ proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string =
     mangled.add "_"
   # Only substituted type tokens see these fresh aliases. An undefined type
   # written in the generic body must never bind to a caller's declaration.
-  var instanceTypes = gr.typesSnap
-  var nominalAliases: Table[string, string]
-  var occupied: HashSet[string]
+  if c.instCache.len >= MaxInstances:
+    err(e.line, "too many generic instances (limit " & $MaxInstances & ")")
+  # Copy only the names this generic's own tokens use, so the cost of an
+  # instance follows its size, not the size of the whole module.
+  var
+    instanceTypes: Table[string, Typ]
+    instanceConsts: Table[string, int64]
+    nominalAliases: Table[string, string]
+    occupied: HashSet[string]
   for token in gr.toks:
-    if token.kind == IdentToken: occupied.incl token.text
-  for name in instanceTypes.keys: occupied.incl name
+    if token.kind != IdentToken:
+      continue
+    occupied.incl token.text
+    if gr.scope != nil:
+      if token.text in gr.scope.types:
+        instanceTypes[token.text] = gr.scope.types[token.text]
+      if token.text in gr.scope.order and
+          gr.scope.order[token.text] < gr.constCount:
+        instanceConsts[token.text] = gr.scope.consts[token.text]
   var aliasSerial = 0
   proc bindType(typ: Typ) =
     if typ == nil: return
     if typ.kind in {ObjectType, OpaqueType} and typ.name notin nominalAliases:
       var alias = ""
-      while alias.len == 0 or alias in occupied:
+      while alias.len == 0 or alias in occupied or
+          (gr.scope != nil and alias in gr.scope.types):
         inc aliasSerial
         alias = "niftyGenericType" & $aliasSerial
       occupied.incl alias
@@ -3812,7 +3828,7 @@ proc instantiate(c: var Ctx, e: Expr, ats: seq[Typ]): string =
       toks.add tk
       inc i
   toks.add Token(kind: EofToken, line: gr.toks[^1].line)
-  let inst = parseInstance(toks, gr.constsSnap, instanceTypes)
+  let inst = parseInstance(toks, instanceConsts, instanceTypes)
   c.allRoutines.incl mangled
   c.routineTab[mangled] = inst
   c.routineAccess[mangled] = initHashSet[string]()
@@ -4377,7 +4393,9 @@ proc check*(m: Module) =
             "remove it")
         err(gd.line, "global '" & gd.name & "' is only used by thread '" &
           rn & "'; declare it inside the thread")
-      if rr.kind == ProcRoutine and gd.typ.kind != LockType:
+      # The embedding observer only reads, so it never overwrites first.
+      if rr.kind == ProcRoutine and not rr.observer and
+          gd.typ.kind != LockType:
         var w = false
         if not mayReadFirst(rr.body, gd.name, w):
           err(gd.line, "global '" & gd.name & "' is only used by '" & rn &

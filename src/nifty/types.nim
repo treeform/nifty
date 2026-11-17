@@ -132,6 +132,12 @@ type
     isVar*: bool
     boundedBy*: string # Foreign buffer's named element or byte count.
     binding*: BindingId
+  SymbolScope* = ref object
+    ## Module consts and types, shared by every generic in the module.
+    ## A generic sees the consts declared before it, by order.
+    consts*: Table[string, int64]
+    order*: Table[string, int]
+    types*: Table[string, Typ]
   Routine* = ref object
     kind*: RoutineKind
     name*: string
@@ -148,10 +154,11 @@ type
     cname*: string             # extern routines: the C symbol, if renamed
     hostBinding*: bool        # Set by the Nim embedding API, never by source.
     unionDispatcher*: bool    # Synthesized exhaustive union overload.
+    observer*: bool           # Embedding API reader of every global.
     generic*: bool             # has $ variables; body kept as tokens
     toks*: seq[Token]          # generic only: the whole declaration
-    constsSnap*: Table[string, int64] # consts visible at declaration
-    typesSnap*: Table[string, Typ]    # object types visible at declaration
+    scope*: SymbolScope        # generic only: module names, shared
+    constCount*: int           # generic only: consts declared before it
 
   ConstDef* = object
     name*: string
@@ -278,16 +285,23 @@ proc sizeAlign*(bytes, alignment: int64, line = 0): int64 =
 
 proc typeLayout(t: Typ, line = 0): tuple[bytes, alignment: int64] =
   ## Computes finite inline layouts while allowing growable indirection.
-  var visiting: HashSet[pointer]
+  var
+    visiting: HashSet[pointer]
+    done: Table[pointer, tuple[bytes, alignment: int64]]
   proc layout(current: Typ): tuple[bytes, alignment: int64] =
     ## Rejects only cycles that require infinitely large inline storage.
     if current.isNil:
       return (0'i64, 1'i64)
     let key = cast[pointer](current)
+    # Shared subtypes are measured once, so diamond shapes stay linear.
+    if key in done:
+      return done[key]
     if key in visiting:
       err(line, "recursive type requires a growable seq indirection")
     visiting.incl(key)
-    defer: visiting.excl(key)
+    defer:
+      visiting.excl(key)
+      done[key] = result
     if current.opt:
       let base = layout(deOpt(current))
       return (sizeAlign(sizeAdd(base.bytes, 1, line),
